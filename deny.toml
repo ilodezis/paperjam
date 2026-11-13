@@ -1,0 +1,66 @@
+# cargo-deny policy: advisories, licenses, bans, sources.
+#
+# Policy: the project is AGPL-3.0-or-later; linked dependencies must be
+# MIT/Apache/BSD/ISC/Zlib/MPL-compatible (all AGPL-compatible). No GPL code is linked.
+#
+# libheif (LGPL) is the one allowed exception, and it is not a crate in this
+# graph: the optional `heic` feature links the system libheif dynamically
+# through the MIT-licensed `libheif-rs` binding, so no entry is needed here.
+
+[graph]
+all-features = true
+
+[advisories]
+# RUSTSEC-2026-0192: ttf-parser is unmaintained (no vulnerability). It is a
+# bounds-checked, safe-Rust font reader pulled in by the PDF and font crates
+# (pdf_oxide, krilla); revisit when they move to a maintained parser.
+#
+# RUSTSEC-2023-0071: the `rsa` crate leaks timing during private-key
+# operations (Marvin attack); no patched release exists. It comes in through
+# webauthn-rs (crypto-glue), where paperjam only *verifies* RS256 passkey
+# signatures with authenticators' public keys and never holds an RSA private
+# key, so there is nothing for the timing to reveal. Revisit when `rsa` ships a
+# constant-time release.
+#
+# RUSTSEC-2026-0459: bundled SQLite before 3.54.0 can return uninitialized
+# memory when it opens a database together with a crafted `-wal` file. The fix
+# is libsqlite3-sys 0.39, but sqlx-sqlite 0.9.0 (the latest sqlx) requires
+# libsqlite3-sys < 0.38, so there is no compatible upgrade yet. paperjam only
+# opens its own database in the data directory; `restore` copies the database
+# file alone and deletes any existing `-wal`/`-shm` first, so no outside party
+# can supply the WAL. Drop this once sqlx accepts libsqlite3-sys >= 0.39.
+ignore = ["RUSTSEC-2026-0192", "RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]
+
+[licenses]
+unused-allowed-license = "allow"
+allow = [
+    "AGPL-3.0-or-later",
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    # The Mozilla CA bundle shipped by webpki-root-certs (via reqwest/rustls).
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

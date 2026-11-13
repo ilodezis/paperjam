@@ -1,0 +1,1555 @@
+[
+  {
+    "key": "passport",
+    "labels": {
+      "en": "Internal Passport",
+      "ru": "Паспорт"
+    },
+    "fields": [
+      {
+        "key": "series",
+        "labels": {
+          "en": "Series",
+          "ru": "Серия"
+        },
+        "kind": "identifier",
+        "required": false
+      },
+      {
+        "key": "number",
+        "labels": {
+          "en": "Number",
+          "ru": "Номер"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "issuing_authority",
+        "labels": {
+          "en": "Issuing Authority",
+          "ru": "Орган, выдавший документ"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "expiry_date",
+        "labels": {
+          "en": "Expiry Date",
+          "ru": "Срок действия до"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "personal_number",
+        "labels": {
+          "en": "Personal Number",
+          "ru": "Личный номер"
+        },
+        "kind": "identifier",
+        "validator": "personal_number",
+        "required": false
+      },
+      {
+        "key": "surname",
+        "labels": {
+          "en": "Surname",
+          "ru": "Фамилия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "given_names",
+        "labels": {
+          "en": "Given Names",
+          "ru": "Имя"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "birth_date",
+        "labels": {
+          "en": "Date of Birth",
+          "ru": "Дата рождения"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "birth_place",
+        "labels": {
+          "en": "Place of Birth",
+          "ru": "Место рождения"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "nationality",
+        "labels": {
+          "en": "Nationality",
+          "ru": "Гражданство"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "sex",
+        "labels": {
+          "en": "Sex",
+          "ru": "Пол"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "series",
+      "number",
+      "expiry_date"
+    ]
+  },
+  {
+    "key": "travel_passport",
+    "labels": {
+      "en": "Passport",
+      "ru": "Загранпаспорт"
+    },
+    "fields": [
+      {
+        "key": "number",
+        "labels": {
+          "en": "Number",
+          "ru": "Номер"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "issuing_authority",
+        "labels": {
+          "en": "Issuing Authority",
+          "ru": "Орган, выдавший документ"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "expiry_date",
+        "labels": {
+          "en": "Expiry Date",
+          "ru": "Срок действия до"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "personal_number",
+        "labels": {
+          "en": "Personal Number",
+          "ru": "Личный номер"
+        },
+        "kind": "identifier",
+        "validator": "personal_number",
+        "required": false
+      },
+      {
+        "key": "surname",
+        "labels": {
+          "en": "Surname",
+          "ru": "Фамилия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "given_names",
+        "labels": {
+          "en": "Given Names",
+          "ru": "Имя"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "birth_date",
+        "labels": {
+          "en": "Date of Birth",
+          "ru": "Дата рождения"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "birth_place",
+        "labels": {
+          "en": "Place of Birth",
+          "ru": "Место рождения"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "nationality",
+        "labels": {
+          "en": "Nationality",
+          "ru": "Гражданство"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "sex",
+        "labels": {
+          "en": "Sex",
+          "ru": "Пол"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "number",
+      "expiry_date"
+    ]
+  },
+  {
+    "key": "id_card",
+    "labels": {
+      "en": "ID Card",
+      "ru": "Удостоверение личности"
+    },
+    "fields": [
+      {
+        "key": "number",
+        "labels": {
+          "en": "Number",
+          "ru": "Номер"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "personal_number",
+        "labels": {
+          "en": "Personal Number",
+          "ru": "Личный номер"
+        },
+        "kind": "identifier",
+        "validator": "personal_number",
+        "required": false
+      },
+      {
+        "key": "surname",
+        "labels": {
+          "en": "Surname",
+          "ru": "Фамилия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "given_names",
+        "labels": {
+          "en": "Given Names",
+          "ru": "Имя"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "birth_date",
+        "labels": {
+          "en": "Date of Birth",
+          "ru": "Дата рождения"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "birth_place",
+        "labels": {
+          "en": "Place of Birth",
+          "ru": "Место рождения"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "nationality",
+        "labels": {
+          "en": "Nationality",
+          "ru": "Гражданство"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "sex",
+        "labels": {
+          "en": "Sex",
+          "ru": "Пол"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "issuing_authority",
+        "labels": {
+          "en": "Issuing Authority",
+          "ru": "Орган, выдавший документ"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "expiry_date",
+        "labels": {
+          "en": "Expiry Date",
+          "ru": "Срок действия до"
+        },
+        "kind": "date",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "number",
+      "expiry_date"
+    ]
+  },
+  {
+    "key": "residence_permit",
+    "labels": {
+      "en": "Residence Permit",
+      "ru": "Вид на жительство"
+    },
+    "fields": [
+      {
+        "key": "number",
+        "labels": {
+          "en": "Number",
+          "ru": "Номер"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "permit_type",
+        "labels": {
+          "en": "Permit Type",
+          "ru": "Тип разрешения"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "issuing_authority",
+        "labels": {
+          "en": "Issuing Authority",
+          "ru": "Орган, выдавший документ"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "expiry_date",
+        "labels": {
+          "en": "Expiry Date",
+          "ru": "Срок действия до"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "personal_number",
+        "labels": {
+          "en": "Personal Number",
+          "ru": "Личный номер"
+        },
+        "kind": "identifier",
+        "validator": "personal_number",
+        "required": false
+      },
+      {
+        "key": "surname",
+        "labels": {
+          "en": "Surname",
+          "ru": "Фамилия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "given_names",
+        "labels": {
+          "en": "Given Names",
+          "ru": "Имя"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "birth_date",
+        "labels": {
+          "en": "Date of Birth",
+          "ru": "Дата рождения"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "nationality",
+        "labels": {
+          "en": "Nationality",
+          "ru": "Гражданство"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "sex",
+        "labels": {
+          "en": "Sex",
+          "ru": "Пол"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "address",
+        "labels": {
+          "en": "Address",
+          "ru": "Адрес регистрации"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "number",
+      "expiry_date"
+    ]
+  },
+  {
+    "key": "driver_license",
+    "labels": {
+      "en": "Driver's License",
+      "ru": "Водительское удостоверение"
+    },
+    "fields": [
+      {
+        "key": "number",
+        "labels": {
+          "en": "License Number",
+          "ru": "Номер удостоверения"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "categories",
+        "labels": {
+          "en": "Categories",
+          "ru": "Категории"
+        },
+        "kind": "list",
+        "required": false
+      },
+      {
+        "key": "issuing_authority",
+        "labels": {
+          "en": "Issuing Authority",
+          "ru": "Орган, выдавший документ"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "expiry_date",
+        "labels": {
+          "en": "Expiry Date",
+          "ru": "Срок действия до"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "surname",
+        "labels": {
+          "en": "Surname",
+          "ru": "Фамилия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "given_names",
+        "labels": {
+          "en": "Given Names",
+          "ru": "Имя"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "birth_date",
+        "labels": {
+          "en": "Date of Birth",
+          "ru": "Дата рождения"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "personal_number",
+        "labels": {
+          "en": "Personal Number",
+          "ru": "Личный номер"
+        },
+        "kind": "identifier",
+        "validator": "personal_number",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "number",
+      "categories",
+      "expiry_date"
+    ]
+  },
+  {
+    "key": "birth_certificate",
+    "labels": {
+      "en": "Birth Certificate",
+      "ru": "Свидетельство о рождении"
+    },
+    "fields": [
+      {
+        "key": "certificate_number",
+        "labels": {
+          "en": "Certificate Number",
+          "ru": "Номер свидетельства"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "surname",
+        "labels": {
+          "en": "Surname",
+          "ru": "Фамилия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "given_names",
+        "labels": {
+          "en": "Given Names",
+          "ru": "Имя"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "birth_date",
+        "labels": {
+          "en": "Date of Birth",
+          "ru": "Дата рождения"
+        },
+        "kind": "date",
+        "required": true
+      },
+      {
+        "key": "birth_place",
+        "labels": {
+          "en": "Place of Birth",
+          "ru": "Место рождения"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "father",
+        "labels": {
+          "en": "Father",
+          "ru": "Отец"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "mother",
+        "labels": {
+          "en": "Mother",
+          "ru": "Мать"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "registry_office",
+        "labels": {
+          "en": "Registry Office",
+          "ru": "Орган ЗАГС"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "certificate_number",
+      "birth_date"
+    ]
+  },
+  {
+    "key": "marriage_certificate",
+    "labels": {
+      "en": "Marriage Certificate",
+      "ru": "Свидетельство о заключении брака"
+    },
+    "fields": [
+      {
+        "key": "certificate_number",
+        "labels": {
+          "en": "Certificate Number",
+          "ru": "Номер свидетельства"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "spouses",
+        "labels": {
+          "en": "Spouses",
+          "ru": "Супруги"
+        },
+        "kind": "list",
+        "required": false
+      },
+      {
+        "key": "marriage_date",
+        "labels": {
+          "en": "Marriage Date",
+          "ru": "Дата заключения брака"
+        },
+        "kind": "date",
+        "required": true
+      },
+      {
+        "key": "registry_office",
+        "labels": {
+          "en": "Registry Office",
+          "ru": "Орган ЗАГС"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "certificate_number",
+      "marriage_date"
+    ]
+  },
+  {
+    "key": "diploma",
+    "labels": {
+      "en": "Diploma",
+      "ru": "Диплом"
+    },
+    "fields": [
+      {
+        "key": "certificate_number",
+        "labels": {
+          "en": "Diploma Number",
+          "ru": "Номер диплома"
+        },
+        "kind": "identifier",
+        "required": false
+      },
+      {
+        "key": "holder",
+        "labels": {
+          "en": "Holder",
+          "ru": "Обладатель"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "institution",
+        "labels": {
+          "en": "Institution",
+          "ru": "Учебное заведение"
+        },
+        "kind": "text",
+        "required": true,
+        "issuer": true
+      },
+      {
+        "key": "qualification",
+        "labels": {
+          "en": "Qualification",
+          "ru": "Квалификация"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "holder",
+      "institution",
+      "issue_date"
+    ]
+  },
+  {
+    "key": "contract",
+    "labels": {
+      "en": "Contract",
+      "ru": "Договор"
+    },
+    "fields": [
+      {
+        "key": "parties",
+        "labels": {
+          "en": "Parties",
+          "ru": "Стороны"
+        },
+        "kind": "list",
+        "required": true
+      },
+      {
+        "key": "subject",
+        "labels": {
+          "en": "Subject",
+          "ru": "Предмет договора"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "signed_date",
+        "labels": {
+          "en": "Signed Date",
+          "ru": "Дата подписания"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "start_date",
+        "labels": {
+          "en": "Start Date",
+          "ru": "Дата начала"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "end_date",
+        "labels": {
+          "en": "End Date",
+          "ru": "Дата окончания"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "amount",
+        "labels": {
+          "en": "Amount",
+          "ru": "Сумма"
+        },
+        "kind": "money",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "parties",
+      "end_date",
+      "amount"
+    ]
+  },
+  {
+    "key": "rental_agreement",
+    "labels": {
+      "en": "Rental Agreement",
+      "ru": "Договор аренды"
+    },
+    "fields": [
+      {
+        "key": "parties",
+        "labels": {
+          "en": "Parties",
+          "ru": "Стороны"
+        },
+        "kind": "list",
+        "required": true
+      },
+      {
+        "key": "subject",
+        "labels": {
+          "en": "Subject",
+          "ru": "Предмет договора"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "signed_date",
+        "labels": {
+          "en": "Signed Date",
+          "ru": "Дата подписания"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "start_date",
+        "labels": {
+          "en": "Start Date",
+          "ru": "Дата начала аренды"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "end_date",
+        "labels": {
+          "en": "End Date",
+          "ru": "Дата окончания аренды"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "amount",
+        "labels": {
+          "en": "Rent Amount",
+          "ru": "Арендная плата"
+        },
+        "kind": "money",
+        "required": false
+      },
+      {
+        "key": "property_address",
+        "labels": {
+          "en": "Property Address",
+          "ru": "Адрес недвижимости"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "deposit",
+        "labels": {
+          "en": "Deposit",
+          "ru": "Депозит"
+        },
+        "kind": "money",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "property_address",
+      "end_date",
+      "amount"
+    ]
+  },
+  {
+    "key": "insurance_policy",
+    "labels": {
+      "en": "Insurance Policy",
+      "ru": "Страховой полис"
+    },
+    "fields": [
+      {
+        "key": "policy_number",
+        "labels": {
+          "en": "Policy Number",
+          "ru": "Номер полиса"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "insurer",
+        "labels": {
+          "en": "Insurer",
+          "ru": "Страховщик"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "insured",
+        "labels": {
+          "en": "Insured",
+          "ru": "Застрахованные лица"
+        },
+        "kind": "list",
+        "required": false
+      },
+      {
+        "key": "start_date",
+        "labels": {
+          "en": "Start Date",
+          "ru": "Дата начала"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "end_date",
+        "labels": {
+          "en": "End Date",
+          "ru": "Дата окончания"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "premium",
+        "labels": {
+          "en": "Premium",
+          "ru": "Страховая премия"
+        },
+        "kind": "money",
+        "required": false
+      },
+      {
+        "key": "coverage",
+        "labels": {
+          "en": "Coverage",
+          "ru": "Страховое покрытие"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "policy_number",
+      "insurer",
+      "end_date"
+    ]
+  },
+  {
+    "key": "bank_statement",
+    "labels": {
+      "en": "Bank Statement",
+      "ru": "Банковская выписка"
+    },
+    "fields": [
+      {
+        "key": "bank",
+        "labels": {
+          "en": "Bank",
+          "ru": "Банк"
+        },
+        "kind": "text",
+        "required": true,
+        "issuer": true
+      },
+      {
+        "key": "account_number",
+        "labels": {
+          "en": "Account Number",
+          "ru": "Номер банковского счёта"
+        },
+        "kind": "identifier",
+        "validator": "iban",
+        "required": false
+      },
+      {
+        "key": "period_start",
+        "labels": {
+          "en": "Period Start",
+          "ru": "Начало периода"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "period_end",
+        "labels": {
+          "en": "Period End",
+          "ru": "Конец периода"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "opening_balance",
+        "labels": {
+          "en": "Opening Balance",
+          "ru": "Начальный остаток"
+        },
+        "kind": "money",
+        "required": false
+      },
+      {
+        "key": "closing_balance",
+        "labels": {
+          "en": "Closing Balance",
+          "ru": "Конечный остаток"
+        },
+        "kind": "money",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "bank",
+      "period_end",
+      "closing_balance"
+    ]
+  },
+  {
+    "key": "payment_confirmation",
+    "labels": {
+      "en": "Payment Confirmation",
+      "ru": "Подтверждение оплаты"
+    },
+    "fields": [
+      {
+        "key": "payer",
+        "labels": {
+          "en": "Payer",
+          "ru": "Плательщик"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "payee",
+        "labels": {
+          "en": "Payee",
+          "ru": "Получатель"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "amount",
+        "labels": {
+          "en": "Amount",
+          "ru": "Сумма"
+        },
+        "kind": "money",
+        "required": true
+      },
+      {
+        "key": "payment_date",
+        "labels": {
+          "en": "Payment Date",
+          "ru": "Дата платежа"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "reference",
+        "labels": {
+          "en": "Reference",
+          "ru": "Назначение платежа"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "payee",
+      "amount",
+      "payment_date"
+    ]
+  },
+  {
+    "key": "invoice",
+    "labels": {
+      "en": "Invoice",
+      "ru": "Счёт на оплату"
+    },
+    "fields": [
+      {
+        "key": "invoice_number",
+        "labels": {
+          "en": "Invoice Number",
+          "ru": "Номер счёта на оплату"
+        },
+        "kind": "identifier",
+        "required": true
+      },
+      {
+        "key": "issuer",
+        "labels": {
+          "en": "Issuer",
+          "ru": "Поставщик"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выставления"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "due_date",
+        "labels": {
+          "en": "Due Date",
+          "ru": "Срок оплаты"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "total",
+        "labels": {
+          "en": "Total",
+          "ru": "Итоговая сумма"
+        },
+        "kind": "money",
+        "required": true
+      },
+      {
+        "key": "vat",
+        "labels": {
+          "en": "VAT",
+          "ru": "НДС"
+        },
+        "kind": "money",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "invoice_number",
+      "issuer",
+      "due_date",
+      "total"
+    ]
+  },
+  {
+    "key": "receipt",
+    "labels": {
+      "en": "Receipt",
+      "ru": "Чек"
+    },
+    "fields": [
+      {
+        "key": "merchant",
+        "labels": {
+          "en": "Merchant",
+          "ru": "Продавец"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "total",
+        "labels": {
+          "en": "Total",
+          "ru": "Сумма"
+        },
+        "kind": "money",
+        "required": true
+      },
+      {
+        "key": "purchase_date",
+        "labels": {
+          "en": "Purchase Date",
+          "ru": "Дата покупки"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "items",
+        "labels": {
+          "en": "Items",
+          "ru": "Позиции"
+        },
+        "kind": "list",
+        "required": false
+      },
+      {
+        "key": "payment_method",
+        "labels": {
+          "en": "Payment Method",
+          "ru": "Способ оплаты"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "merchant",
+      "purchase_date",
+      "total"
+    ]
+  },
+  {
+    "key": "warranty",
+    "labels": {
+      "en": "Warranty",
+      "ru": "Гарантийный талон"
+    },
+    "fields": [
+      {
+        "key": "product",
+        "labels": {
+          "en": "Product",
+          "ru": "Товар"
+        },
+        "kind": "text",
+        "required": true
+      },
+      {
+        "key": "merchant",
+        "labels": {
+          "en": "Merchant",
+          "ru": "Продавец"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "serial_number",
+        "labels": {
+          "en": "Serial Number",
+          "ru": "Серийный номер"
+        },
+        "kind": "identifier",
+        "required": false
+      },
+      {
+        "key": "purchase_date",
+        "labels": {
+          "en": "Purchase Date",
+          "ru": "Дата покупки"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "warranty_end_date",
+        "labels": {
+          "en": "Warranty End Date",
+          "ru": "Окончание гарантии"
+        },
+        "kind": "date",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "product",
+      "merchant",
+      "warranty_end_date"
+    ]
+  },
+  {
+    "key": "medical_document",
+    "labels": {
+      "en": "Medical Document",
+      "ru": "Медицинский документ"
+    },
+    "fields": [
+      {
+        "key": "clinic",
+        "labels": {
+          "en": "Clinic",
+          "ru": "Клиника"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "doctor",
+        "labels": {
+          "en": "Doctor",
+          "ru": "Врач"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "visit_date",
+        "labels": {
+          "en": "Visit Date",
+          "ru": "Дата приёма"
+        },
+        "kind": "date",
+        "required": true
+      },
+      {
+        "key": "diagnosis_or_summary",
+        "labels": {
+          "en": "Diagnosis / Summary",
+          "ru": "Диагноз или заключение"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "clinic",
+      "visit_date"
+    ]
+  },
+  {
+    "key": "tax_document",
+    "labels": {
+      "en": "Tax Document",
+      "ru": "Налоговый документ"
+    },
+    "fields": [
+      {
+        "key": "tax_authority",
+        "labels": {
+          "en": "Tax Authority",
+          "ru": "Налоговый орган"
+        },
+        "kind": "text",
+        "required": true,
+        "issuer": true
+      },
+      {
+        "key": "tax_year",
+        "labels": {
+          "en": "Tax Year",
+          "ru": "Налоговый год"
+        },
+        "kind": "number",
+        "required": false
+      },
+      {
+        "key": "document_number",
+        "labels": {
+          "en": "Document Number",
+          "ru": "Номер документа"
+        },
+        "kind": "identifier",
+        "required": false
+      },
+      {
+        "key": "amount",
+        "labels": {
+          "en": "Amount",
+          "ru": "Сумма"
+        },
+        "kind": "money",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "tax_authority",
+      "tax_year",
+      "amount"
+    ]
+  },
+  {
+    "key": "certificate_other",
+    "labels": {
+      "en": "Other Certificate",
+      "ru": "Иная справка или свидетельство"
+    },
+    "fields": [
+      {
+        "key": "issuer",
+        "labels": {
+          "en": "Issuer",
+          "ru": "Кем выдан"
+        },
+        "kind": "text",
+        "required": true,
+        "issuer": true
+      },
+      {
+        "key": "subject",
+        "labels": {
+          "en": "Subject",
+          "ru": "Предмет или содержание"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "certificate_number",
+        "labels": {
+          "en": "Certificate Number",
+          "ru": "Номер документа"
+        },
+        "kind": "identifier",
+        "required": false
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "expiry_date",
+        "labels": {
+          "en": "Expiry Date",
+          "ru": "Срок действия до"
+        },
+        "kind": "date",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "issuer",
+      "issue_date",
+      "expiry_date"
+    ]
+  },
+  {
+    "key": "letter",
+    "labels": {
+      "en": "Letter",
+      "ru": "Письмо"
+    },
+    "fields": [
+      {
+        "key": "sender",
+        "labels": {
+          "en": "Sender",
+          "ru": "Отправитель"
+        },
+        "kind": "text",
+        "required": true
+      },
+      {
+        "key": "recipient",
+        "labels": {
+          "en": "Recipient",
+          "ru": "Получатель"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "letter_date",
+        "labels": {
+          "en": "Letter Date",
+          "ru": "Дата письма"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "subject",
+        "labels": {
+          "en": "Subject",
+          "ru": "Тема письма"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "sender",
+      "letter_date",
+      "subject"
+    ]
+  },
+  {
+    "key": "other",
+    "labels": {
+      "en": "Other",
+      "ru": "Другое"
+    },
+    "fields": []
+  }
+]

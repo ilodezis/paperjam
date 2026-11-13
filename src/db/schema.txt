@@ -1,0 +1,300 @@
+CREATE TABLE api_tokens (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    prefix       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+
+CREATE TABLE calendar_feeds (
+    user_id      TEXT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    secret_hash  TEXT NOT NULL UNIQUE,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT
+);
+
+CREATE TABLE correspondents (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    aliases    TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE document_organizations (
+  document_id      TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+  correspondent_id TEXT NOT NULL REFERENCES correspondents (id) ON DELETE CASCADE,
+  role             TEXT NOT NULL DEFAULT 'unspecified'
+                   CHECK (role IN ('issued_by','received_from','party','employer','unspecified')),
+  provenance       TEXT NOT NULL CHECK (provenance IN ('llm','mrz','manual','local')),
+  PRIMARY KEY (document_id, correspondent_id, role)
+);
+
+CREATE INDEX document_organizations_correspondent ON document_organizations (correspondent_id);
+
+CREATE TABLE document_people (
+    document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    person_id   TEXT NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+    provenance  TEXT NOT NULL CHECK (provenance IN ('llm', 'mrz', 'manual', 'local')),
+    PRIMARY KEY (document_id, person_id)
+);
+
+CREATE INDEX document_people_person ON document_people (person_id);
+
+CREATE TABLE document_tags (
+    document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    tag_id      TEXT NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
+    provenance  TEXT NOT NULL CHECK (provenance IN ('llm', 'mrz', 'manual', 'local')),
+    PRIMARY KEY (document_id, tag_id)
+);
+
+CREATE INDEX document_tags_tag ON document_tags (tag_id);
+
+CREATE TABLE document_types (
+    id         TEXT PRIMARY KEY,
+    key        TEXT NOT NULL UNIQUE,
+    labels     TEXT NOT NULL,
+    fields     TEXT NOT NULL DEFAULT '[]',
+    builtin    INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+, summary_fields TEXT);
+
+CREATE TABLE documents (
+    id                      TEXT PRIMARY KEY,
+    title                   TEXT,
+    title_provenance        TEXT CHECK (title_provenance IN ('llm', 'mrz', 'manual', 'local')),
+    document_date           TEXT,
+    date_provenance         TEXT CHECK (date_provenance IN ('llm', 'mrz', 'manual', 'local')),
+    type_id                 TEXT REFERENCES document_types (id) ON DELETE SET NULL,
+    type_provenance         TEXT CHECK (type_provenance IN ('llm', 'mrz', 'manual', 'local')),
+    correspondent_id        TEXT REFERENCES correspondents (id) ON DELETE SET NULL,
+    correspondent_provenance TEXT CHECK (correspondent_provenance IN ('llm', 'mrz', 'manual', 'local')),
+    summary                 TEXT,
+    summary_provenance      TEXT CHECK (summary_provenance IN ('llm', 'mrz', 'manual', 'local')),
+    language                TEXT,
+    local_only              INTEGER NOT NULL DEFAULT 0,
+    status                  TEXT NOT NULL DEFAULT 'queued'
+                            CHECK (status IN ('queued', 'processing', 'ready', 'failed')),
+    status_reason           TEXT,
+    attention               TEXT NOT NULL DEFAULT '[]',
+    added_by                TEXT REFERENCES users (id) ON DELETE SET NULL,
+    updated_by              TEXT REFERENCES users (id) ON DELETE SET NULL,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    trashed_at              TEXT
+, people_provenance TEXT
+    CHECK (people_provenance IN ('llm', 'mrz', 'manual', 'local')));
+
+CREATE INDEX documents_status ON documents (status);
+
+CREATE INDEX documents_trashed ON documents (trashed_at);
+
+CREATE INDEX documents_type ON documents (type_id);
+
+CREATE TABLE events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id TEXT,
+    via           TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    document_id   TEXT,
+    at            TEXT NOT NULL,
+    diff          TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX events_document ON events (document_id);
+
+CREATE TABLE facts (
+    document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    provenance  TEXT NOT NULL CHECK (provenance IN ('llm', 'mrz', 'manual', 'local')),
+    page        INTEGER
+, label TEXT);
+
+CREATE INDEX facts_document ON facts (document_id);
+
+CREATE TABLE field_values (
+    document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    field_key   TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    provenance  TEXT NOT NULL CHECK (provenance IN ('llm', 'mrz', 'manual', 'local')),
+    page        INTEGER,
+    updated_by  TEXT REFERENCES users (id) ON DELETE SET NULL,
+    updated_at  TEXT NOT NULL, mrz_mismatch INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (document_id, field_key)
+);
+
+CREATE TABLE files (
+    document_id   TEXT PRIMARY KEY REFERENCES documents (id) ON DELETE CASCADE,
+    sha256        TEXT NOT NULL,
+    mime          TEXT NOT NULL,
+    size          INTEGER NOT NULL,
+    original_name TEXT NOT NULL,
+    page_count    INTEGER,
+    storage_key   TEXT NOT NULL
+, clean_size INTEGER);
+
+CREATE UNIQUE INDEX files_sha256 ON files (sha256);
+
+CREATE TABLE jobs (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    document_id TEXT REFERENCES documents (id) ON DELETE CASCADE,
+    payload     TEXT NOT NULL DEFAULT '{}',
+    state       TEXT NOT NULL DEFAULT 'queued'
+                CHECK (state IN ('queued', 'running', 'done', 'dead')),
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    run_after   TEXT NOT NULL,
+    last_error  TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE INDEX jobs_claim ON jobs (state, run_after);
+
+CREATE INDEX jobs_document ON jobs (document_id);
+
+CREATE TABLE llm_usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id   TEXT REFERENCES documents (id) ON DELETE SET NULL,
+    model         TEXT NOT NULL,
+    step          TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost_usd      TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX llm_usage_created ON llm_usage (created_at);
+
+CREATE TABLE oauth_clients (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    redirect_uris TEXT NOT NULL,
+    secret_hash   TEXT,
+    approved_by   TEXT REFERENCES users (id) ON DELETE SET NULL,
+    created_at    TEXT NOT NULL,
+    last_used_at  TEXT,
+    revoked_at    TEXT
+);
+
+CREATE TABLE oauth_codes (
+    code_hash      TEXT PRIMARY KEY,
+    grant_id       TEXT NOT NULL REFERENCES oauth_grants (id) ON DELETE CASCADE,
+    redirect_uri   TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    expires_at     TEXT NOT NULL,
+    used_at        TEXT
+);
+
+CREATE INDEX oauth_codes_grant ON oauth_codes (grant_id);
+
+CREATE TABLE oauth_grants (
+    id         TEXT PRIMARY KEY,
+    client_id  TEXT NOT NULL REFERENCES oauth_clients (id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+
+CREATE TABLE oauth_refresh_tokens (
+    token_hash TEXT PRIMARY KEY,
+    grant_id   TEXT NOT NULL REFERENCES oauth_grants (id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at    TEXT
+);
+
+CREATE INDEX oauth_refresh_tokens_grant ON oauth_refresh_tokens (grant_id);
+
+CREATE TABLE pages (
+    document_id       TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    n                 INTEGER NOT NULL,
+    width             INTEGER,
+    height            INTEGER,
+    has_embedded_text INTEGER NOT NULL DEFAULT 0,
+    render_key        TEXT,
+    PRIMARY KEY (document_id, n)
+);
+
+CREATE TABLE passkeys (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    credential_id TEXT NOT NULL UNIQUE,
+    passkey       TEXT NOT NULL,
+    sign_count    INTEGER NOT NULL DEFAULT 0,
+    label         TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    last_used_at  TEXT
+);
+
+CREATE INDEX passkeys_user ON passkeys (user_id);
+
+CREATE TABLE people (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    aliases    TEXT NOT NULL DEFAULT '[]',
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE sessions (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX sessions_user ON sessions (user_id);
+
+CREATE TABLE shares (
+    id           TEXT PRIMARY KEY,
+    document_id  TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    created_by   TEXT REFERENCES users (id) ON DELETE SET NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    revoked_at   TEXT,
+    -- Whether the page shows the summary and the extracted values, or only
+    -- the title, type and date next to the pages.
+    show_details INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX shares_document ON shares (document_id, expires_at);
+
+CREATE TABLE tags (
+    id    TEXT PRIMARY KEY,
+    name  TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    color TEXT
+);
+
+CREATE TABLE text_layers (
+    document_id   TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    page          INTEGER NOT NULL,
+    source        TEXT NOT NULL CHECK (source IN ('embedded', 'tesseract', 'llm')),
+    text          TEXT NOT NULL,
+    word_boxes    BLOB,
+    quality_score REAL,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (document_id, page, source)
+);
+
+CREATE TABLE upload_links (
+    token_hash TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    used_at    TEXT
+);
+
+CREATE TABLE users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    display_name  TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    locale        TEXT NOT NULL DEFAULT 'en',
+    person_id     TEXT REFERENCES people (id) ON DELETE SET NULL,
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    disabled_at   TEXT
+);

@@ -1,0 +1,29 @@
+//! paperjam: self-hosted document archive with a first-class MCP server.
+
+pub mod alloc;
+pub mod cli;
+pub mod config;
+pub mod db;
+pub mod error;
+pub mod extract;
+pub mod files;
+pub mod hashing;
+pub mod http;
+pub mod ics;
+pub mod ids;
+pub mod inbox;
+pub mod jobs;
+pub mod llm;
+pub mod logging;
+pub mod matching;
+pub mod mcp;
+pub mod model;
+pub mod mrz;
+pub mod oauth;
+pub mod pipeline;
+pub mod random;
+pub mod search;
+pub mod service;
+pub mod signing;
+pub mod time;
+pub mod validators;

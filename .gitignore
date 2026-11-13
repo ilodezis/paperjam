@@ -1,0 +1,15 @@
+target/
+node_modules/
+web/dist/
+.env
+/data/
+AGENTS.md
+CLAUDE.md
+.recon/
+.superpowers/
+fixtures/gen/
+compose.yml
+
+# Internal design notes, kept local
+docs/spec.md
+docs/open-questions.md

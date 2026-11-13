@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.superpowers
+target
+data
+fixtures/gen
+web/node_modules
+web/dist
+tests
+docs
+landing

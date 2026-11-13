@@ -1,0 +1,110 @@
+[workspace]
+members = [".", "xtask"]
+
+[package]
+name = "paperjam"
+version = "0.1.0"
+edition = "2024"
+description = "Self-hosted document archive with a first-class MCP server"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+anyhow = "1.0.104"
+argon2 = "0.6.0"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.7", features = ["derive"] }
+dotenvy = "0.15.7"
+hayro = "0.9.0"
+hmac = "0.13.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
+indexmap = { version = "2.14.2", features = ["serde"] }
+# Lossy WebP (the `image` crate encodes lossless only). Binds the C libwebp,
+# compiled from source; the default `img` feature would pull in a second `image`.
+webp = { version = "0.3.1", default-features = false }
+infer = "0.22.0"
+# Default features would demand libheif 1.23; Debian 13 and Ubuntu 24.04 ship
+# 1.19 and 1.17, and the decoder uses nothing newer than 1.17.
+libheif-rs = { version = "3.0.0", default-features = false, features = ["v1_17"], optional = true }
+pdf_oxide = { version = "0.3.78", default-features = false }
+rand = "0.10.3"
+rpassword = "7.5.4"
+rust_decimal = { version = "1.43.0", features = ["serde-with-str"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+thiserror = "2.0.21"
+tantivy = { version = "0.27.0", default-features = false, features = ["mmap", "stemmer", "lz4-compression"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal", "io-std"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "json"] }
+unicode-normalization = "0.1.26"
+url = "2.5.8"
+ipnet = "2.12.2"
+uuid = { version = "1.29.0", features = ["v7", "serde"] }
+zstd = "0.14.3"
+axum = { version = "0.8.9", features = ["macros", "multipart"] }
+axum-extra = { version = "0.12.6", features = ["cookie"] }
+tower-http = { version = "0.7.1", features = ["set-header", "limit", "trace"] }
+tower = "0.5.3"
+utoipa = "6.0.0"
+utoipa-axum = "0.3.0"
+futures-util = "0.3.34"
+time = "0.3.55"
+zip = { version = "9.2.1", default-features = false, features = ["deflate"] }
+flate2 = "1.1.10"
+rmcp = { version = "3.8.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+base64 = "0.23.1"
+# Validates LLM answers against the request schema; no http/file reference
+# resolution (the client never fetches URLs).
+jsonschema = { version = "0.60.2", default-features = false }
+mimalloc = "0.1.52"
+# mimalloc's options (`mi_option_set`); the same library `mimalloc` links.
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+# Passkeys (pure Rust crypto). `conditional-ui` enables discoverable,
+# username-less sign-in.
+webauthn-rs = { version = "0.6.2", features = ["conditional-ui"] }
+
+[build-dependencies]
+flate2 = "1.1.10"
+
+[features]
+# HEIC decoding needs the system libheif (LGPL, dynamically linked); off by
+# default, on in CI and in the container image.
+heic = ["dep:libheif-rs"]
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+# Image decoding, PDF rendering and the index are many times slower unoptimized,
+# and the OCR tests spend most of their time there. Dependencies compile once.
+# Without their debuginfo the rlibs shrink several times over, and the parallel
+# test links stop exhausting memory (each rustc maps every dependency it uses).
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+# Thin LTO: close to fat LTO at runtime, a fraction of its link time on every
+# deploy.
+[profile.release]
+lto = "thin"
+# One unit: about 5 MB less binary on both architectures at the same build
+# time; fat LTO saves 2 MB more but needs twice the memory on arm64.
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["multipart", "cookies", "form"] }
+tempfile = "3.27.0"
+# Paused time in tests (idle timers advance without real waiting).
+tokio = { version = "1.54.1", features = ["test-util"] }
+webauthn-authenticator-rs = { version = "0.6.2", features = ["softpasskey"] }
+webauthn-rs-proto = "0.6.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `prctl(PR_SET_THP_DISABLE)` at start-up.
+libc = "0.2.191"

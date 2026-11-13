@@ -1,0 +1,67 @@
+# Save as compose.yml and run `docker compose up -d`. Nothing else is needed:
+# the secret key is generated into the data volume on first start, and the
+# first administrator is created on the web page with the setup code that
+# `docker compose logs paperjam` prints.
+#
+# Optional settings go into a .env file next to this one (see .env.example).
+# Three of them are read by this file itself:
+#   PAPERJAM_LISTEN  address the port is published on. 127.0.0.1 (default) is
+#                    this computer only; 0.0.0.0 opens it to your network.
+#                    Set PAPERJAM_PUBLIC_URL=http://<address>:8140 with it.
+#   PAPERJAM_DOMAIN  your domain, for the built-in HTTPS proxy (below).
+#   COMPOSE_PROFILES=https  turns that proxy on.
+services:
+  paperjam:
+    image: ghcr.io/ilodezis/paperjam:latest
+    # To build from source instead, replace the line above with:
+    # build: .
+    # image: paperjam:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    mem_limit: 2g
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${PAPERJAM_LISTEN:-127.0.0.1}:8140:8140"
+    volumes:
+      - paperjam-data:/data
+      # Snapshots for `paperjam backup`; the directory must be writable by uid 10001.
+      # - ./backups:/backups
+      # Watched inbox folder (also set PAPERJAM_INBOX_DIR=/inbox in .env); the
+      # directory must be writable by uid 10001.
+      # - ./inbox:/inbox
+
+  # HTTPS for a domain, with a certificate from Let's Encrypt that renews
+  # itself. Needs ports 80 and 443 reachable from the internet and the domain
+  # pointing at this machine. Turn it on with COMPOSE_PROFILES=https and set
+  # PAPERJAM_DOMAIN=docs.example.org and PAPERJAM_PUBLIC_URL=https://docs.example.org
+  # in .env. Skip it if you already run a reverse proxy.
+  caddy:
+    profiles: ["https"]
+    image: caddy:2
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${PAPERJAM_DOMAIN:-localhost} --to paperjam:8140
+    depends_on:
+      - paperjam
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  paperjam-data:
+  caddy-data:
+  caddy-config:

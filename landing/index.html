@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#315e4c">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="paperjam files your passports, contracts and policies on your own server, reads every field, and lets any MCP client search them. Self-hosted, open source, one small binary.">
+  <link rel="canonical" href="https://paperjam.ilodezis.com/">
+  <meta property="og:site_name" content="paperjam">
+  <meta property="og:title" content="paperjam: your agent gets a library card">
+  <meta property="og:description" content="A self-hosted card catalog for household paperwork, with an MCP server built in.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://paperjam.ilodezis.com/">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:image" content="https://paperjam.ilodezis.com/assets/og-image.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="paperjam: your agent gets a library card. A synthetic passport card filed in a drawer, with an agent asking when it expires.">
+  <meta name="twitter:card" content="summary_large_image">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "paperjam",
+    "description": "A self-hosted archive for passports, contracts and policies that reads every field locally and has an MCP server built in, so AI agents can search and file documents.",
+    "url": "https://paperjam.ilodezis.com/",
+    "image": "https://paperjam.ilodezis.com/assets/og-image.png",
+    "applicationCategory": "BusinessApplication",
+    "operatingSystem": "Linux, Docker",
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "codeRepository": "https://github.com/ilodezis/paperjam",
+    "sameAs": ["https://github.com/ilodezis/paperjam"]
+  }
+  </script>
+  <title>paperjam: your agent gets a library card</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="preload" href="assets/archivo-wdth.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="assets/atkinson-next.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css">
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="top shell">
+    <a class="wordmark" href="#top" aria-label="paperjam, back to top">
+      <img src="assets/favicon.svg" width="32" height="32" alt="">
+      paperjam
+    </a>
+    <nav aria-label="Sections">
+      <a href="#agents">Agents</a>
+      <a href="#reading">How it reads</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#install">Install</a>
+    </nav>
+    <a class="gh" href="https://github.com/ilodezis/paperjam" rel="noopener">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.87c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.56 9.56 0 0 1 12 6.82c.85 0 1.71.12 2.51.34 1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85V21c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
+      <span>GitHub</span>
+    </a>
+  </header>
+
+  <main id="main">
+    <section class="hero shell" id="top" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">Your agent gets a library&nbsp;card.</h1>
+        <p class="lead">paperjam files your passports, contracts and policies on your own server, reads every field, and opens the drawer to any MCP&nbsp;client. Ask when the residence permit runs out; get a date and the card it came&nbsp;from.</p>
+        <div class="hero-actions">
+          <a class="btn btn-stock" href="#install">Install paperjam</a>
+          <a class="link-light link-play" href="#tour" data-play-tour><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M17 12v24l20-12z"/></svg>Watch the 41-second tour</a>
+          <a class="link-light" href="https://github.com/ilodezis/paperjam" rel="noopener">Read the source</a>
+        </div>
+        <p class="hero-small">Open source, AGPL-3.0. Runs in Docker. No telemetry.</p>
+      </div>
+
+      <div class="drawer" data-drawer data-active="trv">
+        <div class="drawer-well">
+          <div class="guide guide-mint" aria-hidden="true"></div>
+          <div class="guide guide-canary" aria-hidden="true"></div>
+          <div class="guide guide-salmon" aria-hidden="true"></div>
+
+          <div class="drawer-tabs" role="tablist" aria-label="Sample catalog cards">
+            <button class="tab tab-mint" role="tab" id="tab-trv" aria-controls="card-trv" aria-selected="true">Passports</button>
+            <button class="tab tab-canary" role="tab" id="tab-lea" aria-controls="card-lea" aria-selected="false" tabindex="-1">Leases</button>
+            <button class="tab tab-salmon" role="tab" id="tab-ins" aria-controls="card-ins" aria-selected="false" tabindex="-1">Insurance</button>
+          </div>
+
+          <article class="cat-card is-up" id="card-trv" role="tabpanel" aria-labelledby="tab-trv">
+            <div class="slip"><span>Your agent asks</span>When does John’s passport expire?</div>
+            <header class="cat-head"><b>TRV 0042</b><span>Passport</span></header>
+            <dl class="cat-fields">
+              <div><dt>Holder</dt><dd>John Doe</dd></div>
+              <div><dt>Number</dt><dd>TS1234567 <i class="ok"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8.5 3 3 7-7"/></svg>check digit</i></dd></div>
+              <div><dt>Issued by</dt><dd>Ministry of Testing</dd></div>
+              <div><dt>Expires</dt><dd class="answer">01 Sep 2032<svg class="ring" viewBox="0 0 140 44" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M8 22C3 9 46 3 84 4c34 1 54 8 52 19-2 12-42 17-74 16C26 38 2 33 6 18"/></svg></dd></div>
+            </dl>
+            <p class="tracing">1. Doe, John. 2. Travel documents. 3. Republic of Testing.</p>
+          </article>
+
+          <article class="cat-card" id="card-lea" role="tabpanel" aria-labelledby="tab-lea" hidden>
+            <div class="slip"><span>Your agent asks</span>How much notice does the lease need?</div>
+            <header class="cat-head"><b>CON 0117</b><span>Lease agreement</span></header>
+            <dl class="cat-fields">
+              <div><dt>Parties</dt><dd>John Doe, Testville Housing</dd></div>
+              <div><dt>Rent</dt><dd>1,200.00 a month</dd></div>
+              <div><dt>Notice</dt><dd class="answer">3 months, in writing<svg class="ring" viewBox="0 0 140 44" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M8 22C3 9 46 3 84 4c34 1 54 8 52 19-2 12-42 17-74 16C26 38 2 33 6 18"/></svg></dd></div>
+              <div><dt>Runs until</dt><dd>31 Mar 2027</dd></div>
+            </dl>
+            <p class="tracing">1. Doe, John. 2. Housing. 3. Testville Housing.</p>
+          </article>
+
+          <article class="cat-card" id="card-ins" role="tabpanel" aria-labelledby="tab-ins" hidden>
+            <div class="slip"><span>Your agent asks</span>Where do I pay the car insurance?</div>
+            <header class="cat-head"><b>INS 0203</b><span>Insurance policy</span></header>
+            <dl class="cat-fields">
+              <div><dt>Insurer</dt><dd>Testing Mutual</dd></div>
+              <div><dt>Covers</dt><dd>Car, green card abroad</dd></div>
+              <div><dt>Pay to</dt><dd class="answer">TS56 TEST 0000 1234 5678<svg class="ring" viewBox="0 0 140 44" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M8 22C3 9 46 3 84 4c34 1 54 8 52 19-2 12-42 17-74 16C26 38 2 33 6 18"/></svg></dd></div>
+              <div><dt>Valid until</dt><dd>14 Feb 2027 <i class="ok"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8.5 3 3 7-7"/></svg>IBAN checksum</i></dd></div>
+            </dl>
+            <p class="tracing">1. Doe, John. 2. Vehicles. 3. Testing Mutual.</p>
+          </article>
+        </div>
+        <div class="drawer-front" aria-hidden="true">
+          <span class="label-frame">Household papers · A–Z</span>
+          <span class="pull"></span>
+        </div>
+        <p class="drawer-note">Synthetic cards. The Republic of Testing does not exist; its paperwork does.</p>
+      </div>
+    </section>
+
+    <section class="reel shell" id="tour" aria-label="Product tour">
+      <!-- Nothing is fetched until a click: preload="none", and script.js swaps the native controls for one play button. -->
+      <div class="reel-frame" data-reel>
+        <video controls preload="none" playsinline width="1920" height="1080"
+               poster="assets/reel-poster.webp" aria-label="paperjam product tour, 41 seconds, with music">
+          <source src="https://media.ilodezis.com/paperjam/reel-v4.1-720.av1.mp4" type='video/mp4; codecs="av01.0.05M.10, mp4a.40.2"' media="(max-width: 760px)">
+          <source src="https://media.ilodezis.com/paperjam/reel-v4.1-1080.av1.mp4" type='video/mp4; codecs="av01.0.09M.10, mp4a.40.2"'>
+          <source src="https://media.ilodezis.com/paperjam/reel-v4.1-1080.hevc.mp4" type='video/mp4; codecs="hvc1.1.6.L123.B0, mp4a.40.2"'>
+          <source src="https://media.ilodezis.com/paperjam/reel-v4.1-1080.h264.mp4" type='video/mp4; codecs="avc1.640032, mp4a.40.2"'>
+          <a href="https://media.ilodezis.com/paperjam/reel-v4.1-1080.h264.mp4">Download the 41-second tour (MP4)</a>
+        </video>
+        <button class="reel-play" type="button" hidden>
+          <span class="reel-pill">
+            <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="21"/><path d="M19 15.5v17l14-8.5z"/></svg>
+            <span><b>Watch the tour</b> 41 seconds · sound on</span>
+          </span>
+        </button>
+      </div>
+      <p class="drawer-note">Every value on screen comes from a running paperjam holding the same synthetic scans.</p>
+    </section>
+
+    <section class="divider divider-canary shell" id="agents" aria-labelledby="agents-title">
+      <h2 class="divider-tab tab-left" id="agents-title">For the agent</h2>
+      <div class="divider-body agents">
+        <p class="statement">Any MCP client can search the drawer, read a card, look at the scan, file a new document and fix a field. The one thing it can’t do is throw something away for&nbsp;good.</p>
+        <div class="register">
+          <table>
+            <caption>What an agent can do</caption>
+            <tbody>
+              <tr><th scope="row">search_documents</th><td>Find by any word, person, type or field.</td></tr>
+              <tr><th scope="row">get_document</th><td>Read a card: its fields, its facts, its page text.</td></tr>
+              <tr><th scope="row">get_page_image</th><td>Look at the scan itself when OCR may have misread a digit.</td></tr>
+              <tr><th scope="row">upload_document</th><td>File a new scan straight from the conversation.</td></tr>
+              <tr><th scope="row">update_document</th><td>Correct a field, a person, a tag.</td></tr>
+              <tr><th scope="row">reprocess_document</th><td>Read it again after you change the settings.</td></tr>
+              <tr><th scope="row">trash_document</th><td>Move to trash, and back with restore. Purging stays with a&nbsp;person.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="connect">Claude.ai connects with OAuth: you sign in and approve it on your own paperjam. Claude Code and other clients take a URL and a token. <a href="https://github.com/ilodezis/paperjam#connect-an-agent" rel="noopener">Connecting an agent</a></p>
+      </div>
+    </section>
+
+    <section class="divider divider-salmon shell" id="reading" aria-labelledby="reading-title">
+      <h2 class="divider-tab tab-mid" id="reading-title">What happens to a scan</h2>
+      <div class="divider-body reading">
+        <figure class="scan">
+          <img src="assets/john-doe-passport.webp" width="1000" height="700" loading="lazy" decoding="async" alt="Synthetic passport of John Doe, Republic of Testing, with a machine-readable zone at the bottom">
+          <figcaption>In: one synthetic passport scan.</figcaption>
+        </figure>
+        <ol class="steps">
+          <li><b>Kept as it came.</b> The original is stored byte for byte and never modified.</li>
+          <li><b>Read on your machine.</b> PDF text, Tesseract OCR in twelve languages, and the machine-readable zone of passports and ID cards.</li>
+          <li><b>Typed.</b> With an LLM key, it is sorted into one of 21 document types and that type’s fields are filled: holder, number, dates, amounts.</li>
+          <li><b>Checked.</b> MRZ check digits, IBANs and national ID numbers from ten countries are verified. A failed check flags the card instead of quietly storing a wrong&nbsp;number.</li>
+          <li><b>Shelved.</b> Searchable by every word and every field, from the web app or by your agent.</li>
+        </ol>
+        <p class="binary">All of it is one small binary: Rust, SQLite and an embedded search index. No Redis, no Postgres, no extra containers. Without an LLM key, everything but step&nbsp;3 still&nbsp;runs.</p>
+      </div>
+    </section>
+
+    <section class="divider divider-mint shell" id="privacy" aria-labelledby="privacy-title">
+      <h2 class="divider-tab tab-right" id="privacy-title">What leaves the building</h2>
+      <div class="divider-body privacy">
+        <ul class="rules">
+          <li><b>Without an LLM key, nothing.</b> No telemetry, no update check, no cloud calls.</li>
+          <li><b>With a key, only what you signed out.</b> Document text and page images go to the provider you chose. Mark a document <q>Never send to the cloud</q> and it stays home.</li>
+          <li><b>Originals stay originals.</b> One-command backup, and a zip export in an open layout.</li>
+          <li><b>Agents can’t purge.</b> Trash and restore, yes. Deleting for good takes a signed-in person.</li>
+        </ul>
+        <p class="fit">Made for a household or a few people sharing one archive: everyone sees everything, there are no per-user permissions and no workflow rules. It is a drawer, not an&nbsp;office.</p>
+      </div>
+    </section>
+
+    <section class="install shell" id="install" aria-labelledby="install-title">
+      <div class="install-copy">
+        <h2 id="install-title">Get the card.</h2>
+        <p>Run it on a home server, a NAS, a VPS or your own computer. You need Docker with the Compose plugin.</p>
+        <p>The installer asks four things: where to put it, how you’ll reach it, the languages of your documents, and an optional LLM key. Then it prints the address and a one-time setup&nbsp;code.</p>
+      </div>
+      <div class="borrower">
+        <header class="borrower-head"><b>Borrower’s card</b><span>paperjam · one copy per household</span></header>
+        <div class="cmd">
+          <code id="install-code">bash -c "$(curl -fsSL https://raw.githubusercontent.com/ilodezis/paperjam/main/install.sh)"</code>
+          <button class="copy" type="button" data-copy="install-code">
+            <svg class="i-copy" viewBox="0 0 20 20" aria-hidden="true"><rect x="6.5" y="6.5" width="10" height="11" rx="1.5"/><path d="M13.5 6.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v9A1.5 1.5 0 0 0 4 14.5h2.5"/></svg>
+            <svg class="i-done" viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"/></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <details class="by-hand">
+          <summary>Rather do it by hand</summary>
+          <div class="cmd cmd-multi">
+            <code id="manual-code">mkdir paperjam &amp;&amp; cd paperjam
+curl -fsSL https://raw.githubusercontent.com/ilodezis/paperjam/main/compose.example.yml -o compose.yml
+docker compose up -d
+docker compose logs paperjam</code>
+            <button class="copy" type="button" data-copy="manual-code">
+              <svg class="i-copy" viewBox="0 0 20 20" aria-hidden="true"><rect x="6.5" y="6.5" width="10" height="11" rx="1.5"/><path d="M13.5 6.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v9A1.5 1.5 0 0 0 4 14.5h2.5"/></svg>
+              <svg class="i-done" viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"/></svg>
+              <span>Copy</span>
+            </button>
+          </div>
+        </details>
+        <p class="borrower-foot">The last log line holds the setup code. There are no default passwords. <a href="https://github.com/ilodezis/paperjam#install" rel="noopener">Full install guide</a></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot shell">
+    <span class="wordmark wordmark-small">paperjam</span>
+    <p>Clears paper jams. Does not fix printers.</p>
+    <nav aria-label="Project links">
+      <a href="https://github.com/ilodezis/paperjam" rel="noopener">GitHub</a>
+      <a href="https://github.com/ilodezis/paperjam/tree/main/docs" rel="noopener">Docs</a>
+      <a href="https://github.com/ilodezis/paperjam/blob/main/LICENSE" rel="noopener">AGPL-3.0</a>
+    </nav>
+  </footer>
+  <div class="sr-only" role="status" aria-live="polite" id="copy-status"></div>
+</body>
+</html>

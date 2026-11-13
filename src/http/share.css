@@ -1,0 +1,259 @@
+/* The page a share link opens. No scripts: the look is this sheet, inline SVG and the faces of
+   http/base.css. The document is the subject: its card on the left (on top on a phone), its
+   pages as sheets of paper on the right. */
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+  color: var(--ink);
+  background: var(--sidebar);
+  font: 400 15px/1.5 "Golos Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  isolation: isolate;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: var(--grain);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .2 0 0 0 0 .22 0 0 0 0 .2 0 0 0 .09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+::selection { color: var(--ink); background: #d9c99f; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+svg { flex: 0 0 auto; }
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: max(18px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) 0 max(24px, env(safe-area-inset-left));
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -.045em;
+}
+.brand svg { width: 20px; height: 20px; color: var(--accent); }
+.expiry {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px 6px 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--paper-raised) 70%, transparent);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--line);
+}
+.expiry svg { width: 15px; height: 15px; }
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  align-items: start;
+  gap: 40px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px max(24px, env(safe-area-inset-right)) 32px max(24px, env(safe-area-inset-left));
+}
+
+/* The document's card: a sheet with a turned-down corner, like the consent screen. */
+.card {
+  position: sticky;
+  top: 24px;
+  padding: 30px 28px 28px;
+  background: var(--paper-raised);
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px var(--line), 0 2px 3px var(--shadow), 0 34px 70px -32px var(--shadow-deep);
+  clip-path: polygon(0 0, calc(100% - 36px) 0, 100% 36px, 100% 100%, 0 100%);
+  animation: feed 560ms var(--ease-out) both;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 36px;
+  height: 36px;
+  background: linear-gradient(225deg, transparent 50%, var(--line) 50%);
+  border-bottom-left-radius: 6px;
+}
+.eyebrow {
+  margin: 0 40px 10px 0;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+h1 {
+  margin: 0;
+  font: 600 25px/1.18 Geologica, "Golos Text", system-ui, sans-serif;
+  letter-spacing: -.02em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.meta li {
+  padding: 3px 9px;
+  color: var(--muted);
+  font-size: 13px;
+  background: var(--paper);
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.download {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 22px;
+  padding: 13px 16px;
+  color: var(--on-accent);
+  font-weight: 600;
+  text-decoration: none;
+  background: var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .14) inset, 0 8px 18px -10px var(--accent);
+  transition: background-color 160ms ease, transform 160ms var(--ease-out);
+}
+.download:hover { background: var(--accent-hover); }
+.download:active { transform: translateY(1px); }
+.download svg { width: 19px; height: 19px; }
+.download small { font-weight: 400; font-size: 13px; opacity: .8; font-variant-numeric: tabular-nums; }
+
+.details { margin-top: 26px; }
+.details h2 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.summary { margin: 0 0 22px; overflow-wrap: anywhere; }
+.facts { margin: 0; }
+.facts div {
+  display: grid;
+  grid-template-columns: minmax(96px, 40%) 1fr;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+.facts div:last-child { border-bottom: 1px solid var(--line); }
+.facts dt { min-width: 0; color: var(--muted); font-size: 13.5px; overflow-wrap: break-word; hyphens: auto; }
+.facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+
+/* The pages: sheets of paper, as they came out of the scanner and the clean-up. */
+.pages {
+  display: grid;
+  gap: 22px;
+  min-width: 0;
+}
+.page {
+  margin: 0;
+  animation: feed 620ms var(--ease-out) both;
+}
+.page:nth-child(2) { animation-delay: 70ms; }
+.page:nth-child(n + 3) { animation-delay: 120ms; }
+.page img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #fff;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px var(--line), 0 2px 4px var(--shadow), 0 30px 60px -36px var(--shadow-deep);
+}
+.page figcaption {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.no-preview {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 260px;
+  padding: 32px;
+  color: var(--muted);
+  text-align: center;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px;
+}
+.no-preview svg { width: 34px; height: 34px; }
+.no-preview p { margin: 0; }
+
+.foot {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 8px 24px max(32px, env(safe-area-inset-bottom));
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* A link that stopped working. */
+body.gone { display: grid; place-items: center; padding: 48px 24px; }
+.card--gone { position: relative; top: 0; width: min(100%, 420px); padding: 34px 32px 32px; text-align: left; }
+.card--gone .brand { margin-bottom: 28px; }
+.gone-mark {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 16px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-radius: 12px;
+}
+.gone-mark svg { width: 24px; height: 24px; }
+.card--gone h1 { font-size: 22px; }
+.detail { margin: 10px 0 0; color: var(--muted); }
+
+@keyframes feed {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (max-width: 860px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 24px; padding-top: 18px; }
+  .card { position: relative; top: 0; padding: 26px 22px 24px; }
+  h1 { font-size: 23px; }
+  .pages { gap: 16px; }
+}
+@media (max-width: 420px) {
+  .bar { padding-left: 16px; padding-right: 16px; }
+  .layout { padding-left: 12px; padding-right: 12px; }
+  .expiry { font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before { animation: none !important; transition: none !important; }
+}
+@media print {
+  body { background: #fff; }
+  body::before, .bar, .download, .foot { display: none; }
+  .layout { display: block; padding: 0; }
+  .card { position: static; box-shadow: none; clip-path: none; padding: 0 0 16px; }
+  .card::before { display: none; }
+  .page { break-inside: avoid; margin-bottom: 12px; }
+  .page img { box-shadow: none; }
+}

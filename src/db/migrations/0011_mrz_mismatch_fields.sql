@@ -1,0 +1,1 @@
+ALTER TABLE field_values ADD COLUMN mrz_mismatch INTEGER NOT NULL DEFAULT 0;

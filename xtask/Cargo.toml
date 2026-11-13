@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+image = "0.25.10"
+imageproc = "0.27.0"
+krilla = "0.8.2"
+lopdf = "0.47.0"
+serde_json = "1.0.154"
+
+[dev-dependencies]
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+

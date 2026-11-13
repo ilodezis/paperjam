@@ -1,0 +1,416 @@
+name: Image
+
+on:
+  push:
+    branches: [main]
+    # Path filters do not apply to tag pushes, so releases always build.
+    tags: ["v*"]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - src/**
+      - web/**
+      - xtask/**
+      - .github/workflows/image.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - src/**
+      - web/**
+      - xtask/**
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/ilodezis/paperjam
+
+jobs:
+  # The synthetic corpus is generated once and shared: the smoke test below
+  # OCRs one of its images and the footprint job uploads all of it.
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo xtask fixtures
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fixtures
+          path: fixtures/gen
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: build (${{ matrix.arch }})
+    needs: fixtures
+    # Pull requests only check that the amd64 image builds.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"arch":"amd64","runner":"ubuntu-latest"}]' || '[{"arch":"amd64","runner":"ubuntu-latest"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]') }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Attestations are off here: attached to a per-arch push, they would make
+      # the digest an index of its own and the merged manifest an index of
+      # indexes. The merge job attaches the SBOMs and provenance to the final
+      # digests instead.
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,scope=image-${{ matrix.arch }},mode=max
+
+      # The build step above only pushed (or discarded) the image. This one
+      # loads it from the layer cache that step just wrote, so it costs seconds.
+      - name: Load the image for the smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: paperjam:smoke
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fixtures
+          path: fixtures/gen
+
+      # Tesseract is assembled from the library, the language packs and one
+      # binary (see the Dockerfile), so prove the pieces fit together.
+      - name: Smoke test Tesseract in the image
+        run: |
+          set -euo pipefail
+          run() { docker run --rm -i --entrypoint tesseract paperjam:smoke "$@"; }
+
+          run --version
+
+          langs=$(run --list-langs)
+          echo "$langs"
+          for lang in eng rus ron osd; do
+            grep -qx "$lang" <<< "$langs" || { echo "::error::language pack missing: $lang"; exit 1; }
+          done
+
+          # Plain text, the way the pipeline reads a page.
+          text=$(run stdin stdout -l rus < fixtures/gen/scan_ru.png)
+          echo "$text" | head -5
+          grep -qi 'паспорт' <<< "$text" || { echo "::error::OCR of scan_ru.png found no expected text"; exit 1; }
+
+          # The tsv config comes from libtesseract5, not from the CLI package.
+          words=$(run stdin stdout -l rus tsv < fixtures/gen/scan_ru.png | awk -F'\t' '$1 == 5 && $12 != ""' | wc -l)
+          echo "tsv words: $words"
+          [ "$words" -gt 20 ] || { echo "::error::tsv output has too few words"; exit 1; }
+
+      - if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    # The only job that signs and attests: `id-token` lets it obtain a keyless
+    # signing certificate for this workflow run, `attestations` lets it store
+    # the attestations.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # `latest` comes with a stable version tag (flavor default), not with a prerelease.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=edge,branch=main
+            type=sha
+          labels: |
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect the result
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+      # The digests the signature and the attestations are bound to: the
+      # multi-arch index and each platform image inside it.
+      - id: digests
+        name: Resolve the image digests
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          index=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)
+          raw=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --raw)
+          platform() {
+            jq -r --arg arch "$1" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' <<< "$raw"
+          }
+          amd64=$(platform amd64)
+          arm64=$(platform arm64)
+          for d in "$index" "$amd64" "$arm64"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected digest: '$d'"; exit 1; }
+          done
+          {
+            echo "index=$index"
+            echo "amd64=$amd64"
+            echo "arm64=$arm64"
+          } >> "$GITHUB_OUTPUT"
+
+      # Keyless: the certificate names this workflow and the ref it ran on.
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Sign the multi-arch image
+        env:
+          DIGEST: ${{ steps.digests.outputs.index }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digests.outputs.index }}
+          push-to-registry: true
+
+      # One SBOM per platform image, from the layers as published.
+      - id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+
+      - name: Generate the SBOMs
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          AMD64: ${{ steps.digests.outputs.amd64 }}
+          ARM64: ${{ steps.digests.outputs.arm64 }}
+        run: |
+          set -euo pipefail
+          "$SYFT" "registry:${IMAGE}@${AMD64}" -o "spdx-json=$RUNNER_TEMP/sbom-amd64.spdx.json"
+          "$SYFT" "registry:${IMAGE}@${ARM64}" -o "spdx-json=$RUNNER_TEMP/sbom-arm64.spdx.json"
+
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digests.outputs.amd64 }}
+          sbom-path: ${{ runner.temp }}/sbom-amd64.spdx.json
+          push-to-registry: true
+
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digests.outputs.arm64 }}
+          sbom-path: ${{ runner.temp }}/sbom-arm64.spdx.json
+          push-to-registry: true
+
+  footprint:
+    name: footprint (report only)
+    needs: [merge, fixtures]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fixtures
+          path: fixtures/gen
+
+      # An empty archive hides most of the cost: the index writer, the mapped
+      # binary and Tesseract only show up once documents have been processed.
+      # So: start, measure empty, upload the whole synthetic corpus through the
+      # API, wait for the queue to drain, let the process settle, measure again.
+      - name: Measure the amd64 image
+        run: |
+          set -uo pipefail
+          ref="${IMAGE}:sha-${GITHUB_SHA::7}"
+          docker pull --platform linux/amd64 "$ref"
+
+          amd64=$(docker manifest inspect "$ref" \
+            | jq -r '.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux") | .digest')
+          compressed=$(docker manifest inspect "${IMAGE}@${amd64}" \
+            | jq '[.config.size, (.layers[].size)] | add')
+          uncompressed=$(docker image inspect "$ref" --format '{{.Size}}')
+
+          docker run -d --name pj -p 127.0.0.1:8140:8140 \
+            -e PAPERJAM_SECRET_KEY="$(openssl rand -base64 48)" \
+            -v paperjam-footprint-data:/data \
+            "$ref"
+
+          healthy=no
+          for _ in $(seq 1 30); do
+            if docker exec pj paperjam healthcheck >/dev/null 2>&1; then
+              healthy=yes
+              break
+            fi
+            sleep 2
+          done
+          if [ "$healthy" = no ]; then docker logs pj || true; fi
+
+          # Memory as the kernel sees it. PID 1 is paperjam; Tesseract children
+          # count in the cgroup figures but not in the process ones. Files are
+          # read with `cat` and parsed here, so the image needs no extra tools.
+          snapshot() {
+            docker exec pj cat /proc/1/status > proc-status.txt
+            docker exec pj cat /sys/fs/cgroup/memory.stat > cg-stat.txt
+            cg_current=$(docker exec pj cat /sys/fs/cgroup/memory.current)
+            cg_peak=$(docker exec pj cat /sys/fs/cgroup/memory.peak)
+            echo "cg_current=$((cg_current / 1048576))"
+            echo "cg_peak=$((cg_peak / 1048576))"
+            echo "cg_anon=$(awk '$1 == "anon" { print int($2 / 1048576) }' cg-stat.txt)"
+            echo "cg_file=$(awk '$1 == "file" { print int($2 / 1048576) }' cg-stat.txt)"
+            for key in VmRSS RssAnon RssFile VmHWM; do
+              echo "$key=$(awk -v k="$key:" '$1 == k { print int($2 / 1024) }' proc-status.txt)"
+            done
+            echo "threads=$(awk '$1 == "Threads:" { print $2 }' proc-status.txt)"
+          }
+
+          sleep 10
+          snapshot > empty.env
+
+          # A user and a token through the CLI inside the container.
+          pw="$(openssl rand -base64 18)"
+          docker exec -e PAPERJAM_NEW_PASSWORD="$pw" pj paperjam user add --admin bench >/dev/null
+          token=$(docker exec pj paperjam token create --user bench footprint 2>/dev/null)
+          api() { curl -fsS -H "Authorization: Bearer $token" "$@"; }
+
+          uploaded=0
+          start=$(date +%s)
+          for f in fixtures/gen/*; do
+            if api -o /dev/null -F "file=@$f" http://127.0.0.1:8140/api/v1/documents; then
+              uploaded=$((uploaded + 1))
+            else
+              echo "upload failed: $f"
+            fi
+          done
+
+          drained=no
+          for _ in $(seq 1 300); do
+            busy=$(api http://127.0.0.1:8140/api/v1/stats \
+              | jq '(.queue.queued + .queue.running) + ((.by_status.queued // 0) + (.by_status.processing // 0))')
+            if [ "$busy" = 0 ]; then drained=yes; break; fi
+            sleep 2
+          done
+          processing=$(( $(date +%s) - start ))
+          stats=$(api http://127.0.0.1:8140/api/v1/stats | jq -c '{documents, by_status, queue}')
+
+          sleep 90
+          snapshot > settled.env
+          binary=$(docker exec pj stat -c %s /usr/local/bin/paperjam)
+          if [ "$drained" = no ]; then docker logs --tail 50 pj || true; fi
+
+          get() { grep "^$2=" "$1" | cut -d= -f2; }
+          {
+            echo "## Footprint (linux/amd64)"
+            echo
+            echo "| | Measured |"
+            echo "|---|---|"
+            echo "| Image, compressed | $((compressed / 1000000)) MB |"
+            echo "| Image, uncompressed | $((uncompressed / 1000000)) MB |"
+            echo "| paperjam binary | $(awk -v b="$binary" 'BEGIN { printf "%.1f", b / 1000000 }') MB |"
+            echo "| Threads, idle | $(get settled.env threads) |"
+            echo
+            echo "| Memory (MB) | Empty archive | 90 s after processing | Peak while processing |"
+            echo "|---|---|---|---|"
+            echo "| cgroup current (includes page cache) | $(get empty.env cg_current) | $(get settled.env cg_current) | |"
+            echo "| cgroup anon / file | $(get empty.env cg_anon) / $(get empty.env cg_file) | $(get settled.env cg_anon) / $(get settled.env cg_file) | |"
+            echo "| cgroup peak (paperjam and Tesseract) | | | $(get settled.env cg_peak) |"
+            echo "| paperjam RSS | $(get empty.env VmRSS) | $(get settled.env VmRSS) | |"
+            echo "| paperjam RssAnon / RssFile | $(get empty.env RssAnon) / $(get empty.env RssFile) | $(get settled.env RssAnon) / $(get settled.env RssFile) | |"
+            echo "| paperjam RSS peak (VmHWM) | | | $(get settled.env VmHWM) |"
+            echo
+            echo "Healthcheck passed: $healthy. Uploaded $uploaded of $(ls fixtures/gen | wc -l) synthetic fixtures; queue drained: $drained after ${processing} s. Final state: \`$stats\`."
+            echo "The cgroup peak is the kernel's high-water mark since the container started, so it also covers start-up. Idle numbers are taken 90 s after the queue emptied. Targets are measured, not promised; this is a corpus of ${uploaded} documents, not ~1000."
+            echo
+            echo "<details><summary>Image layers</summary>"
+            echo
+            echo '```'
+            docker history --format '{{.Size}}\t{{.CreatedBy}}' "$ref" | cut -c1-110
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
