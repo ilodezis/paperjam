@@ -9,7 +9,9 @@ MCP server built in so your AI agent can find, read and file them.**
 
 **Website: [paperjam.ilodezis.com](https://paperjam.ilodezis.com)**
 
-<!-- DEMO placeholder: a ~30 s recording on synthetic documents goes here (an agent searches, reads a passport field, files a new scan). -->
+
+https://github.com/user-attachments/assets/e7b23977-92cb-4c5a-b301-8c4b7ca26f1f
+
 
 Ask *"when does my residence permit expire?"* and get a date, not a pile of
 PDFs. paperjam reads every upload on your own machine (PDF text, Tesseract OCR,
