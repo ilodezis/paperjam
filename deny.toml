@@ -29,7 +29,16 @@ all-features = true
 # opens its own database in the data directory; `restore` copies the database
 # file alone and deletes any existing `-wal`/`-shm` first, so no outside party
 # can supply the WAL. Drop this once sqlx accepts libsqlite3-sys >= 0.39.
-ignore = ["RUSTSEC-2026-0192", "RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]
+# RUSTSEC-2026-0543: `chrono` was marked unmaintained (no vulnerability). It is
+# used for date formatting and also pulled in through `pdf_oxide`, `rmcp` and
+# `schemars`; revisit once those dependencies and paperjam move to `jiff` or
+# `time`.
+ignore = [
+    "RUSTSEC-2026-0192",
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0459",
+    "RUSTSEC-2026-0543",
+]
 
 [licenses]
 unused-allowed-license = "allow"
