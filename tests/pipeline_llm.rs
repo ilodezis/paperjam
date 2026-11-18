@@ -2484,3 +2484,106 @@ async fn an_unverified_transcription_zone_keeps_the_local_zone_and_manual_fields
         FieldValue::Identifier("123456".into())
     );
 }
+
+#[tokio::test]
+async fn openrouter_skips_reasoning_on_transcribe_and_fields_by_default() {
+    let r = rig(&[("PAPERJAM_LLM_PROVIDER", "openrouter")]).await;
+    r.mock.route(
+        "transcription",
+        transcription_reply("# Invoice\n\nTotal 100.00 EUR"),
+    );
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "invoice", "title": "Acme · 100 EUR"})),
+    );
+    r.mock.route(
+        "field_extraction",
+        fields_reply(&r.app, "invoice", &[("number", json!("INV-1"))]).await,
+    );
+    let id = upload_fixture(&r.app, "invoice_scan_en.pdf", false).await;
+    process_all(&r.app, id).await;
+
+    let requests = r.mock.requests();
+    let step_effort = |schema_name: &str| -> String {
+        requests
+            .iter()
+            .find(|req| {
+                req.body["response_format"]["json_schema"]["name"].as_str() == Some(schema_name)
+            })
+            .and_then(|req| req.body["reasoning"]["effort"].as_str())
+            .expect(schema_name)
+            .to_string()
+    };
+    assert_eq!(step_effort("transcription"), "none");
+    assert_eq!(step_effort("classification"), "low");
+    assert_eq!(step_effort("field_extraction"), "none");
+
+    // An explicit config override applies to every step.
+    let overridden = rig(&[
+        ("PAPERJAM_LLM_PROVIDER", "openrouter"),
+        ("PAPERJAM_LLM_REASONING_EFFORT", "medium"),
+    ])
+    .await;
+    overridden.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "contract", "title": "Lease"})),
+    );
+    overridden.mock.route(
+        "field_extraction",
+        fields_reply(&overridden.app, "contract", &[]).await,
+    );
+    let id2 = upload_fixture(&overridden.app, "contract_ru_digital.pdf", false).await;
+    process_all(&overridden.app, id2).await;
+    for req in overridden.mock.requests() {
+        assert_eq!(req.body["reasoning"]["effort"], "medium");
+    }
+}
+
+#[tokio::test]
+async fn mismatched_llm_person_and_title_are_reconciled_with_extracted_holder() {
+    let r = rig(&[]).await;
+    let relative = taxonomy::create_person(
+        &r.app.ctx(Actor::system()),
+        NewPerson {
+            name: "Тестов Борис Петрович".into(),
+            aliases: vec![],
+            notes: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    r.mock.route(
+        "classification",
+        classify_reply(json!({
+            "type_key": "passport",
+            "title": "Тестов Борис Петрович, 2030",
+            "people": [relative.id.to_string()],
+            "organizations": [],
+        })),
+    );
+    r.mock.route(
+        "field_extraction",
+        fields_reply(
+            &r.app,
+            "passport",
+            &[
+                ("surname", json!("ТЕСТОВ")),
+                ("given_names", json!("ПЁТР НИКОЛАЕВИЧ")),
+                ("issue_date", json!("2020-05-01")),
+            ],
+        )
+        .await,
+    );
+    let id = upload_fixture(&r.app, "contract_ru_digital.pdf", false).await;
+    process_all(&r.app, id).await;
+
+    let doc = view(&r.app, id).await;
+    assert_eq!(doc.people.len(), 1, "{:?}", doc.people);
+    assert_ne!(doc.people[0].id, relative.id);
+    assert!(
+        doc.people[0].name.contains("Пётр"),
+        "{}",
+        doc.people[0].name
+    );
+    assert_eq!(doc.title.as_deref(), Some("Тестов Пётр Николаевич, 2020"));
+}

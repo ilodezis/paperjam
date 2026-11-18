@@ -20,6 +20,7 @@ use image::ImageFormat;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::config::LlmProvider;
 use crate::error::{Result, ServiceError};
 use crate::extract::quality;
 use crate::ids::DocumentId;
@@ -37,13 +38,13 @@ use crate::random;
 use crate::service::documents::{Layer, best_layer};
 use crate::service::{Actor, App, taxonomy};
 
-/// Pages per transcription request (spec §7.4: start at about 8, keeping each
-/// request far below 100K input tokens).
-pub const TRANSCRIBE_BATCH_PAGES: usize = 8;
+/// Pages per transcription request: small enough to run multiple batches in
+/// parallel on multi-page scans while keeping overhead modest on short files.
+pub const TRANSCRIBE_BATCH_PAGES: usize = 3;
 /// Longest edge of the page images sent to the model.
 const PAGE_IMAGE_MAX_EDGE: u32 = 1600;
 /// Transcription batches sent to the model at the same time.
-const TRANSCRIBE_CONCURRENCY: usize = 3;
+const TRANSCRIBE_CONCURRENCY: usize = 4;
 /// Characters of document text sent to steps B and C.
 const TEXT_CAP_CHARS: usize = 60_000;
 /// Pages taken first when the text must be cut: the start and the end of a
@@ -497,6 +498,14 @@ impl<'a> Steps<'a> {
         schema: Value,
         max_tokens: u32,
     ) -> Result<T> {
+        let reasoning_effort = self.app.config.llm_reasoning_effort.clone().or_else(|| {
+            // Skip thinking tokens on pure extraction steps on OpenRouter so
+            // transcription and field extraction stay fast and cheap; `LlmClient`
+            // falls back to `low` if a configured model rejects `none`.
+            (self.client.provider() == LlmProvider::OpenRouter
+                && matches!(step, "transcribe" | "fields"))
+            .then(|| "none".to_string())
+        });
         let result = self
             .client
             .chat_json::<T>(JsonRequest {
@@ -505,7 +514,7 @@ impl<'a> Steps<'a> {
                 user_content,
                 schema_name: schema_name.to_string(),
                 schema,
-                reasoning_effort: self.app.config.llm_reasoning_effort.clone(),
+                reasoning_effort,
                 max_tokens,
             })
             .await;

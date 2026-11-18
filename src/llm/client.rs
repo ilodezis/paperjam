@@ -167,6 +167,10 @@ impl LlmClient {
         self
     }
 
+    pub fn provider(&self) -> LlmProvider {
+        self.provider
+    }
+
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.http = build_http(timeout);
         self
@@ -187,7 +191,26 @@ impl LlmClient {
                 ),
             )
         })?;
-        let answer = self.complete(&request_body(&req, self.provider)).await?;
+        let mut body = request_body(&req, self.provider);
+        let answer = match self.complete(&body).await {
+            // Some OpenRouter endpoints (e.g. Sonnet/Opus 5.5) require
+            // reasoning and reject `effort: "none"` with HTTP 400; fall back
+            // once to the default effort rather than failing the document.
+            Err(e)
+                if self.provider == LlmProvider::OpenRouter
+                    && req.reasoning_effort.as_deref() == Some("none")
+                    && e.code == "llm_rejected"
+                    && e.message.ends_with("(HTTP 400)") =>
+            {
+                tracing::info!(
+                    model = %req.model,
+                    "provider rejected reasoning effort `none`, retrying with `{DEFAULT_REASONING_EFFORT}`"
+                );
+                body["reasoning"]["effort"] = json!(DEFAULT_REASONING_EFFORT);
+                self.complete(&body).await?
+            }
+            other => other?,
+        };
         let usage = answer.usage;
         let fail = |code: &'static str, message: String| {
             ServiceError::upstream(code, message).with_details(usage.to_details())

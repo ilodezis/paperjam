@@ -6,6 +6,14 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- OpenRouter requests now default `reasoning.effort` to `none` for page transcription and field extraction (keeping `low` for classification), automatically falling back to `low` if a model returns HTTP 400. Multi-page scans transcribe in 3-page batches (up to 4 concurrent) and local PDF extraction scales page concurrency up to 4 per worker based on available CPU cores.
+- Image deskew rotation now uses fixed-point incremental sampling, and unsearched PDF pages skip downscaled search-copy generation.
+
+### Fixed
+- Turn search and full-page OCR now fall back to sparse page segmentation (`--psm 11`) when default segmentation (`--psm 3`) drops valid text on sparse or photo-heavy spreads, and ambiguous turn-search fallbacks stay at the upright scan orientation instead of applying a low-confidence OSD flip.
+- Identity documents now guard against matching a relative who shares only a surname or patronymic: classification prompts explicitly require a full-holder match, mismatched non-manual links are pruned once `surname`/`given_names` are extracted so the actual holder can be linked, and auto-generated titles referencing a mismatched person are updated to the extracted holder.
+
 ## [0.1.0] - 2026-11-14
 
 ### Added

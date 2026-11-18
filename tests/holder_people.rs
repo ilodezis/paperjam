@@ -554,3 +554,51 @@ async fn relinking_brings_existing_documents_along() {
     let again = pipeline::people::relink_all(&app).await.unwrap();
     assert_eq!((again.created, again.changed), (0, 0));
 }
+
+#[tokio::test]
+async fn a_relative_picked_by_the_model_is_replaced_by_the_extracted_holder() {
+    let (_env, app) = app().await;
+    let ctx = app.ctx(Actor::system());
+    let relative = taxonomy::create_person(
+        &ctx,
+        paperjam::model::taxonomy::NewPerson {
+            name: "Тестов Борис Петрович".into(),
+            aliases: vec!["Борис Тестов".into()],
+            notes: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let id = identity_doc(
+        &app,
+        "relative_mismatch.txt",
+        "Паспорт ТЕСТОВ ПЕТР НИКОЛАЕВИЧ",
+        "passport",
+        &[("surname", "ТЕСТОВ"), ("given_names", "ПЕТР НИКОЛАЕВИЧ")],
+    )
+    .await;
+    // Simulate a classification step that wrongly linked the relative (`llm`)
+    // before extracted fields settled the holder.
+    sqlx::query("DELETE FROM document_people WHERE document_id = ?")
+        .bind(id)
+        .execute(&app.db.write)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO document_people (document_id, person_id, provenance) VALUES (?, ?, 'llm')",
+    )
+    .bind(id)
+    .bind(relative.id)
+    .execute(&app.db.write)
+    .await
+    .unwrap();
+
+    reprocess(&app, id).await;
+
+    let linked = people_of(&app, id).await;
+    assert_eq!(linked.len(), 1);
+    assert_ne!(linked[0].0, relative.id);
+    let people = all_people(&app).await;
+    let holder = people.iter().find(|p| p.id == linked[0].0).unwrap();
+    assert!(holder.name.contains("Петр"), "{}", holder.name);
+}

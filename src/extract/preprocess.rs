@@ -181,33 +181,48 @@ pub(crate) fn rotate_pixels<const N: usize>(
     if w == 0 || h == 0 {
         return out;
     }
-    let (sin, cos) = degrees.to_radians().sin_cos();
-    let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
-    let (last_x, last_y) = (width as f32 - 0.5, height as f32 - 0.5);
+    let (sin, cos) = f64::from(degrees).to_radians().sin_cos();
+    let (cx, cy) = (f64::from(width) / 2.0, f64::from(height) / 2.0);
     let row_len = w * N;
-    let column = |v: f32| (v.max(0.0) as usize).min(w - 1);
-    let line = |v: f32| (v.max(0.0) as usize).min(h - 1) * row_len;
+    // 20 fractional bits keep accumulated row-step drift under 0.002 px across
+    // an A4 page, well below the 1/256 bilinear weight resolution.
+    const FRAC_BITS: u32 = 20;
+    let fp_scale = (1_i64 << FRAC_BITS) as f64;
+    let step_x_x = (cos * fp_scale).round() as i64;
+    let step_x_y = (-sin * fp_scale).round() as i64;
+    let min_coord = -(1_i64 << (FRAC_BITS - 1));
+    let max_x = ((i64::from(width)) << FRAC_BITS) - (1_i64 << (FRAC_BITS - 1));
+    let max_y = ((i64::from(height)) << FRAC_BITS) - (1_i64 << (FRAC_BITS - 1));
+    let last_col = (w - 1) as i64;
+    let last_row = (h - 1) as i64;
     for (y, row) in out.chunks_exact_mut(row_len).enumerate() {
-        let dy = y as f32 + 0.5 - cy;
-        for (x, pixel) in row.as_chunks_mut::<N>().0.iter_mut().enumerate() {
-            let dx = x as f32 + 0.5 - cx;
-            let sx = cx + cos * dx + sin * dy - 0.5;
-            let sy = cy - sin * dx + cos * dy - 0.5;
-            if sx < -0.5 || sy < -0.5 || sx > last_x || sy > last_y {
+        let dy = y as f64 + 0.5 - cy;
+        let dx0 = 0.5 - cx;
+        let mut sx = ((cx + cos * dx0 + sin * dy - 0.5) * fp_scale).round() as i64;
+        let mut sy = ((cy - sin * dx0 + cos * dy - 0.5) * fp_scale).round() as i64;
+        for pixel in row.as_chunks_mut::<N>().0.iter_mut() {
+            if sx < min_coord || sy < min_coord || sx > max_x || sy > max_y {
                 *pixel = fill;
-                continue;
+            } else {
+                // Round to 1/256 px before splitting into floor + bilinear weight.
+                let qx = (sx + (1 << (FRAC_BITS - 9))) >> (FRAC_BITS - 8);
+                let qy = (sy + (1 << (FRAC_BITS - 9))) >> (FRAC_BITS - 8);
+                let (x0, y0) = (qx >> 8, qy >> 8);
+                let fx = (qx & 255) as u32;
+                let fy = (qy & 255) as u32;
+                let left = x0.clamp(0, last_col) as usize * N;
+                let right = (x0 + 1).clamp(0, last_col) as usize * N;
+                let top = y0.clamp(0, last_row) as usize * row_len;
+                let bottom = (y0 + 1).clamp(0, last_row) as usize * row_len;
+                for (c, value) in pixel.iter_mut().enumerate() {
+                    let at = |row: usize, col: usize| u32::from(src[row + col + c]);
+                    let upper = at(top, left) * (256 - fx) + at(top, right) * fx;
+                    let lower = at(bottom, left) * (256 - fx) + at(bottom, right) * fx;
+                    *value = ((upper * (256 - fy) + lower * fy + (1 << 15)) >> 16) as u8;
+                }
             }
-            let (x0, y0) = (sx.floor(), sy.floor());
-            let fx = ((sx - x0) * 256.0).round() as u32;
-            let fy = ((sy - y0) * 256.0).round() as u32;
-            let (left, right) = (column(x0) * N, column(x0 + 1.0) * N);
-            let (top, bottom) = (line(y0), line(y0 + 1.0));
-            for (c, value) in pixel.iter_mut().enumerate() {
-                let at = |row: usize, col: usize| u32::from(src[row + col + c]);
-                let upper = at(top, left) * (256 - fx) + at(top, right) * fx;
-                let lower = at(bottom, left) * (256 - fx) + at(bottom, right) * fx;
-                *value = ((upper * (256 - fy) + lower * fy + (1 << 15)) >> 16) as u8;
-            }
+            sx += step_x_x;
+            sy += step_x_y;
         }
     }
     out

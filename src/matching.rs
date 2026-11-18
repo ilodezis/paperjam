@@ -101,7 +101,7 @@ fn within_one_edit(a: &str, b: &str) -> bool {
     (a.len() - prefix - suffix).max(b.len() - prefix - suffix) <= 1
 }
 
-fn token_matches(alias: &str, text: &str) -> bool {
+pub fn token_matches(alias: &str, text: &str) -> bool {
     alias == text
         || (alias.chars().count() >= FUZZY_MIN_LEN
             && text.chars().count() >= FUZZY_MIN_LEN

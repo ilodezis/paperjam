@@ -259,6 +259,30 @@ async fn client_errors_are_not_retried() {
 }
 
 #[tokio::test]
+async fn openrouter_none_effort_falls_back_to_low_on_http_400() {
+    let mock = MockOpenRouter::start().await;
+    mock.enqueue(MockReply::status(400));
+    mock.enqueue(MockReply::ok(&good()));
+    let mut req = request();
+    req.reasoning_effort = Some("none".to_string());
+    let (answer, _) = client(&mock).chat_json::<Answer>(req).await.unwrap();
+    assert_eq!(answer.title, "Lease");
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["reasoning"]["effort"], "none");
+    assert_eq!(requests[1].body["reasoning"]["effort"], "low");
+
+    // Non-400 client errors (such as 401 invalid key) still do not retry.
+    let mock = MockOpenRouter::start().await;
+    mock.enqueue(MockReply::status(401));
+    let mut req = request();
+    req.reasoning_effort = Some("none".to_string());
+    let err = client(&mock).chat_json::<Answer>(req).await.unwrap_err();
+    assert_eq!(err.code, "llm_rejected");
+    assert_eq!(mock.request_count(), 1);
+}
+
+#[tokio::test]
 async fn a_slow_answer_times_out_and_is_retried() {
     let mock = MockOpenRouter::start().await;
     mock.enqueue(MockReply::ok(&good()).delayed(Duration::from_millis(600)));

@@ -114,6 +114,10 @@ async fn link_by_name(
 /// Types whose holder is the person the document is about. Other documents
 /// that carry names (a birth certificate's parents, a contract's signatories,
 /// a diploma's holder on a form) never create people.
+pub(crate) fn is_holder_type(type_key: &str) -> bool {
+    HOLDER_TYPES.contains(&type_key)
+}
+
 const HOLDER_TYPES: [&str; 5] = [
     "passport",
     "id_card",
@@ -172,6 +176,148 @@ struct Holder {
     aliases: Vec<String>,
     /// Both names come from the machine-readable zone.
     from_mrz: bool,
+}
+
+fn is_patronymic_word(word: &str) -> bool {
+    is_patronymic_ending(word) || {
+        let lower = word.to_lowercase();
+        lower.ends_with("ovich")
+            || lower.ends_with("evich")
+            || lower.ends_with("ovna")
+            || lower.ends_with("evna")
+            || lower.ends_with("ichna")
+            || lower.ends_with("inichna")
+    }
+}
+
+/// Rough consonant skeleton of an already-normalized token for cross-script
+/// spellings that differ by more than one edit (e.g. `Alexander`/`Александр`,
+/// `Dmitry`/`Дмитрий`). Keeps a leading `+` when the name begins with a vowel.
+fn consonant_skeleton(norm: &str) -> String {
+    let mut out = String::with_capacity(norm.len());
+    let mut chars = norm.chars().peekable();
+    if let Some(&first) = chars.peek()
+        && matches!(first, 'a' | 'e' | 'i' | 'o' | 'u' | 'y')
+    {
+        out.push('+');
+    }
+    let mut push_dedup = |c: char| {
+        if !out.ends_with(c) {
+            out.push(c);
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'h' => {}
+            'p' if chars.peek() == Some(&'h') => {
+                chars.next();
+                push_dedup('f');
+            }
+            'x' => {
+                push_dedup('k');
+                push_dedup('s');
+            }
+            'c' | 'q' => push_dedup('k'),
+            'w' => push_dedup('v'),
+            other => push_dedup(other),
+        }
+    }
+    out
+}
+
+fn words_compatible(a: &str, b: &str) -> bool {
+    let na = matching::normalize(a);
+    let nb = matching::normalize(b);
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
+    if matching::token_matches(&na, &nb) {
+        return true;
+    }
+    let script_differs = match (matching::cyrillic(a), matching::cyrillic(b)) {
+        (Some(ca), Some(cb)) => ca != cb,
+        _ => false,
+    };
+    if !script_differs {
+        return false;
+    }
+    let sa = consonant_skeleton(&na);
+    let sb = consonant_skeleton(&nb);
+    let consonants = |s: &str| s.chars().filter(|c| *c != '+').count();
+    consonants(&sa) >= 3 && sa == sb
+}
+
+fn split_name_words(name: &str) -> Vec<&str> {
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Whether `person_names` (`[name, aliases...]`) can represent an identity
+/// document's extracted `surname` and/or `given_names`. Rejects family members
+/// or relatives who share only a surname or patronymic when at least one name
+/// field disagrees cleanly.
+pub(crate) fn person_matches_holder(
+    person_names: &[String],
+    surname: Option<&str>,
+    given_names: Option<&str>,
+) -> bool {
+    let surname_clean = surname.map(|s| match given_names {
+        Some(g) => without_given_names(s, g),
+        None => s.to_string(),
+    });
+    let surname_words: Vec<&str> = surname_clean
+        .as_deref()
+        .map(split_name_words)
+        .unwrap_or_default();
+    let mut given_words: Vec<&str> = given_names.map(split_name_words).unwrap_or_default();
+    if given_words.len() >= 2 && is_patronymic_word(given_words[given_words.len() - 1]) {
+        given_words.pop();
+    }
+    if surname_words.is_empty() && given_words.is_empty() {
+        return true;
+    }
+    person_names.iter().any(|alias| {
+        let raw = split_name_words(alias);
+        if raw.is_empty() {
+            return false;
+        }
+        let mut core = if raw.len() >= 3 {
+            let non_pat: Vec<&str> = raw
+                .iter()
+                .copied()
+                .filter(|w| !is_patronymic_word(w))
+                .collect();
+            if non_pat.len() >= 2 { non_pat } else { raw }
+        } else {
+            raw
+        };
+        if !surname_words.is_empty() {
+            let matched = core
+                .iter()
+                .position(|aw| surname_words.iter().any(|sw| words_compatible(sw, aw)));
+            if core.len() >= 2 {
+                let Some(idx) = matched else {
+                    return false;
+                };
+                core.remove(idx);
+            } else if let Some(idx) = matched {
+                core.remove(idx);
+            }
+        }
+        if !given_words.is_empty() {
+            if core.is_empty() {
+                return false;
+            }
+            if !given_words
+                .iter()
+                .any(|gw| core.iter().any(|aw| words_compatible(gw, aw)))
+            {
+                return false;
+            }
+        }
+        true
+    })
 }
 
 fn is_patronymic_ending(word: &str) -> bool {
@@ -281,6 +427,114 @@ pub(super) enum HolderLink {
 /// model has had its say about the names) and never while the document
 /// carries `mrz_mismatch`: a holder name the zone and the printed page
 /// disagree about is for the user to confirm, not to become a person.
+async fn preferred_holder_name(
+    conn: &mut SqliteConnection,
+    id: DocumentId,
+    holder: &Holder,
+) -> Result<(String, Option<String>)> {
+    let want_cyrillic = added_by_prefers_cyrillic(conn, id).await?;
+    Ok(match &holder.other {
+        Some(other) if matching::cyrillic(&holder.name) != Some(want_cyrillic) => {
+            (other.clone(), Some(holder.name.clone()))
+        }
+        other => (holder.name.clone(), other.clone()),
+    })
+}
+
+/// Removes non-manual links on identity documents whose person contradicts the
+/// extracted `surname` / `given_names` fields (for instance a relative sharing a
+/// surname or patronymic picked during classification). Returns the removed
+/// person entries so downstream steps can also reconcile an auto-generated title.
+pub(crate) async fn prune_mismatched_holder_people(
+    conn: &mut SqliteConnection,
+    id: DocumentId,
+) -> Result<Vec<(PersonId, Vec<String>)>> {
+    let key: Option<String> = sqlx::query_scalar(
+        "SELECT t.key FROM documents d JOIN document_types t ON t.id = d.type_id WHERE d.id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if !key.is_some_and(|k| is_holder_type(&k)) || decided_by_hand(conn, id).await? {
+        return Ok(Vec::new());
+    }
+    let surname = name_field(conn, id, "surname").await?.map(|(v, _)| v);
+    let given = name_field(conn, id, "given_names").await?.map(|(v, _)| v);
+    if surname.is_none() && given.is_none() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(PersonId, String, String, String)> = sqlx::query_as(
+        "SELECT dp.person_id, dp.provenance, p.name, p.aliases \
+         FROM document_people dp JOIN people p ON p.id = dp.person_id \
+         WHERE dp.document_id = ? AND dp.provenance <> 'manual'",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut removed = Vec::new();
+    for (person_id, provenance, name, aliases) in rows {
+        let names = names_and_aliases(name, &aliases);
+        if !person_matches_holder(&names, surname.as_deref(), given.as_deref()) {
+            sqlx::query(
+                "DELETE FROM document_people WHERE document_id = ? AND person_id = ? AND provenance = ?",
+            )
+            .bind(id)
+            .bind(person_id)
+            .bind(provenance)
+            .execute(&mut *conn)
+            .await?;
+            removed.push((person_id, names));
+        }
+    }
+    Ok(removed)
+}
+
+/// If `title_head` (an identity document's title before `, YYYY`) names a
+/// mismatching listed person (either pruned above or present in `people`),
+/// returns the extracted holder's formatted name to replace it.
+pub(crate) async fn reconcile_holder_title(
+    conn: &mut SqliteConnection,
+    id: DocumentId,
+    title_head: &str,
+    removed: &[(PersonId, Vec<String>)],
+) -> Result<Option<String>> {
+    if contested(conn, id).await? {
+        return Ok(None);
+    }
+    let surname = name_field(conn, id, "surname").await?.map(|(v, _)| v);
+    let given = name_field(conn, id, "given_names").await?.map(|(v, _)| v);
+    if surname.is_none() && given.is_none() {
+        return Ok(None);
+    }
+    if person_matches_holder(
+        &[title_head.to_string()],
+        surname.as_deref(),
+        given.as_deref(),
+    ) {
+        return Ok(None);
+    }
+    let wrong: Vec<(PersonId, Vec<String>)> = if !removed.is_empty() {
+        removed.to_vec()
+    } else {
+        candidates(conn)
+            .await?
+            .into_iter()
+            .filter(|(_, names)| {
+                !person_matches_holder(names, surname.as_deref(), given.as_deref())
+            })
+            .collect()
+    };
+    if wrong.is_empty() || matching::find_person(title_head, &wrong).is_none() {
+        return Ok(None);
+    }
+    let text = stored_text(conn, id).await?;
+    if let Some(holder) = holder_of(conn, id, &text).await? {
+        let (preferred, _) = preferred_holder_name(conn, id, &holder).await?;
+        return Ok(Some(preferred));
+    }
+    Ok(given.map(|g| matching::readable_name(&g)))
+}
+
 pub(super) async fn link_holder(
     conn: &mut SqliteConnection,
     id: DocumentId,
@@ -293,15 +547,16 @@ pub(super) async fn link_holder(
     .bind(id)
     .fetch_optional(&mut *conn)
     .await?;
-    if !key.is_some_and(|k| HOLDER_TYPES.contains(&k.as_str())) {
+    if !key.is_some_and(|k| is_holder_type(&k)) || decided_by_hand(conn, id).await? {
         return Ok(HolderLink::None);
     }
+    prune_mismatched_holder_people(conn, id).await?;
     let has_people: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM document_people WHERE document_id = ?)")
             .bind(id)
             .fetch_one(&mut *conn)
             .await?;
-    if has_people || decided_by_hand(conn, id).await? {
+    if has_people {
         return Ok(HolderLink::None);
     }
     let Some(holder) = holder_of(conn, id, text).await? else {
@@ -319,19 +574,7 @@ pub(super) async fn link_holder(
         Some(person) => (person, HolderLink::Linked),
         None if !may_create || contested(conn, id).await? => return Ok(HolderLink::None),
         None => {
-            let locale: Option<String> = sqlx::query_scalar(
-                "SELECT u.locale FROM documents d JOIN users u ON u.id = d.added_by WHERE d.id = ?",
-            )
-            .bind(id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            let want_cyrillic = prefers_cyrillic(locale.as_deref().unwrap_or("en"));
-            let (name, alias) = match holder.other {
-                Some(other) if matching::cyrillic(&holder.name) != Some(want_cyrillic) => {
-                    (other, Some(holder.name))
-                }
-                other => (holder.name, other),
-            };
+            let (name, alias) = preferred_holder_name(conn, id, &holder).await?;
             let mut aliases = holder.aliases;
             if let Some(a) = alias.filter(|a| !aliases.contains(a) && a != &name) {
                 aliases.push(a);
@@ -605,7 +848,7 @@ pub async fn relink_all(app: &App) -> Result<Relinked> {
 
 #[cfg(test)]
 mod tests {
-    use super::without_given_names;
+    use super::{person_matches_holder, without_given_names};
 
     #[test]
     fn given_names_run_into_the_surname_are_not_repeated() {
@@ -620,5 +863,52 @@ mod tests {
         );
         assert_eq!(without_given_names("ANNA", "ANNA"), "ANNA");
         assert_eq!(without_given_names("TESTOVA", ""), "TESTOVA");
+    }
+
+    #[test]
+    fn holder_matching_distinguishes_relatives_sharing_surname_or_patronymic() {
+        let relative = vec![
+            "Тестов Петр Иванович".to_string(),
+            "Петр Тестов".to_string(),
+        ];
+        // Father/son or child sharing surname and patronymic root.
+        assert!(!person_matches_holder(
+            &relative,
+            Some("ТЕСТОВ"),
+            Some("ИВАН СЕРГЕЕВИЧ"),
+        ));
+        assert!(!person_matches_holder(
+            &relative,
+            None,
+            Some("ИВАН СЕРГЕЕВИЧ"),
+        ));
+        assert!(!person_matches_holder(
+            &relative,
+            Some("СИДОРОВ"),
+            Some("ПЕТР ИВАНОВИЧ"),
+        ));
+
+        // Actual holder in same or opposite script.
+        assert!(person_matches_holder(
+            &relative,
+            Some("ТЕСТОВ"),
+            Some("ПЕТР СЕРГЕЕВИЧ"),
+        ));
+        assert!(person_matches_holder(
+            &["Ivan Testov".to_string()],
+            Some("ТЕСТОВ"),
+            Some("ИВАН"),
+        ));
+        // Cross-script transliteration variants stay compatible.
+        assert!(person_matches_holder(
+            &["Alexander Ivanov".to_string()],
+            Some("ИВАНОВ"),
+            Some("АЛЕКСАНДР"),
+        ));
+        assert!(person_matches_holder(
+            &["Dmitry Petrov".to_string()],
+            Some("ПЕТРОВ"),
+            Some("ДМИТРИЙ"),
+        ));
     }
 }

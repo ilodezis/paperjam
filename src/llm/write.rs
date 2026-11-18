@@ -19,7 +19,7 @@ use crate::matching;
 use crate::model::document::{Provenance, Role};
 use crate::model::fields::{FieldDef, FieldValue, Labels};
 use crate::mrz::{self, NameAgreement};
-use crate::pipeline::checks;
+use crate::pipeline::{checks, people};
 use crate::service::{Actor, App, events};
 use crate::time;
 
@@ -250,6 +250,7 @@ type TitleRow = (String, Option<Provenance>, Option<String>, Option<String>);
 /// after the fields step; a title the user set stays as it is.
 pub async fn settle_title_year(app: &App, doc: DocumentId) -> Result<()> {
     let mut tx = app.db.write.begin().await?;
+    let removed = people::prune_mismatched_holder_people(&mut tx, doc).await?;
     let row: Option<TitleRow> = sqlx::query_as(
         "SELECT d.title, d.title_provenance, d.document_date, t.key \
          FROM documents d LEFT JOIN document_types t ON t.id = d.type_id WHERE d.id = ?",
@@ -258,12 +259,30 @@ pub async fn settle_title_year(app: &App, doc: DocumentId) -> Result<()> {
     .fetch_optional(&mut *tx)
     .await?;
     let Some((title, provenance, document_date, type_key)) = row else {
+        tx.commit().await?;
         return Ok(());
     };
+    let is_holder_doc = type_key.as_deref().is_some_and(people::is_holder_type);
     if provenance != Some(Provenance::Llm)
-        || !type_key.is_some_and(|k| ISSUE_YEAR_TITLES.contains(&k.as_str()))
+        || !type_key
+            .as_deref()
+            .is_some_and(|k| ISSUE_YEAR_TITLES.contains(&k))
     {
+        if !removed.is_empty() {
+            tx.commit().await?;
+        }
         return Ok(());
+    }
+    let (head, existing_year) = split_title_year(&title);
+    let mut base_title = title.clone();
+    if is_holder_doc
+        && let Some(holder_head) =
+            people::reconcile_holder_title(&mut tx, doc, head, &removed).await?
+    {
+        base_title = match existing_year {
+            Some(year) => format!("{holder_head}, {year}"),
+            None => holder_head,
+        };
     }
     let issued: Option<String> = sqlx::query_scalar(
         "SELECT value FROM field_values WHERE document_id = ? AND field_key = 'issue_date'",
@@ -277,27 +296,48 @@ pub async fn settle_title_year(app: &App, doc: DocumentId) -> Result<()> {
             _ => None,
         })
         .or_else(|| document_date.and_then(|d| d.get(..4).map(str::to_string)));
-    let Some(year) = issue_year else {
-        return Ok(());
+    let next_title = match issue_year.as_deref() {
+        Some(year) => with_title_year(&base_title, year).unwrap_or_else(|| {
+            if base_title != title && existing_year.is_none() {
+                format!("{base_title}, {year}")
+            } else {
+                base_title
+            }
+        }),
+        None => base_title,
     };
-    let Some(settled) = with_title_year(&title, &year) else {
+    if next_title == title && removed.is_empty() {
         return Ok(());
-    };
-    sqlx::query("UPDATE documents SET title = ? WHERE id = ?")
-        .bind(&settled)
-        .bind(doc)
-        .execute(&mut *tx)
-        .await?;
+    }
+    if next_title != title {
+        sqlx::query("UPDATE documents SET title = ? WHERE id = ?")
+            .bind(&next_title)
+            .bind(doc)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(())
+}
+
+fn split_title_year(title: &str) -> (&str, Option<&str>) {
+    let Some((head, tail)) = title.rsplit_once(", ") else {
+        return (title, None);
+    };
+    let is_year = tail.len() == 4 && tail.chars().all(|c| c.is_ascii_digit());
+    if is_year && !head.trim().is_empty() {
+        (head, Some(tail))
+    } else {
+        (title, None)
+    }
 }
 
 /// `title` with its trailing year (", 2031") replaced by `year`, or `None`
 /// when it ends in no year or already in this one.
 fn with_title_year(title: &str, year: &str) -> Option<String> {
-    let (head, tail) = title.rsplit_once(", ")?;
-    let is_year = tail.len() == 4 && tail.chars().all(|c| c.is_ascii_digit());
-    (is_year && tail != year && !head.trim().is_empty()).then(|| format!("{head}, {year}"))
+    let (head, tail) = split_title_year(title);
+    let tail = tail?;
+    (tail != year).then(|| format!("{head}, {year}"))
 }
 
 /// The model's title in the archive's format (see `normalize::title`): no type

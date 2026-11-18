@@ -152,6 +152,12 @@ impl Tesseract {
         self.recognise("3", img).await
     }
 
+    /// Recognises sparse or boxed text (`--psm 11`) as a fallback when automatic
+    /// page segmentation drops valid text regions.
+    pub async fn ocr_sparse(&self, img: &DynamicImage) -> Result<OcrPage> {
+        self.recognise("11", img).await
+    }
+
     async fn recognise(&self, psm: &str, img: &DynamicImage) -> Result<OcrPage> {
         let stdout = self
             .run(&["--psm", psm, "-l", &self.langs, "tsv"], img)

@@ -15,7 +15,7 @@ use crate::extract::clean;
 use crate::extract::image::{self as images, Webp, fit};
 use crate::extract::preprocess::{self, Straightening};
 use crate::extract::quality;
-use crate::extract::tesseract::{OcrPage, Tesseract, mrz_region};
+use crate::extract::tesseract::{OcrPage, Reading, Tesseract, mrz_region};
 use crate::extract::worker::Isolation;
 use crate::service::App;
 
@@ -37,9 +37,15 @@ const SMALL_EDGE: u32 = 2000;
 /// card cut out of a sheet is smaller already; a full page reads its right
 /// turn as well as at 2000 and its wrong turns worse, which tells them apart.
 const SEARCH_EDGE: u32 = 1200;
-/// Pages of a PDF read at once. Each holds one page in memory and runs one
-/// single-threaded Tesseract.
-const PAGES_IN_FLIGHT: usize = 2;
+/// Maximum PDF pages processed concurrently per document.
+const MAX_PAGES_IN_FLIGHT: usize = 4;
+
+fn pages_in_flight(ocr_workers: usize) -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2);
+    (cores / ocr_workers.max(1)).clamp(2, MAX_PAGES_IN_FLIGHT)
+}
 
 /// What the pipeline needs to know about the original.
 pub struct SourceFile {
@@ -156,7 +162,15 @@ pub async fn extract(app: &App, file: &SourceFile) -> Result<LocalOutput> {
     let tesseract = Tesseract::new(app.config.ocr_langs.clone());
     let isolation = Isolation::new(&app.config);
     let out = match file.mime.as_str() {
-        "application/pdf" => pdf(&isolation, &tesseract, bytes).await,
+        "application/pdf" => {
+            pdf(
+                &isolation,
+                &tesseract,
+                bytes,
+                pages_in_flight(app.config.ocr_workers),
+            )
+            .await
+        }
         "text/plain" | "text/markdown" => Ok(text(&bytes)),
         mime => image(&isolation, &tesseract, bytes, mime.to_string()).await,
     }?;
@@ -300,7 +314,12 @@ async fn image(
     Ok(out)
 }
 
-async fn pdf(isolation: &Isolation, tesseract: &Tesseract, bytes: Vec<u8>) -> Result<LocalOutput> {
+async fn pdf(
+    isolation: &Isolation,
+    tesseract: &Tesseract,
+    bytes: Vec<u8>,
+    in_flight: usize,
+) -> Result<LocalOutput> {
     // The worker reads the embedded text of every page first (this also
     // rejects encrypted, corrupt and over-long documents), with the density of
     // the scan behind each page that goes to OCR; then it renders the pages
@@ -316,7 +335,7 @@ async fn pdf(isolation: &Isolation, tesseract: &Tesseract, bytes: Vec<u8>) -> Re
     let receiver = run.pages;
     let needs_ocr: Vec<bool> = embedded.iter().map(quality::needs_ocr).collect();
 
-    // Renders are taken in page order; up to PAGES_IN_FLIGHT pages are read
+    // Renders are taken in page order; up to `in_flight` pages are read
     // at once, and the results come back in page order.
     let pages = embedded
         .into_iter()
@@ -353,7 +372,7 @@ async fn pdf(isolation: &Isolation, tesseract: &Tesseract, bytes: Vec<u8>) -> Re
                     pdf_page(&tesseract, n, (embedded, needs_ocr, native), rendered, took).await
                 }
             })
-            .buffered(PAGES_IN_FLIGHT);
+            .buffered(in_flight);
     let mut read = std::pin::pin!(read);
 
     let mut out = LocalOutput {
@@ -618,7 +637,7 @@ async fn ocr_page(
             // Orientation, and how each turn reads, need no full resolution.
             let small = shrunk(&gray, SMALL_EDGE);
             // Made from the page itself: scaled down twice, it reads worse.
-            let searched = shrunk(&gray, SEARCH_EDGE);
+            let searched = search.then(|| shrunk(&gray, SEARCH_EDGE));
             Ok((image, gray, small, searched, cut, pt_per_px))
         })
         .await,
@@ -631,24 +650,29 @@ async fn ocr_page(
     drop(small);
     let detected = orientation.trusted();
     let unsure = orientation.confidence < SURE_OSD_CONFIDENCE;
-    let (mut turn, mut page, mut mrz_text, mut straightening) = if search && unsure {
-        // Upright first: most pages are.
-        let hint = orientation.degrees;
-        let turn = choose_turn(tesseract, &searched, 0, hint, detected, &mut times).await?;
-        let (page, mrz_text, straightening) = read_page(tesseract, &gray, turn, &mut times).await?;
-        (turn, page, mrz_text, straightening)
-    } else {
-        let (page, mrz_text, straightening) =
-            read_page(tesseract, &gray, detected, &mut times).await?;
-        (detected, page, mrz_text, straightening)
+    let (mut turn, mut page, mut mrz_text, mut straightening) = match searched.as_ref() {
+        Some(searched) if unsure => {
+            // Upright first: most pages are.
+            let hint = orientation.degrees;
+            let turn = choose_turn(tesseract, searched, 0, hint, &mut times).await?;
+            let (page, mrz_text, straightening) =
+                read_page(tesseract, &gray, turn, &mut times).await?;
+            (turn, page, mrz_text, straightening)
+        }
+        _ => {
+            let (page, mrz_text, straightening) =
+                read_page(tesseract, &gray, detected, &mut times).await?;
+            (detected, page, mrz_text, straightening)
+        }
     };
     // A sure verdict on a sparse page that still reads poorly: other turns
     // are tried on the search copy (a full reading is not comparable).
-    if search && !unsure && is_sparse(&page) && page.legible_chars() < LEGIBLE_ENOUGH {
-        let better = choose_turn(
-            tesseract, &searched, detected, detected, detected, &mut times,
-        )
-        .await?;
+    if let Some(searched) = searched.as_ref()
+        && !unsure
+        && is_sparse(&page)
+        && page.legible_chars() < LEGIBLE_ENOUGH
+    {
+        let better = choose_turn(tesseract, searched, detected, detected, &mut times).await?;
         if better != turn {
             turn = better;
             (page, mrz_text, straightening) = read_page(tesseract, &gray, turn, &mut times).await?;
@@ -661,11 +685,22 @@ async fn ocr_page(
     let started = Instant::now();
     let (upright, clean) = joined(
         tokio::task::spawn_blocking(move || {
-            let upright = turned(&image, turn).into_owned();
-            drop(image);
-            let rgb = upright.to_rgb8();
+            let upright = match turn {
+                90 => image.rotate90(),
+                180 => image.rotate180(),
+                270 => image.rotate270(),
+                _ => image,
+            };
+            let converted;
+            let rgb = match upright.as_rgb8() {
+                Some(rgb) => rgb,
+                None => {
+                    converted = upright.to_rgb8();
+                    &converted
+                }
+            };
             let changed = cut || turn != 0 || straightening.changes(rgb.width(), rgb.height());
-            let clean = clean::straighten(&rgb, straightening.degrees, straightening.crop);
+            let clean = clean::straighten(rgb, straightening.degrees, straightening.crop);
             Ok((
                 upright,
                 CleanSource {
@@ -804,14 +839,41 @@ async fn encode_clean(
 /// lines of a machine-readable zone counting extra, and whether its words
 /// stand on end (the page lies sideways at this turn), when there are enough
 /// of them to tell.
+fn reading_score(reading: &Reading) -> usize {
+    reading.legible + zone_lines(&reading.flat_text) * ZONE_LINE_WEIGHT
+}
+
+/// Runs default automatic page segmentation first (preserving word bounding
+/// boxes for sideways-block detection); when it drops layout blocks and yields
+/// fewer than [`MIN_WORDS_FOR_AXIS`] words, falls back to sparse mode
+/// (`--psm 11`) and keeps whichever reading scores higher.
+async fn ocr_with_sparse_fallback(tesseract: &Tesseract, img: &DynamicImage) -> Result<OcrPage> {
+    let page = tesseract.ocr(img).await?;
+    let reading = page.reading();
+    if reading.words >= MIN_WORDS_FOR_AXIS {
+        return Ok(page);
+    }
+    let sparse = tesseract.ocr_sparse(img).await?;
+    let sparse_reading = sparse.reading();
+    if (reading_score(&sparse_reading), sparse_reading.words)
+        > (reading_score(&reading), reading.words)
+    {
+        Ok(sparse)
+    } else {
+        Ok(page)
+    }
+}
+
 async fn turn_score(
     tesseract: &Tesseract,
     gray: &Arc<DynamicImage>,
     degrees: u16,
 ) -> Result<(usize, Option<bool>)> {
     let (prepared, _) = prepare(gray, degrees).await?;
-    let reading = tesseract.ocr(&prepared).await?.reading();
-    let score = reading.legible + zone_lines(&reading.flat_text) * ZONE_LINE_WEIGHT;
+    let reading = ocr_with_sparse_fallback(tesseract, &prepared)
+        .await?
+        .reading();
+    let score = reading_score(&reading);
     let sideways =
         (reading.words >= MIN_WORDS_FOR_AXIS).then_some(reading.standing * 2 >= reading.words);
     Ok((score, sideways))
@@ -831,18 +893,17 @@ impl Tried {
 /// first turn read says whether the page lies along it or across it: the
 /// better of the two turns on that line is taken when it reads clearly better
 /// than its opposite (`hint`, orientation detection's verdict, is tried
-/// first). Only a page that says neither is read every way; `detected` then
-/// stays unless another turn reads clearly better.
+/// first). Only a page that says neither is read every way; `first` then stays
+/// unless another turn reads clearly better.
 async fn choose_turn(
     tesseract: &Tesseract,
     gray: &Arc<DynamicImage>,
     first: u16,
     hint: u16,
-    detected: u16,
     times: &mut PageTimes,
 ) -> Result<u16> {
     let started = Instant::now();
-    let chosen = search_turns(tesseract, gray, first, hint, detected, times).await;
+    let chosen = search_turns(tesseract, gray, first, hint, times).await;
     times.search += started.elapsed();
     chosen
 }
@@ -852,7 +913,6 @@ async fn search_turns(
     gray: &Arc<DynamicImage>,
     first: u16,
     hint: u16,
-    detected: u16,
     times: &mut PageTimes,
 ) -> Result<u16> {
     let mut tried = Tried(Vec::with_capacity(TURNS.len()));
@@ -897,18 +957,25 @@ async fn search_turns(
             }
         }
     }
-    let current = tried.score(detected).unwrap_or(0);
+    Ok(pick_fallback(&tried, first))
+}
+
+/// Picks between `first` and the strongest turn in `tried`: stays at `first`
+/// unless another turn both meets [`MIN_LEGIBLE`] and beats `first` by more
+/// than a quarter (avoiding low-confidence flips on ambiguous or empty scans).
+fn pick_fallback(tried: &Tried, first: u16) -> u16 {
+    let baseline = tried.score(first).unwrap_or(0);
     // The first of equal scores, in the order they were tried.
     let best = tried
         .0
         .iter()
         .copied()
         .reduce(|best, next| if next.1 > best.1 { next } else { best })
-        .unwrap_or((detected, 0));
-    if best.1 >= MIN_LEGIBLE && best.1 * 4 > current * 5 {
-        Ok(best.0)
+        .unwrap_or((first, 0));
+    if best.1 >= MIN_LEGIBLE && best.1 * 4 > baseline * 5 {
+        best.0
     } else {
-        Ok(detected)
+        first
     }
 }
 
@@ -931,7 +998,7 @@ async fn read_page(
 ) -> Result<(OcrPage, Option<String>, Straightening)> {
     let started = Instant::now();
     let (prepared, straightening) = prepare(gray, degrees).await?;
-    let page = tesseract.ocr(&prepared).await?;
+    let page = ocr_with_sparse_fallback(tesseract, &prepared).await?;
     times.read += started.elapsed();
     times.reads += 1;
     let started = Instant::now();
@@ -1054,7 +1121,7 @@ mod tests {
         let tesseract = Tesseract::new("rus+ron+eng");
         let upright = gray(cut_out_content(image("passport_td3.png")));
         assert_eq!(
-            choose_turn(&tesseract, &upright, 90, 90, 90, &mut PageTimes::default())
+            choose_turn(&tesseract, &upright, 90, 90, &mut PageTimes::default())
                 .await
                 .unwrap(),
             0
@@ -1074,7 +1141,7 @@ mod tests {
             // Orientation detection's usual mistake: the opposite turn.
             let wrong = (right + 180) % 360;
             let mut times = PageTimes::default();
-            let turn = choose_turn(&tesseract, &laid, 0, wrong, wrong, &mut times)
+            let turn = choose_turn(&tesseract, &laid, 0, wrong, &mut times)
                 .await
                 .unwrap();
             assert_eq!(turn, right, "lying {lying}");
@@ -1098,7 +1165,7 @@ mod tests {
         let page = gray(image("scan_ru.png"));
         let mut times = PageTimes::default();
         assert_eq!(
-            choose_turn(&tesseract, &page, 0, 0, 0, &mut times)
+            choose_turn(&tesseract, &page, 0, 0, &mut times)
                 .await
                 .unwrap(),
             0
@@ -1234,7 +1301,7 @@ mod tests {
                 .to_ascii_lowercase();
             let started = Instant::now();
             let out = match extension.as_str() {
-                "pdf" => pdf(&isolation, &tesseract, bytes).await,
+                "pdf" => pdf(&isolation, &tesseract, bytes, pages_in_flight(1)).await,
                 "jpg" | "jpeg" => {
                     super::image(&isolation, &tesseract, bytes, "image/jpeg".into()).await
                 }
@@ -1315,6 +1382,31 @@ mod tests {
         };
         assert!(is_sparse(&page(40)));
         assert!(!is_sparse(&page(600)));
+    }
+
+    #[test]
+    fn fallback_keeps_first_turn_when_all_turns_tie_or_barely_differ() {
+        // Low scores (< MIN_LEGIBLE) never trigger a turn flip.
+        let empty = Tried(vec![(0, 0), (180, 0), (90, 0), (270, 0)]);
+        assert_eq!(pick_fallback(&empty, 0), 0);
+
+        let weak = Tried(vec![(0, 0), (180, 7), (90, 0), (270, 0)]);
+        assert_eq!(pick_fallback(&weak, 0), 0);
+
+        // A small margin over `first` (< 25%) keeps `first`.
+        let narrow = Tried(vec![(0, 40), (180, 48), (90, 5), (270, 5)]);
+        assert_eq!(pick_fallback(&narrow, 0), 0);
+
+        // A clear winner (>= MIN_LEGIBLE and > 1.25x baseline) wins.
+        let clear = Tried(vec![(0, 20), (180, 40), (90, 5), (270, 5)]);
+        assert_eq!(pick_fallback(&clear, 0), 180);
+    }
+
+    #[test]
+    fn pages_in_flight_is_clamped() {
+        assert!((2..=MAX_PAGES_IN_FLIGHT).contains(&pages_in_flight(0)));
+        assert!((2..=MAX_PAGES_IN_FLIGHT).contains(&pages_in_flight(1)));
+        assert_eq!(pages_in_flight(64), 2);
     }
 
     /// The clean page of `pdf`'s first page as the pipeline builds it for a
