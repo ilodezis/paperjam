@@ -888,6 +888,13 @@
                 "key": {
                   "type": "string"
                 },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "What the fact is, in the uploader's language."
+                },
                 "value": {
                   "type": "string"
                 },
@@ -2245,6 +2252,13 @@
               "properties": {
                 "key": {
                   "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "What the fact is, in the uploader's language."
                 },
                 "value": {
                   "type": "string"

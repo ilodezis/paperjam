@@ -41,6 +41,7 @@ pub fn transcription_schema() -> Value {
         ("page".to_string(), json!({"type": "integer"})),
         ("markdown".to_string(), json!({"type": "string"})),
         ("illegible".to_string(), json!({"type": "boolean"})),
+        ("handwritten".to_string(), json!({"type": "boolean"})),
     ]));
     closed_object(Map::from_iter([(
         "pages".to_string(),
@@ -59,6 +60,10 @@ pub struct TranscribedPage {
     pub markdown: String,
     #[allow(dead_code)]
     pub illegible: bool,
+    /// Values on the page are written by hand (a bare signature does not
+    /// count): such a page gets a second reading by a stronger model.
+    #[serde(default)]
+    pub handwritten: bool,
 }
 
 // --- step B: classification ----------------------------------------------

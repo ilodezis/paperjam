@@ -11,6 +11,9 @@ use url::Url;
 
 const MIN_SECRET_KEY_BYTES: usize = 32;
 const DEFAULT_LLM_MODEL: &str = "anthropic/claude-haiku-5.5";
+/// Re-reads handwritten pages on OpenRouter: the default vision model misreads
+/// cursive names, dates and personal numbers that this one reads.
+const DEFAULT_HANDWRITING_MODEL: &str = "anthropic/claude-sonnet-5.5";
 const DEFAULT_LLM_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// The dialect of the chat-completions endpoint behind the LLM layer.
@@ -354,6 +357,9 @@ pub struct Config {
     pub llm_prices: HashMap<String, ModelPrice>,
     pub llm_model: String,
     pub llm_vision_model: String,
+    /// Second reading of pages the vision model reports as handwritten;
+    /// `None` keeps the first reading.
+    pub llm_handwriting_model: Option<String>,
     pub llm_allowed_models: Vec<String>,
     /// Only what the operator set; OpenRouter then falls back to `low` and
     /// other endpoints get no reasoning field at all.
@@ -405,21 +411,6 @@ impl Config {
         let llm_model = get("PAPERJAM_LLM_MODEL").unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string());
         let llm_vision_model =
             get("PAPERJAM_LLM_VISION_MODEL").unwrap_or_else(|| llm_model.clone());
-        let llm_allowed_models: Vec<String> = match get("PAPERJAM_LLM_ALLOWED_MODELS") {
-            Some(raw) => raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect(),
-            None => {
-                let mut models = vec![llm_model.clone()];
-                if llm_vision_model != llm_model {
-                    models.push(llm_vision_model.clone());
-                }
-                models
-            }
-        };
 
         // The new name wins; the old one keeps existing deployments working.
         let base_url_var = if get("PAPERJAM_LLM_BASE_URL").is_some() {
@@ -446,6 +437,32 @@ impl Config {
             },
         };
 
+        // Only OpenRouter is known to serve the default; `off` turns it off.
+        let llm_handwriting_model = match get("PAPERJAM_LLM_HANDWRITING_MODEL") {
+            Some(raw) if raw.trim().eq_ignore_ascii_case("off") => None,
+            Some(raw) => Some(raw.trim().to_string()),
+            None => (llm_provider == LlmProvider::OpenRouter)
+                .then(|| DEFAULT_HANDWRITING_MODEL.to_string()),
+        }
+        .filter(|m| *m != llm_vision_model);
+        let llm_allowed_models: Vec<String> = match get("PAPERJAM_LLM_ALLOWED_MODELS") {
+            Some(raw) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => {
+                let mut models = vec![llm_model.clone()];
+                for extra in std::iter::once(&llm_vision_model).chain(&llm_handwriting_model) {
+                    if !models.contains(extra) {
+                        models.push(extra.clone());
+                    }
+                }
+                models
+            }
+        };
+
         let (inbox_dir, inbox_user, inbox_interval_secs) = inbox_settings(&get, &data_dir)?;
 
         Ok(Config {
@@ -469,6 +486,7 @@ impl Config {
             llm_prices: llm_prices(&get)?,
             llm_model,
             llm_vision_model,
+            llm_handwriting_model,
             llm_allowed_models,
             llm_reasoning_effort: get("PAPERJAM_LLM_REASONING_EFFORT"),
             llm_create_tags: parse_bool(&get, "PAPERJAM_LLM_CREATE_TAGS")?.unwrap_or(true),
@@ -670,7 +688,14 @@ mod tests {
         assert!(c.llm_prices.is_empty());
         assert_eq!(c.llm_model, "anthropic/claude-haiku-5.5");
         assert_eq!(c.llm_vision_model, "anthropic/claude-haiku-5.5");
-        assert_eq!(c.llm_allowed_models, vec!["anthropic/claude-haiku-5.5"]);
+        assert_eq!(
+            c.llm_handwriting_model.as_deref(),
+            Some("anthropic/claude-sonnet-5.5")
+        );
+        assert_eq!(
+            c.llm_allowed_models,
+            vec!["anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5"]
+        );
         assert!(c.is_model_allowed("anthropic/claude-haiku-5.5"));
         assert!(!c.is_model_allowed("openai/gpt-4o"));
         assert_eq!(c.llm_reasoning_effort, None);
@@ -710,6 +735,35 @@ mod tests {
     }
 
     #[test]
+    fn the_handwriting_model_is_configurable_and_off_elsewhere() {
+        let model = |vars: &[(&str, &str)]| {
+            let mut all = vec![("PAPERJAM_SECRET_KEY", KEY)];
+            all.extend_from_slice(vars);
+            Config::from_lookup(lookup(&all))
+                .unwrap()
+                .llm_handwriting_model
+        };
+        assert_eq!(
+            model(&[("PAPERJAM_LLM_HANDWRITING_MODEL", "model-hand")]).as_deref(),
+            Some("model-hand")
+        );
+        assert_eq!(model(&[("PAPERJAM_LLM_HANDWRITING_MODEL", "off")]), None);
+        // Another endpoint may not serve the OpenRouter default.
+        assert_eq!(
+            model(&[("PAPERJAM_LLM_BASE_URL", "http://localhost:11434/v1")]),
+            None
+        );
+        // A second reading by the same model would change nothing.
+        assert_eq!(
+            model(&[
+                ("PAPERJAM_LLM_VISION_MODEL", "model-v"),
+                ("PAPERJAM_LLM_HANDWRITING_MODEL", "model-v"),
+            ]),
+            None
+        );
+    }
+
+    #[test]
     fn llm_allowed_models_configuration() {
         let c = Config::from_lookup(lookup(&[
             ("PAPERJAM_SECRET_KEY", KEY),
@@ -717,7 +771,10 @@ mod tests {
             ("PAPERJAM_LLM_VISION_MODEL", "model-vision"),
         ]))
         .unwrap();
-        assert_eq!(c.llm_allowed_models, vec!["model-text", "model-vision"]);
+        assert_eq!(
+            c.llm_allowed_models,
+            vec!["model-text", "model-vision", "anthropic/claude-sonnet-5.5"]
+        );
         assert!(c.is_model_allowed("model-text"));
         assert!(c.is_model_allowed("model-vision"));
         assert!(!c.is_model_allowed("model-other"));

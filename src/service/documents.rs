@@ -1291,7 +1291,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO text_layers (document_id, page, source, text, created_at)              VALUES (?, 1, 'tesseract', 'No 7654321', '2026-01-01T00:00:00Z')",
+            "INSERT INTO text_layers (document_id, page, source, text, created_at)              VALUES (?, 1, 'tesseract', 'No AB 1234561', '2026-01-01T00:00:00Z')",
         )
         .bind(id)
         .execute(&app.db.write)

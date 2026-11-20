@@ -6,11 +6,18 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Handwritten pages get a second reading: the vision model reports pages whose values are written by hand, and `PAPERJAM_LLM_HANDWRITING_MODEL` (on OpenRouter `anthropic/claude-sonnet-5.5` by default, `off` to disable) transcribes them again. The default vision model misread cursive names, dates and personal numbers on filled-in birth certificates.
+
 ### Changed
 - OpenRouter requests now default `reasoning.effort` to `none` for page transcription and field extraction (keeping `low` for classification), automatically falling back to `low` if a model returns HTTP 400. Multi-page scans transcribe in 3-page batches (up to 4 concurrent) and local PDF extraction scales page concurrency up to 4 per worker based on available CPU cores.
 - Image deskew rotation now uses fixed-point incremental sampling, and unsearched PDF pages skip downscaled search-copy generation.
 
 ### Fixed
+- A person the model links to a document must be named in its text (every word but a patronymic, any case ending): a couple's marriage certificate no longer gets an unrelated listed person.
+- Organizations: the model's answer now replaces a local name match even when it names no organization, so an authority printed on an attached passport copy no longer becomes an organization of a lease. A picked correspondent needs at least half of its words in the text, and a numbered office the model read ("МВД 10001") never backs a stored name without that number.
+- `ocr_llm_disagree` fires only when Tesseract printed a near miss of the value (a number a few digits off). A value it printed nothing like, as on decorative certificates whose OCR is noise, is no longer flagged.
+- The MCP output schema of `get_document` and `update_document` now declares the `label` of facts; documents with labelled facts failed client-side validation.
 - Turn search and full-page OCR now fall back to sparse page segmentation (`--psm 11`) when default segmentation (`--psm 3`) drops valid text on sparse or photo-heavy spreads, and ambiguous turn-search fallbacks stay at the upright scan orientation instead of applying a low-confidence OSD flip.
 - Identity documents now guard against matching a relative who shares only a surname or patronymic: classification prompts explicitly require a full-holder match, mismatched non-manual links are pruned once `surname`/`given_names` are extracted so the actual holder can be linked, and auto-generated titles referencing a mismatched person are updated to the extracted holder.
 

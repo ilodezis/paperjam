@@ -147,9 +147,58 @@ pub fn find_people(text: &str, people: &[(PersonId, Vec<String>)]) -> Vec<Person
         .collect()
 }
 
+/// Whether a person a model linked to a document is named in its text: for
+/// one of `names` (the name and its aliases), every word except a patronymic
+/// is printed, allowing an inflected ending ("Тестовой Анны" backs "Анна
+/// Тестова"). Initials and one-letter tokens are ignored. A person who shares
+/// only a surname with the people in the text is not backed.
+pub fn person_backed(names: &[String], text: &str) -> bool {
+    let text = tokens(text);
+    names.iter().any(|name| {
+        let words: Vec<String> = tokens(name)
+            .into_iter()
+            .filter(|w| w.chars().count() >= 2 && !w.chars().any(|c| c.is_ascii_digit()))
+            .collect();
+        let core: Vec<&String> = words.iter().filter(|w| !is_patronymic(w)).collect();
+        let core = if core.is_empty() {
+            words.iter().collect()
+        } else {
+            core
+        };
+        !core.is_empty()
+            && core
+                .iter()
+                .all(|w| text.iter().any(|t| inflected_match(w, t)))
+    })
+}
+
+/// A normalized patronymic ("ivanovich", "petrovna").
+fn is_patronymic(word: &str) -> bool {
+    ["ovich", "evich", "ovna", "evna", "ichna"]
+        .iter()
+        .any(|end| word.ends_with(end) && word.len() > end.len() + 1)
+}
+
+/// `word` as printed in `text`, within one edit or with a different case
+/// ending: the stem (the word without its last one or two letters) starts
+/// the printed token.
+fn inflected_match(word: &str, printed: &str) -> bool {
+    if token_matches(word, printed) {
+        return true;
+    }
+    let chars: Vec<char> = word.chars().collect();
+    let stem_len = match chars.len() {
+        0..=3 => return false,
+        4..=5 => chars.len() - 1,
+        n => n - 2,
+    };
+    let stem: String = chars[..stem_len].iter().collect();
+    printed.starts_with(&stem) && printed.chars().count() <= chars.len() + 3
+}
+
 /// Whether `text` backs `name` at all: every token of the name that carries a
-/// digit is printed in the text, and at least one of its other tokens is too
-/// (within one edit, as in alias matching). Looser than [`find_correspondent`]
+/// digit is printed in the text, and at least half of its other words of three
+/// letters or more are too (within one edit, as in alias matching). Looser than [`find_correspondent`]
 /// on purpose: it checks a pick made by a model that may translate or
 /// abbreviate, and only has to catch a pick the text does not support, such
 /// as an office number the document never prints.
@@ -163,7 +212,8 @@ pub fn name_supported(name: &str, text: &str) -> bool {
 ///
 /// A pick is backed when one of the names passes [`name_supported`] against
 /// the text, or, for a name whose digit tokens are all printed in the text,
-/// when one of its words is in `printed`. The second path is for a
+/// when half of its words are in the text or in `printed`. A `printed` name
+/// with a number never backs a stored name without one. The second path is for a
 /// correspondent stored in one language and a document in another: an alias
 /// covers it when the user added one, and otherwise the model, which saw both
 /// forms, writes `printed` close to the stored name.
@@ -186,16 +236,34 @@ pub fn pick_backed<'a>(
 ) -> bool {
     let text = tokens(text);
     let printed = printed.map(tokens).unwrap_or_default();
+    let has_digit = |t: &String| t.chars().any(|c| c.is_ascii_digit());
+    let printed_numbered = printed.iter().any(has_digit);
     names.into_iter().any(|name| {
-        let (numbers, words): (Vec<String>, Vec<String>) = tokens(name)
-            .into_iter()
-            .partition(|t| t.chars().any(|c| c.is_ascii_digit()));
-        numbers.iter().all(|n| text.contains(n))
-            && words.iter().any(|w| {
+        let (numbers, words): (Vec<String>, Vec<String>) =
+            tokens(name).into_iter().partition(has_digit);
+        // The model read a numbered office ("МВД 10001"): a stored name
+        // without a number is another office of the same agency.
+        if printed_numbered && numbers.is_empty() {
+            return false;
+        }
+        // Short words ("ГУ", "по", "S.A.") back nothing on their own.
+        let long: Vec<&String> = words.iter().filter(|w| w.chars().count() >= 3).collect();
+        let words: Vec<&String> = if long.is_empty() {
+            words.iter().collect()
+        } else {
+            long
+        };
+        let backed = words
+            .iter()
+            .filter(|w| {
                 text.iter()
                     .chain(printed.iter())
                     .any(|t| token_matches(w, t))
             })
+            .count();
+        // At least half of the words: one shared generic word ("МВД") does
+        // not tie "ГУ МВД России по г. Москве" to a passport from elsewhere.
+        numbers.iter().all(|n| text.contains(n)) && backed > 0 && backed * 2 >= words.len()
     })
 }
 
@@ -479,6 +547,41 @@ mod tests {
             Some("ГУ МВД России по г. Москве"),
             "МВД 12345 ГУ МВД России по г. Москве"
         ));
+    }
+
+    #[test]
+    fn one_shared_generic_word_does_not_back_another_office() {
+        let passport = "РОССИЙСКАЯ ФЕДЕРАЦИЯ ПАСПОРТ Орган, выдавший документ МВД 10001";
+        let moscow = ["ГУ МВД РОССИИ ПО Г.МОСКВЕ"];
+        assert!(!pick_backed(moscow, None, passport));
+        // The model read a numbered office the stored name does not carry.
+        assert!(!pick_backed(moscow, Some("МВД 10001"), passport));
+        assert!(pick_backed(["МВД 10001"], Some("МВД 10001"), passport));
+    }
+
+    #[test]
+    fn a_person_is_backed_only_by_their_own_names() {
+        let names = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let marriage = "СВИДЕТЕЛЬСТВО О ЗАКЛЮЧЕНИИ БРАКА Тестов Пётр Иванович \
+                        и Тестова Мария Сергеевна";
+        // A stranger, and a daughter who shares only the surname.
+        assert!(!person_backed(&names(&["Примеров Олег Ильич"]), marriage));
+        assert!(!person_backed(&names(&["Ольга Тестова"]), marriage));
+        assert!(person_backed(&names(&["Мария Тестова"]), marriage));
+        // Case endings, transliteration, patronymics and initials.
+        assert!(person_backed(
+            &names(&["Анна Тестова"]),
+            "в лице директора Тестовой Анны Павловны"
+        ));
+        assert!(person_backed(
+            &names(&["Тестов Иван Петрович", "Ivan Testov"]),
+            "CERTIFICAT DE NASTERE Numele TESTOV Prenumele IVAN"
+        ));
+        assert!(person_backed(
+            &names(&["Тестов Иван Петрович"]),
+            "Наниматель: Тестов Иван"
+        ));
+        assert!(!person_backed(&names(&["Ion Rusu"]), "Ionescu Rusanov"));
     }
 
     #[test]

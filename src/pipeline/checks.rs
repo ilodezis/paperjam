@@ -316,6 +316,11 @@ async fn failed_checksum_fields(
 /// Digits of money and identifier values the LLM extracted must appear
 /// (ignoring spaces and separators) in the Tesseract text of the page they
 /// came from. Pages without a Tesseract layer cannot be checked.
+///
+/// A value disagrees only when Tesseract printed a near miss of it: a number
+/// a few digits off, so the two readings of the same print differ. A value
+/// Tesseract printed nothing like was not read by it at all (a decorative
+/// certificate, a poor scan whose OCR is noise) and cannot be checked either.
 async fn fields_disagreeing_with_ocr(
     conn: &mut SqliteConnection,
     id: DocumentId,
@@ -345,18 +350,25 @@ async fn fields_disagreeing_with_ocr(
         if forms.is_empty() {
             continue;
         }
-        let haystack: Vec<String> = layers
+        let texts: Vec<&str> = layers
             .iter()
             .filter(|(p, _)| page.is_none_or(|wanted| wanted == *p))
-            .map(|(_, text)| digits(text))
+            .map(|(_, text)| text.as_str())
             .collect();
-        if haystack.is_empty() {
+        if texts.is_empty() {
             continue;
         }
-        if !haystack
-            .iter()
-            .any(|text| forms.iter().any(|form| text.contains(form.as_str())))
-        {
+        let found = texts.iter().any(|text| {
+            let all = digits(text);
+            forms.iter().any(|form| all.contains(form.as_str()))
+        });
+        let misread = || {
+            texts
+                .iter()
+                .flat_map(|text| digit_runs(text))
+                .any(|run| forms.iter().any(|form| near_miss(form, &run)))
+        };
+        if !found && misread() {
             disagreeing.push(key);
         }
     }
@@ -365,6 +377,62 @@ async fn fields_disagreeing_with_ocr(
 
 fn digits(s: &str) -> String {
     s.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// The numbers printed in `text`, as digit strings: digits joined across
+/// single separators ("1 800,00", "77 4423337", "160-009").
+fn digit_runs(text: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut run = String::new();
+    let mut gap = 0;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            run.push(c);
+            gap = 0;
+        } else if !run.is_empty() && gap == 0 && matches!(c, ' ' | '-' | '.' | ',' | '/') {
+            gap = 1;
+        } else if !run.is_empty() {
+            runs.push(std::mem::take(&mut run));
+            gap = 0;
+        }
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    runs
+}
+
+/// Whether some stretch of `run` is `form` misread: within a third of its
+/// digits (at least one) by edit distance, but not equal.
+fn near_miss(form: &str, run: &str) -> bool {
+    if run.contains(form) {
+        return false;
+    }
+    let form: Vec<char> = form.chars().collect();
+    let run: Vec<char> = run.chars().collect();
+    let allowed = (form.len() / 3).max(1);
+    if form.len() < 3 {
+        return false;
+    }
+    let lens = form.len().saturating_sub(1)..=form.len() + 1;
+    lens.filter(|len| *len > 0 && *len <= run.len())
+        .flat_map(|len| run.windows(len))
+        .map(|window| edit_distance(&form, window))
+        .any(|d| d > 0 && d <= allowed)
+}
+
+fn edit_distance(a: &[char], b: &[char]) -> usize {
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j] + usize::from(ca != cb))
+                .min(prev[j + 1] + 1)
+                .min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 /// The digit strings under which a value may legitimately appear in text.
@@ -465,6 +533,43 @@ mod tests {
         add_value(&app, id, "total", TOTAL, "llm", 1).await;
         add_layer(&app, id, 1, "tesseract", "Итого к оплате 1 500,00 EUR").await;
         assert!(run(&app, id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_value_the_ocr_did_not_read_at_all_cannot_disagree() {
+        let (_dir, app) = test_app().await;
+        let id = insert_document(&app).await;
+        let number = r#"{"kind":"identifier","value":"I-ПН № 512346"}"#;
+        add_value(&app, id, "certificate_number", number, "llm", 1).await;
+        // Tesseract on a decorative certificate: noise and an unrelated code.
+        add_layer(
+            &app,
+            id,
+            1,
+            "tesseract",
+            "СВИДЕТ ЕЛЬ = о ае 12000034 Примерный",
+        )
+        .await;
+        assert!(run(&app, id).await.unwrap().is_empty());
+
+        // The same print read one digit off is a real disagreement.
+        let misread = insert_document(&app).await;
+        add_value(&app, misread, "certificate_number", number, "llm", 1).await;
+        add_layer(&app, misread, 1, "tesseract", "I-ПН № 512340").await;
+        assert_eq!(run(&app, misread).await.unwrap(), vec![OCR_LLM_DISAGREE]);
+    }
+
+    #[test]
+    fn numbers_are_read_across_separators() {
+        assert_eq!(
+            digit_runs("Итого 1 800,00 EUR, код 160-009, 77 4423337"),
+            vec!["180000", "160009", "774423337"]
+        );
+        assert!(near_miss("512346", "512340"));
+        assert!(near_miss("150000", "180000"));
+        assert!(!near_miss("512346", "512346"));
+        assert!(!near_miss("345678", "09000000008800000055"));
+        assert!(!near_miss("60000", "62026"));
     }
 
     #[tokio::test]

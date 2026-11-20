@@ -125,6 +125,9 @@ pub struct Steps<'a> {
     doc: DocumentId,
     text_model: String,
     vision_model: String,
+    /// Re-reads the pages the vision model reports as handwritten; `None`
+    /// with a per-run model override, which decides every reading itself.
+    handwriting_model: Option<String>,
 }
 
 impl<'a> Steps<'a> {
@@ -154,6 +157,11 @@ impl<'a> Steps<'a> {
                 .model_override
                 .clone()
                 .unwrap_or_else(|| config.llm_vision_model.clone()),
+            handwriting_model: opts
+                .model_override
+                .is_none()
+                .then(|| config.llm_handwriting_model.clone())
+                .flatten(),
         })
     }
 
@@ -203,8 +211,35 @@ impl<'a> Steps<'a> {
             .collect())
     }
 
+    /// Transcribes `pages` with the vision model, then reads the pages it
+    /// reports as handwritten again with the handwriting model, whose reading
+    /// replaces the first one.
     pub async fn step_transcribe(&self, pages: &[u32]) -> Result<()> {
+        let (mut transcribed, handwritten) = self
+            .transcribe_pages(pages, &self.vision_model, "transcribe")
+            .await?;
+        if let Some(model) = &self.handwriting_model
+            && !handwritten.is_empty()
+        {
+            self.ensure_budget().await?;
+            let (reread, _) = self
+                .transcribe_pages(&handwritten, model, "transcribe_handwriting")
+                .await?;
+            transcribed.extend(reread);
+        }
+        write::transcription(self.app, self.doc, &transcribed).await
+    }
+
+    /// The non-empty transcription of each page and the pages reported as
+    /// handwritten.
+    async fn transcribe_pages(
+        &self,
+        pages: &[u32],
+        model: &str,
+        step: &str,
+    ) -> Result<(BTreeMap<u32, String>, Vec<u32>)> {
         let mut transcribed: BTreeMap<u32, String> = BTreeMap::new();
+        let mut handwritten: Vec<u32> = Vec::new();
         // `buffered` yields the batches in their original order, so the merge
         // below keeps the first answer for each page, as the sequential loop did.
         let batch_pages: Vec<Vec<u32>> = pages
@@ -212,7 +247,7 @@ impl<'a> Steps<'a> {
             .map(<[u32]>::to_vec)
             .collect();
         let mut batches = futures_util::stream::iter(batch_pages)
-            .map(|batch| async move { self.transcribe_batch(&batch).await })
+            .map(|batch| async move { self.transcribe_batch(&batch, model, step).await })
             .buffered(TRANSCRIBE_CONCURRENCY);
         // The first error returns; dropping the stream cancels batches in flight.
         while let Some(batch) = batches.next().await {
@@ -221,16 +256,25 @@ impl<'a> Steps<'a> {
             };
             for page in answer.pages {
                 if sent.contains(&page.page) && !page.markdown.trim().is_empty() {
+                    if page.handwritten && !handwritten.contains(&page.page) {
+                        handwritten.push(page.page);
+                    }
                     transcribed.entry(page.page).or_insert(page.markdown);
                 }
             }
         }
-        write::transcription(self.app, self.doc, &transcribed).await
+        handwritten.sort_unstable();
+        Ok((transcribed, handwritten))
     }
 
     /// One transcription request: the batch's page images and its answer. `None`
     /// when none of the pages has a render.
-    async fn transcribe_batch(&self, batch: &[u32]) -> Result<Option<(Vec<u32>, Transcription)>> {
+    async fn transcribe_batch(
+        &self,
+        batch: &[u32],
+        model: &str,
+        step: &str,
+    ) -> Result<Option<(Vec<u32>, Transcription)>> {
         let mut content = vec![Content::Text(format!(
             "Transcribe the following {} page image(s).",
             batch.len()
@@ -249,8 +293,8 @@ impl<'a> Steps<'a> {
         }
         let answer: Transcription = self
             .ask(
-                "transcribe",
-                &self.vision_model,
+                step,
+                model,
                 TRANSCRIBE_PROMPT,
                 content,
                 TRANSCRIPTION,

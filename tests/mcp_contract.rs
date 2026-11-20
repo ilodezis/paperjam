@@ -271,6 +271,25 @@ fn output_schemas_are_closed() {
     }
 }
 
+/// The model labels the facts it finds; a document carrying them must still
+/// fit the output schema, or the client rejects the whole answer.
+#[test]
+fn a_labelled_fact_fits_the_document_schemas() {
+    let fact = serde_json::to_value(paperjam::model::document::Fact {
+        key: "act_number".into(),
+        label: Some("Номер акта".into()),
+        value: "10001".into(),
+        provenance: paperjam::model::document::Provenance::Llm,
+        page: Some(1),
+    })
+    .unwrap();
+    for name in ["get_document", "update_document"] {
+        let schema = tool_named(name)["outputSchema"]["properties"]["facts"]["items"].clone();
+        assert!(schema.is_object(), "{name} declares its facts");
+        assert_valid(&schema, &fact, name);
+    }
+}
+
 #[test]
 fn patch_schemas_have_no_defaults() {
     for tool in contract_tools() {

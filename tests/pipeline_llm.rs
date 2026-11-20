@@ -202,7 +202,9 @@ async fn fields_reply_naming(
 }
 
 fn transcription_reply(text: &str) -> MockReply {
-    MockReply::ok(&json!({"pages": [{"page": 1, "markdown": text, "illegible": false}]}))
+    MockReply::ok(
+        &json!({"pages": [{"page": 1, "markdown": text, "illegible": false, "handwritten": false}]}),
+    )
 }
 
 // --- the steps ---------------------------------------------------------------
@@ -323,6 +325,82 @@ async fn scan_goes_through_three_steps() {
 }
 
 #[tokio::test]
+async fn a_handwritten_page_is_read_again_by_the_handwriting_model() {
+    if !have_tesseract(&["eng", "rus", "ron", "osd"]) {
+        return;
+    }
+    let r = rig(&[("PAPERJAM_LLM_HANDWRITING_MODEL", "model-hand")]).await;
+    // First the vision model's reading, then the handwriting model's.
+    r.mock.enqueue(MockReply::ok(&json!({"pages": [
+        {"page": 1, "markdown": "Numele: Tesrov", "illegible": false, "handwritten": true}
+    ]})));
+    r.mock.enqueue(MockReply::ok(&json!({"pages": [
+        {"page": 1, "markdown": "Numele: Testov", "illegible": false, "handwritten": true}
+    ]})));
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "other"})),
+    );
+    r.mock
+        .route("field_extraction", fields_reply(&r.app, "other", &[]).await);
+    let id = upload_fixture(&r.app, "scan_ru.png", false).await;
+
+    process_all(&r.app, id).await;
+
+    let sent = r.mock.requests();
+    let names: Vec<_> = sent.iter().filter_map(|q| q.schema_name()).collect();
+    assert_eq!(
+        names,
+        [
+            "transcription",
+            "transcription",
+            "classification",
+            "field_extraction"
+        ]
+    );
+    assert_ne!(sent[0].body["model"], "model-hand");
+    assert_eq!(sent[1].body["model"], "model-hand");
+    assert_eq!(sent[1].image_count(), 1);
+    let user_text = sent[2].body["messages"][1]["content"].to_string();
+    assert!(user_text.contains("Testov"), "{user_text}");
+    assert!(!user_text.contains("Tesrov"), "{user_text}");
+    assert_eq!(
+        usage_steps(&r.app).await,
+        ["transcribe", "transcribe_handwriting", "classify", "fields"]
+    );
+}
+
+#[tokio::test]
+async fn a_printed_page_is_read_once() {
+    if !have_tesseract(&["eng", "rus", "ron", "osd"]) {
+        return;
+    }
+    let r = rig(&[("PAPERJAM_LLM_HANDWRITING_MODEL", "model-hand")]).await;
+    r.mock
+        .route("transcription", transcription_reply("Паспорт"));
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "other"})),
+    );
+    r.mock
+        .route("field_extraction", fields_reply(&r.app, "other", &[]).await);
+    let id = upload_fixture(&r.app, "scan_ru.png", false).await;
+
+    process_all(&r.app, id).await;
+
+    assert!(
+        r.mock
+            .requests()
+            .iter()
+            .all(|q| q.body["model"] != "model-hand")
+    );
+    assert_eq!(
+        usage_steps(&r.app).await,
+        ["transcribe", "classify", "fields"]
+    );
+}
+
+#[tokio::test]
 async fn local_only_document_never_calls_llm() {
     let r = rig(&[]).await;
     let id = upload_fixture(&r.app, "contract_ru_digital.pdf", true).await;
@@ -364,11 +442,13 @@ async fn without_a_key_the_llm_layer_is_off() {
 async fn llm_picks_existing_person_by_alias() {
     let r = rig(&[]).await;
     let ctx = r.app.ctx(Actor::system());
+    // The contract names her only in other cases ("Тестовой Анны"), which
+    // the local matcher does not take for her.
     let person = taxonomy::create_person(
         &ctx,
         NewPerson {
-            name: "Marik Testov".into(),
-            aliases: vec!["Maric Testov".into(), "Марик Тестов".into()],
+            name: "Anna Testova".into(),
+            aliases: vec!["Анна Тестова".into()],
             notes: String::new(),
         },
     )
@@ -389,11 +469,86 @@ async fn llm_picks_existing_person_by_alias() {
     // The model saw the person with every alias, by id.
     let asked = r.mock.requests()[0].body["messages"][1]["content"].to_string();
     assert!(asked.contains(&person.id.to_string()), "{asked}");
-    assert!(asked.contains("Maric Testov"), "{asked}");
+    assert!(asked.contains("Анна Тестова"), "{asked}");
     let doc = view(&r.app, id).await;
     assert_eq!(doc.people.len(), 1);
     assert_eq!(doc.people[0].id, person.id);
     assert_eq!(doc.people[0].provenance, Provenance::Llm);
+}
+
+#[tokio::test]
+async fn the_model_drops_a_known_name_the_local_match_found_in_passing() {
+    let r = rig(&[]).await;
+    // Printed in the contract, as a party; the model names no organization.
+    taxonomy::create_correspondent(
+        &r.app.ctx(Actor::system()),
+        NewCorrespondent {
+            name: "Тест-Ритейл".into(),
+            aliases: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"organizations": []})),
+    );
+    r.mock.route(
+        "field_extraction",
+        fields_reply(&r.app, "contract", &[]).await,
+    );
+    let id = upload_fixture(&r.app, "contract_ru_digital.pdf", false).await;
+
+    pipeline::process_document(
+        &r.app,
+        id,
+        ProcessOptions {
+            llm: false,
+            ..ProcessOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let local = view(&r.app, id).await;
+    assert_eq!(local.organizations.len(), 1, "the local match found it");
+    assert_eq!(local.organizations[0].provenance, Some(Provenance::Local));
+
+    process_all(&r.app, id).await;
+    let doc = view(&r.app, id).await;
+    assert!(doc.organizations.is_empty(), "{:?}", doc.organizations);
+}
+
+#[tokio::test]
+async fn a_picked_person_the_document_does_not_name_is_dropped() {
+    let r = rig(&[]).await;
+    let ctx = r.app.ctx(Actor::system());
+    // A listed person who shares only a surname with the people in the text,
+    // and one the text never names.
+    let mut picked = Vec::new();
+    for name in ["Борис Тестов", "Олег Примеров"] {
+        let person = taxonomy::create_person(
+            &ctx,
+            NewPerson {
+                name: name.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        picked.push(person.id.to_string());
+    }
+    r.mock
+        .route("classification", classify_reply(json!({"people": picked})));
+    r.mock.route(
+        "field_extraction",
+        fields_reply(&r.app, "contract", &[]).await,
+    );
+    let id = upload_fixture(&r.app, "contract_ru_digital.pdf", false).await;
+
+    process_all(&r.app, id).await;
+
+    let doc = view(&r.app, id).await;
+    assert!(doc.people.is_empty(), "{:?}", doc.people);
 }
 
 #[tokio::test]

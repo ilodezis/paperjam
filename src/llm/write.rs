@@ -189,7 +189,7 @@ pub async fn classification(
         }
     }
 
-    if write_people(&mut tx, doc, answer).await? {
+    if write_people(&mut tx, doc, answer, text).await? {
         changed.push("people");
     }
     if write_tags(&mut tx, doc, answer, create_tags).await? {
@@ -383,10 +383,12 @@ async fn shape_title(
 }
 
 /// Write organizations from the classification answer.
-/// Only runs when no `manual` row exists on the document. Confident answer
-/// organizations replace the `llm` and `local` rows; an answer with none
-/// drops only the `llm` rows, so a local alias match survives a model that
-/// could not read the document.
+/// Only runs when no `manual` row exists on the document. The answer replaces
+/// the `llm` and `local` rows, also when it names no organization: the model
+/// saw the whole text and the listed correspondents, while the local match
+/// only found a known name somewhere in it (a lease got the passport office of
+/// the landlord's passport copy attached to it). An answer whose organizations
+/// are all unsure drops only the `llm` rows.
 async fn write_organizations(
     tx: &mut SqliteConnection,
     doc: DocumentId,
@@ -419,7 +421,9 @@ async fn write_organizations(
         }
     }
 
-    let stale = if new_links.is_empty() {
+    // A model unsure of the organizations it saw leaves the local match.
+    let unsure = new_links.is_empty() && !answer.organizations.is_empty();
+    let stale = if unsure {
         "DELETE FROM document_organizations WHERE document_id = ? AND provenance = 'llm'"
     } else {
         "DELETE FROM document_organizations WHERE document_id = ? AND provenance IN ('llm', 'local')"
@@ -555,11 +559,15 @@ fn fold(name: &str) -> String {
 }
 
 /// The model's people are added to the local matches; its own earlier picks
-/// are replaced. People are never created here.
+/// are replaced. People are never created here, and a pick whose name the
+/// document text does not print is dropped: the model links listed people
+/// to documents about strangers (a couple's marriage certificate got the
+/// household's father).
 async fn write_people(
     tx: &mut SqliteConnection,
     doc: DocumentId,
     answer: &Classification,
+    text: &str,
 ) -> Result<bool> {
     sqlx::query("DELETE FROM document_people WHERE document_id = ? AND provenance = 'llm'")
         .bind(doc)
@@ -570,6 +578,20 @@ async fn write_people(
         let Ok(person) = PersonId::from_str(raw) else {
             continue;
         };
+        let known: Option<(String, String)> =
+            sqlx::query_as("SELECT name, aliases FROM people WHERE id = ?")
+                .bind(person)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((name, aliases)) = known else {
+            continue;
+        };
+        let mut names = vec![name];
+        names.extend(serde_json::from_str::<Vec<String>>(&aliases).unwrap_or_default());
+        if !matching::person_backed(&names, text) {
+            tracing::debug!(person = %person, "the document does not name the picked person");
+            continue;
+        }
         let done = sqlx::query(
             "INSERT OR IGNORE INTO document_people (document_id, person_id, provenance) \
              SELECT ?, id, 'llm' FROM people WHERE id = ?",
