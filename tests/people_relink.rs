@@ -143,6 +143,76 @@ async fn person_created_after_upload_links_without_a_reprocess() {
 }
 
 #[tokio::test]
+async fn a_person_links_across_transliteration_without_a_latin_alias() {
+    let (_env, app) = app().await;
+    let ctx = app.ctx(Actor::system());
+    // The Romanian birth certificate names the father; the person is stored
+    // later, in Cyrillic and with a patronymic the document does not print.
+    let id = note(
+        &app,
+        "certificate.txt",
+        "CERTIFICAT DE NASTERE Tată: MARACOV ARTIOM",
+    )
+    .await;
+    assert!(people_of(&app, id).await.is_empty());
+
+    let person = taxonomy::create_person(&ctx, new_person("Мараков Артём Иванович", &[]))
+        .await
+        .unwrap();
+    settle(&app).await;
+
+    assert_eq!(
+        people_of(&app, id).await,
+        vec![(person.id, Provenance::Local)]
+    );
+}
+
+#[tokio::test]
+async fn a_name_extracted_into_a_field_or_a_fact_relinks_too() {
+    let (_env, app) = app().await;
+    let ctx = app.ctx(Actor::system());
+    // The scan's OCR line is mangled, but the extraction stored the father
+    // in a field and the permitted resident in a fact.
+    let id = note(
+        &app,
+        "lease.txt",
+        "CONTRACT DE INCHIRIERE Tat_: M1RAK0V AR910M",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO field_values (document_id, field_key, value, provenance, page, updated_at) \
+         VALUES (?, 'father', '{\"kind\":\"text\",\"value\":\"Maracov Artiom\"}', 'llm', 1, '2026-01-01T00:00:00Z')",
+    )
+    .bind(id)
+    .execute(&app.db.write)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO facts (document_id, key, value, label, provenance, page) \
+         VALUES (?, 'permitted_resident', 'Ivan Testov', 'Permitted resident', 'llm', 1)",
+    )
+    .bind(id)
+    .execute(&app.db.write)
+    .await
+    .unwrap();
+    assert!(people_of(&app, id).await.is_empty());
+
+    let artiom = taxonomy::create_person(&ctx, new_person("Мараков Артём Иванович", &[]))
+        .await
+        .unwrap();
+    let ivan = taxonomy::create_person(&ctx, new_person("Ivan Testov", &[]))
+        .await
+        .unwrap();
+    settle(&app).await;
+
+    let mut found = people_of(&app, id).await;
+    found.sort_by_key(|(person, _)| person.to_string());
+    let mut expected = vec![(artiom.id, Provenance::Local), (ivan.id, Provenance::Local)];
+    expected.sort_by_key(|(person, _)| person.to_string());
+    assert_eq!(found, expected);
+}
+
+#[tokio::test]
 async fn a_new_alias_links_and_a_removed_alias_unlinks() {
     let (_env, app) = app().await;
     let ctx = app.ctx(Actor::system());

@@ -505,9 +505,11 @@ fn correspondent_key(raw: &str) -> Option<String> {
         .filter(|n| !n.is_empty())
 }
 
-/// The existing correspondent whose name or an alias folds to `name`.
+/// The existing correspondent whose name or an alias is `name` (see
+/// [`matching::same_org_name`]: the same folded name, or names that differ
+/// only in the designation word at the front, so "Управление ЗАГС …" does
+/// not create a second "Отдел ЗАГС …").
 async fn find_by_name(tx: &mut SqliteConnection, name: &str) -> Result<Option<CorrespondentId>> {
-    let wanted = fold(name);
     let rows: Vec<(CorrespondentId, String, String)> =
         sqlx::query_as("SELECT id, name, aliases FROM correspondents")
             .fetch_all(&mut *tx)
@@ -516,7 +518,7 @@ async fn find_by_name(tx: &mut SqliteConnection, name: &str) -> Result<Option<Co
         let aliases: Vec<String> = serde_json::from_str(&aliases).unwrap_or_default();
         if std::iter::once(&known)
             .chain(aliases.iter())
-            .any(|n| fold(n) == wanted)
+            .any(|n| matching::same_org_name(n, name))
         {
             return Ok(Some(id));
         }
@@ -551,11 +553,6 @@ async fn resolve_by_name(tx: &mut SqliteConnection, raw: &str) -> Result<Option<
     )
     .await?;
     Ok(Some(id))
-}
-
-/// A name compared across case, diacritics, script, spacing and quotes.
-fn fold(name: &str) -> String {
-    matching::name_key(name)
 }
 
 /// The model's people are added to the local matches; its own earlier picks
@@ -834,7 +831,11 @@ pub async fn fields(
         let key = clip(&normalize::fact_key(&fact.key), MAX_FACT_KEY_CHARS);
         let value = clip(&fact.value, MAX_FACT_VALUE_CHARS);
         let label = clip(&fact.label, MAX_NAME_CHARS);
-        if facts == MAX_FACTS || value.is_empty() || defs.iter().any(|d| d.key == key) {
+        if facts == MAX_FACTS
+            || value.is_empty()
+            || normalize::is_placeholder(&value)
+            || defs.iter().any(|d| d.key == key)
+        {
             continue;
         }
         sqlx::query(

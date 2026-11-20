@@ -4,8 +4,9 @@
 //! Two kinds of flags exist. *Derived* flags are recomputed from the stored
 //! values every time: `checksum_failed` and `ocr_llm_disagree`, so editing the
 //! affected field clears them. *Carried* flags record something that happened
-//! during processing and stay until the next reprocess: `llm_failed`,
-//! `llm_budget`, `processing_failed`, `mrz_mismatch`.
+//! during processing and stay until the next reprocess: `illegible` (a
+//! transcription could not read every word), `llm_failed`, `llm_budget`,
+//! `processing_failed`, `mrz_mismatch`.
 
 use std::collections::BTreeSet;
 
@@ -21,6 +22,7 @@ use crate::validators::{self, Validation};
 pub const MRZ_MISMATCH: &str = "mrz_mismatch";
 pub const CHECKSUM_FAILED: &str = "checksum_failed";
 pub const OCR_LLM_DISAGREE: &str = "ocr_llm_disagree";
+pub const ILLEGIBLE: &str = "illegible";
 pub const LLM_FAILED: &str = "llm_failed";
 pub const LLM_BUDGET: &str = "llm_budget";
 pub const PROCESSING_FAILED: &str = "processing_failed";
@@ -28,15 +30,22 @@ pub const PROCESSING_FAILED: &str = "processing_failed";
 pub const MRZ_CHECK_FACT: &str = "mrz_check_digits";
 
 /// Canonical order of flags in the stored list.
-const ORDER: [&str; 6] = [
+const ORDER: [&str; 7] = [
     MRZ_MISMATCH,
     CHECKSUM_FAILED,
     OCR_LLM_DISAGREE,
+    ILLEGIBLE,
     LLM_FAILED,
     LLM_BUDGET,
     PROCESSING_FAILED,
 ];
-const CARRIED: [&str; 4] = [MRZ_MISMATCH, LLM_FAILED, LLM_BUDGET, PROCESSING_FAILED];
+const CARRIED: [&str; 5] = [
+    MRZ_MISMATCH,
+    ILLEGIBLE,
+    LLM_FAILED,
+    LLM_BUDGET,
+    PROCESSING_FAILED,
+];
 
 /// The flags the document should carry now: the carried ones it already has,
 /// `extra` flags found by the caller, and the derived ones recomputed.
@@ -184,6 +193,9 @@ pub async fn dismiss_in(
                 clear_mrz_mismatch_fields(conn, id).await?;
                 remove.push(MRZ_MISMATCH);
             }
+            // The transcription's [illegible] markers stay in the text;
+            // dismissing the flag only says the reader checked the scan.
+            ILLEGIBLE => remove.push(ILLEGIBLE),
             LLM_FAILED => remove.push(LLM_FAILED),
             LLM_BUDGET => remove.push(LLM_BUDGET),
             PROCESSING_FAILED => remove.push(PROCESSING_FAILED),

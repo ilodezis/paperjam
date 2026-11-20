@@ -116,7 +116,14 @@ const PLACEHOLDERS: &[&str] = &[
 ];
 
 /// Placeholder stems in other languages, matched at the start of a word.
-const PLACEHOLDER_STEMS: &[&str] = &["nerazborch", "nelizib", "neizvest", "necunosc"];
+const PLACEHOLDER_STEMS: &[&str] = &[
+    "nerazborch",
+    "nelizib",
+    "neizvest",
+    "necunosc",
+    "nechit",
+    "illisib",
+];
 
 static LABEL_VOCABULARY: LazyLock<HashSet<String>> =
     LazyLock::new(|| LABEL_WORDS.iter().flat_map(|w| tokens(w)).collect());
@@ -412,6 +419,27 @@ pub fn correspondent_name(raw: &str) -> Option<String> {
             .iter()
             .all(|w| PLACEHOLDERS.contains(&w.as_str()) || w == "n" || w == "a"));
     (!placeholder).then_some(name)
+}
+
+/// Whether a value says "cannot be read" instead of holding one: the
+/// transcription's honest markers, which no field or fact stores. A value
+/// made only of them ("[illegible]", "[illegible] [illegible]",
+/// "неразборчиво", "N/A", "unknown") is a placeholder; a value that carries
+/// real words next to a marker ("Москва, [illegible] 8к2") keeps what could
+/// be read and is not one.
+pub fn is_placeholder(value: &str) -> bool {
+    // The transcription marks unreadable spans in brackets: drop them and
+    // look at what is left.
+    let stripped = value.replace("[illegible]", " ");
+    let words = tokens(&stripped);
+    if words.is_empty() {
+        return value.chars().any(|c| c.is_alphanumeric());
+    }
+    words.iter().all(|w| {
+        PLACEHOLDERS.contains(&w.as_str())
+            || PLACEHOLDER_STEMS.iter().any(|s| w.starts_with(s))
+            || matches!(w.as_str(), "n" | "a")
+    })
 }
 
 // --- titles -----------------------------------------------------------------------
@@ -1046,6 +1074,34 @@ mod tests {
             "A",
         ] {
             assert_eq!(correspondent_name(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_value_that_only_says_it_cannot_be_read_is_a_placeholder() {
+        for raw in [
+            "[illegible]",
+            "[illegible] [illegible]",
+            "illegible",
+            "unreadable",
+            "неразборчиво",
+            "неизвестно",
+            "necunoscut",
+            "N/A",
+            "unknown",
+            "none",
+        ] {
+            assert!(is_placeholder(raw), "{raw}");
+        }
+        // Real words, also next to a marker, are a value.
+        for raw in [
+            "",
+            "Москва, [illegible] 8к2",
+            "Avansecena [illegible]",
+            "Springfield",
+            "N. A. Company",
+        ] {
+            assert!(!is_placeholder(raw), "{raw}");
         }
     }
 

@@ -1,8 +1,13 @@
 //! Linking people to documents by name, with no LLM.
 //!
-//! The same matching runs in two places: while a document is processed (one
-//! document), and in the relink job after the people changed (every document
-//! already in the archive). Both leave alone what a user decided by hand.
+//! The same matching runs in three places: while a document is processed
+//! (one document), in the relink job after the people changed (every
+//! document already in the archive), and in that job's startup run, which
+//! also heals links lost to an older version or a restored backup. All of
+//! them leave alone what a user decided by hand. The text matched against
+//! is the pages' own text plus the values earlier runs already extracted
+//! into fields and facts, so a name survives a mangled OCR line when a
+//! field holds it.
 //!
 //! An identity document also names its holder in fields, and a holder nobody
 //! has added yet becomes a person ([`link_holder`]): a household archive is
@@ -724,6 +729,52 @@ async fn contested(conn: &mut SqliteConnection, id: DocumentId) -> Result<bool> 
         .is_some_and(|flags| flags.iter().any(|f| f == checks::MRZ_MISMATCH)))
 }
 
+/// The string form of a field value for name matching: names and
+/// identifiers carry one; a date, a number or an amount matches nothing.
+fn value_text(value: &FieldValue) -> String {
+    match value {
+        FieldValue::Text(t) | FieldValue::Identifier(t) => t.clone(),
+        FieldValue::List(items) => items.join(" "),
+        _ => String::new(),
+    }
+}
+
+/// `base` with the values already extracted into the document's fields and
+/// facts appended, so a name a scan's OCR mangled still matches: the
+/// pipeline read it into a field (a birth certificate's `father`, a lease's
+/// `permitted_resident`) or a fact (the `spouses` of a marriage), and the
+/// stored value names the person even when the printed line does not.
+/// Nothing here calls the model; only what earlier runs extracted is read.
+async fn with_extracted_values(
+    conn: &mut SqliteConnection,
+    id: DocumentId,
+    mut base: String,
+) -> Result<String> {
+    let values: Vec<(String,)> =
+        sqlx::query_as("SELECT value FROM field_values WHERE document_id = ?")
+            .bind(id)
+            .fetch_all(&mut *conn)
+            .await?;
+    for (value,) in values {
+        if let Ok(value) = serde_json::from_str::<FieldValue>(&value) {
+            let text = value_text(&value);
+            if !text.is_empty() {
+                base.push('\n');
+                base.push_str(&text);
+            }
+        }
+    }
+    let facts: Vec<(String,)> = sqlx::query_as("SELECT value FROM facts WHERE document_id = ?")
+        .bind(id)
+        .fetch_all(&mut *conn)
+        .await?;
+    for (value,) in facts {
+        base.push('\n');
+        base.push_str(&value);
+    }
+    Ok(base)
+}
+
 /// Matches the people against the text of a document being processed.
 pub(super) async fn match_document(
     conn: &mut SqliteConnection,
@@ -731,7 +782,8 @@ pub(super) async fn match_document(
     text: &str,
 ) -> Result<()> {
     let candidates = candidates(conn).await?;
-    link_by_name(conn, id, text, &candidates).await?;
+    let text = with_extracted_values(conn, id, text.to_string()).await?;
+    link_by_name(conn, id, &text, &candidates).await?;
     Ok(())
 }
 
@@ -761,6 +813,13 @@ async fn stored_text(conn: &mut SqliteConnection, id: DocumentId) -> Result<Stri
     Ok(pages.join("\n"))
 }
 
+/// The text a relink matches against: the stored text of the pages, with the
+/// extracted field and fact values appended (see [`with_extracted_values`]).
+async fn names_text(conn: &mut SqliteConnection, id: DocumentId) -> Result<String> {
+    let text = stored_text(conn, id).await?;
+    with_extracted_values(conn, id, text).await
+}
+
 /// [`link_holder`] over the stored text of the document, for a processing
 /// run: after the local steps (`may_create` false while the model's steps
 /// still follow) and at its end.
@@ -769,7 +828,7 @@ pub(super) async fn link_holder_in(
     id: DocumentId,
     may_create: bool,
 ) -> Result<HolderLink> {
-    let text = stored_text(conn, id).await?;
+    let text = names_text(conn, id).await?;
     link_holder(conn, id, &text, may_create).await
 }
 
@@ -812,7 +871,7 @@ pub async fn relink_all(app: &App) -> Result<Relinked> {
     let mut done = Relinked::default();
     for id in ids {
         let mut tx = app.db.write.begin().await?;
-        let text = stored_text(&mut tx, id).await?;
+        let text = names_text(&mut tx, id).await?;
         let before = linked(&mut tx, id).await?;
         link_by_name(&mut tx, id, &text, &candidates).await?;
         let holder = link_holder(&mut tx, id, &text, true).await?;

@@ -215,8 +215,12 @@ pub async fn render(app: &App, user_id: UserId, now: DateTime<Utc>) -> Result<St
             .and_then(|l| l.get(&locale).or_else(|| l.get("en")).cloned())
             .filter(|l| !l.trim().is_empty());
         let title = event_title(title.as_deref(), label.as_deref(), words.untitled);
-        // A printed expiry date expires; a passport replaced by age is "due".
-        let printed = matches!(own.get("expiry_date"), Some(FieldValue::Date(_)));
+        // A day printed on the document is the day it runs out — an expiry,
+        // the end of a lease or a warranty. A payment day (an invoice's
+        // `due_date`) and a passport replaced by age are simply "due".
+        let runs_out = ["expiry_date", "end_date", "warranty_end_date"]
+            .iter()
+            .any(|k| matches!(own.get(*k), Some(FieldValue::Date(_))));
         let url = app
             .config
             .public_url
@@ -230,7 +234,11 @@ pub async fn render(app: &App, user_id: UserId, now: DateTime<Utc>) -> Result<St
                 url: url.clone(),
             });
         };
-        push("due", date, if printed { words.expires } else { words.due });
+        push(
+            "due",
+            date,
+            if runs_out { words.expires } else { words.due },
+        );
         if !lead.is_zero()
             && let Some(renew) = date.checked_sub_signed(lead)
             && renew >= today
@@ -464,6 +472,28 @@ mod tests {
         assert!(!text.contains(&format!("UID:{lapsed}-renew@paperjam")));
         assert!(text.contains(&format!("UID:{today}-renew@paperjam\r\n")));
         assert!(text.contains("DTSTART;VALUE=DATE:20261109\r\n"));
+    }
+
+    #[tokio::test]
+    async fn a_contract_running_to_its_end_date_expires() {
+        let (_dir, app) = test_app_default().await;
+        let alice = user(&app, "alice", "en").await;
+        let mut d = doc("Lease", vec![("end_date", date("2031-02-03"))]);
+        d.type_key = Some("rental_agreement");
+        add(&app, d).await;
+        let text = feed(&app, &alice).await;
+        assert!(text.contains("SUMMARY:Rental Agreement — Lease expires\r\n"));
+    }
+
+    #[tokio::test]
+    async fn an_invoice_due_day_is_not_an_expiry() {
+        let (_dir, app) = test_app_default().await;
+        let alice = user(&app, "alice", "en").await;
+        let mut d = doc("Invoice", vec![("due_date", date("2031-02-03"))]);
+        d.type_key = Some("invoice");
+        add(&app, d).await;
+        let text = feed(&app, &alice).await;
+        assert!(text.contains("SUMMARY:Invoice is due\r\n"));
     }
 
     #[tokio::test]

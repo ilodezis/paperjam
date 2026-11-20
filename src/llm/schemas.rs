@@ -58,6 +58,8 @@ pub struct Transcription {
 pub struct TranscribedPage {
     pub page: u32,
     pub markdown: String,
+    /// The page has words the model could not read; the document is flagged
+    /// so the reader compares the scan with the text's [illegible] markers.
     #[allow(dead_code)]
     pub illegible: bool,
     /// Values on the page are written by hand (a bare signature does not
@@ -269,10 +271,12 @@ pub fn field_value(def: &FieldDef, raw: &Value) -> Option<FieldValue> {
         v.as_str().map(str::trim).filter(|s| !s.is_empty())
     }
     // Printed labels are stripped and enumerable values brought to one form
-    // (`normalize`); a value that was only a label is no value.
+    // (`normalize`); a value that was only a label is no value, and neither
+    // is one that only says it cannot be read ("[illegible]",
+    // "неразборчиво"), which the transcription marks instead of guessing.
     let cleaned = |raw: &Value| -> Option<String> {
         let value = normalize::field_text(&def.key, &def.labels, text(raw)?);
-        (!value.is_empty()).then_some(value)
+        (!value.is_empty() && !normalize::is_placeholder(&value)).then_some(value)
     };
     let value = match def.kind {
         FieldKind::Text => FieldValue::Text(cleaned(raw)?),

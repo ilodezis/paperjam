@@ -95,7 +95,12 @@ pub async fn run(app: &App, id: DocumentId, opts: &ProcessOptions) -> Result<()>
         checks::remove_flags(
             &mut conn,
             id,
-            &[checks::LLM_FAILED, checks::LLM_BUDGET, checks::MRZ_MISMATCH],
+            &[
+                checks::LLM_FAILED,
+                checks::LLM_BUDGET,
+                checks::MRZ_MISMATCH,
+                checks::ILLEGIBLE,
+            ],
         )
         .await?;
     }
@@ -169,7 +174,13 @@ impl<'a> Steps<'a> {
         let pages = self.pages_needing_transcription().await?;
         if !pages.is_empty() {
             self.ensure_budget().await?;
-            self.step_transcribe(&pages).await?;
+            let illegible = self.step_transcribe(&pages).await?;
+            // The transcriber marked what it could not read: the reader
+            // should compare the scan instead of trusting the text blindly.
+            if !illegible.is_empty() {
+                let mut conn = self.app.db.write.acquire().await?;
+                checks::add_flag(&mut conn, self.doc, checks::ILLEGIBLE).await?;
+            }
             // Before classification, so a verified zone fixes the type.
             crate::pipeline::store::mrz_from_transcription(self.app, self.doc).await?;
         }
@@ -213,33 +224,40 @@ impl<'a> Steps<'a> {
 
     /// Transcribes `pages` with the vision model, then reads the pages it
     /// reports as handwritten again with the handwriting model, whose reading
-    /// replaces the first one.
-    pub async fn step_transcribe(&self, pages: &[u32]) -> Result<()> {
-        let (mut transcribed, handwritten) = self
+    /// replaces the first one. Returns the pages whose transcription could
+    /// not read every word.
+    pub async fn step_transcribe(&self, pages: &[u32]) -> Result<Vec<u32>> {
+        let (mut transcribed, handwritten, mut illegible) = self
             .transcribe_pages(pages, &self.vision_model, "transcribe")
             .await?;
         if let Some(model) = &self.handwriting_model
             && !handwritten.is_empty()
         {
             self.ensure_budget().await?;
-            let (reread, _) = self
+            let (reread, _, reread_illegible) = self
                 .transcribe_pages(&handwritten, model, "transcribe_handwriting")
                 .await?;
+            // The second, stronger reading replaces the first on every page
+            // it answered, so its verdict on what is readable wins too.
+            illegible.retain(|page| reread_illegible.contains(page));
             transcribed.extend(reread);
         }
-        write::transcription(self.app, self.doc, &transcribed).await
+        write::transcription(self.app, self.doc, &transcribed).await?;
+        illegible.sort_unstable();
+        Ok(illegible)
     }
 
-    /// The non-empty transcription of each page and the pages reported as
-    /// handwritten.
+    /// The non-empty transcription of each page, the pages reported as
+    /// handwritten and the pages with unreadable words.
     async fn transcribe_pages(
         &self,
         pages: &[u32],
         model: &str,
         step: &str,
-    ) -> Result<(BTreeMap<u32, String>, Vec<u32>)> {
+    ) -> Result<(BTreeMap<u32, String>, Vec<u32>, Vec<u32>)> {
         let mut transcribed: BTreeMap<u32, String> = BTreeMap::new();
         let mut handwritten: Vec<u32> = Vec::new();
+        let mut illegible: Vec<u32> = Vec::new();
         // `buffered` yields the batches in their original order, so the merge
         // below keeps the first answer for each page, as the sequential loop did.
         let batch_pages: Vec<Vec<u32>> = pages
@@ -259,12 +277,16 @@ impl<'a> Steps<'a> {
                     if page.handwritten && !handwritten.contains(&page.page) {
                         handwritten.push(page.page);
                     }
+                    if page.illegible && !illegible.contains(&page.page) {
+                        illegible.push(page.page);
+                    }
                     transcribed.entry(page.page).or_insert(page.markdown);
                 }
             }
         }
         handwritten.sort_unstable();
-        Ok((transcribed, handwritten))
+        illegible.sort_unstable();
+        Ok((transcribed, handwritten, illegible))
     }
 
     /// One transcription request: the batch's page images and its answer. `None`
@@ -893,6 +915,42 @@ mod tests {
         assert!(
             p.contains("logos"),
             "the first-page image is read for logos"
+        );
+    }
+
+    #[test]
+    fn the_classify_prompt_demands_the_domain_tag_when_one_fits() {
+        let p = CLASSIFY_PROMPT;
+        assert!(p.contains("domain it belongs to"), "a document is filed");
+        assert!(
+            p.contains("An empty list is only for a document no listed tag fits"),
+            "an empty tag list is not the default"
+        );
+        // Domains named for the model to recognize: a vet passport is not
+        // the only document a lazy answer leaves untagged.
+        assert!(p.contains("veterinary"));
+        assert!(p.contains("an untagged document is lost in the archive"));
+    }
+
+    #[test]
+    fn the_transcribe_prompt_forbids_guessing_a_plausible_word_for_handwriting() {
+        let p = TRANSCRIBE_PROMPT;
+        assert!(
+            p.contains("never by what a word of that shape would plausibly be"),
+            "handwriting is read letter by letter"
+        );
+        assert!(
+            p.contains("[illegible], not that name"),
+            "the plausible name is a marker instead"
+        );
+    }
+
+    #[test]
+    fn the_fields_prompt_treats_illegible_markers_as_unstated() {
+        let p = FIELDS_PROMPT;
+        assert!(
+            p.contains("A value the transcription marks [illegible] is not stated"),
+            "no field is filled from a marker"
         );
     }
 

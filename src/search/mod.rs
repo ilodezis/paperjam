@@ -304,7 +304,9 @@ impl SearchIndex {
     /// `ocr_langs` is the Tesseract language list (`eng+deu`); it picks the
     /// stemmed text fields, so changing it recreates the index too.
     pub fn open(dir: &Path, ocr_langs: &str) -> Result<Self> {
-        const SCHEMA_VERSION: u32 = 7;
+        // 8: `due_date` now also reads `end_date`, `warranty_end_date` and
+        // `due_date` fields, so every stored hit's due date is recomputed.
+        const SCHEMA_VERSION: u32 = 8;
         std::fs::create_dir_all(dir).map_err(internal)?;
         let tags = analyzers::stem_tags(ocr_langs);
         let version = format!("{SCHEMA_VERSION}:{}", tags.join(","));

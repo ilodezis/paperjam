@@ -74,10 +74,10 @@ function fieldGroup(entry: FieldEntry): FieldGroup {
 }
 
 /** Flags that reprocessing can resolve. */
-const REPROCESS_FLAGS = new Set(["llm_failed", "llm_budget", "processing_failed", "mrz_mismatch"]);
+const REPROCESS_FLAGS = new Set(["llm_failed", "llm_budget", "processing_failed", "mrz_mismatch", "illegible"]);
 
 /** Flags that can be dismissed directly from the attention list. */
-const DISMISSIBLE_FLAGS = new Set(["mrz_mismatch", "llm_failed", "llm_budget", "processing_failed"]);
+const DISMISSIBLE_FLAGS = new Set(["mrz_mismatch", "llm_failed", "llm_budget", "processing_failed", "illegible"]);
 
 // Typed values save like the metadata above them: when focus leaves the field, or on Enter.
 function FieldValueInput({ entry, definition, onSave }: {

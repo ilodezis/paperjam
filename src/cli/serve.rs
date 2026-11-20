@@ -62,6 +62,19 @@ pub async fn prepare(app: &App) -> anyhow::Result<()> {
         tracing::info!(expired, "removed expired web sessions");
     }
     sync::ensure_current(app).await?;
+    // Documents uploaded before their people existed (a person added later,
+    // an alias, a rename) link to them now: pure name matching over the
+    // stored text, fields and facts, no OCR and no model. Also heals links
+    // lost to an older version or a restored backup.
+    let relinked = pipeline::people::relink_all(app).await?;
+    if relinked.changed > 0 || relinked.created > 0 {
+        tracing::info!(
+            examined = relinked.examined,
+            changed = relinked.changed,
+            created = relinked.created,
+            "relinked people to documents"
+        );
+    }
     setup::bootstrap(app).await?;
     Ok(())
 }

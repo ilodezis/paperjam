@@ -1,6 +1,7 @@
-//! When a document has to be renewed or replaced (a travel passport, an ID
-//! card, a residence permit expire; a Russian internal passport is replaced by
-//! age), so the archive can say what is about to run out.
+//! When a document has to be renewed, replaced or paid (a travel passport,
+//! an ID card, a residence permit expire; a lease runs out; an invoice is
+//! due; a Russian internal passport is replaced by age), so the archive can
+//! say what is about to run out.
 //!
 //! The date is derived from the stored fields each time a document is indexed
 //! or shown; whether it is "soon" is decided at query time (`has:expiring`),
@@ -14,26 +15,54 @@ use crate::matching;
 /// Ages at which a Russian internal passport is replaced.
 const REPLACEMENT_AGES: [i32; 2] = [20, 45];
 
+/// The date fields that can name the day a document is due, in the order a
+/// type that maps to none of them (a custom type) is read.
+const DATE_FIELD_KEYS: [&str; 4] = ["expiry_date", "end_date", "warranty_end_date", "due_date"];
+
+/// The field that holds the due date of each built-in type that has one:
+/// identity documents and certificates print `expiry_date`, contracts run
+/// to `end_date`, a warranty ends on `warranty_end_date`, an invoice is
+/// paid by `due_date`.
+const TYPE_DUE_FIELDS: [(&str, &str); 11] = [
+    ("passport", "expiry_date"),
+    ("travel_passport", "expiry_date"),
+    ("id_card", "expiry_date"),
+    ("residence_permit", "expiry_date"),
+    ("driver_license", "expiry_date"),
+    ("certificate_other", "expiry_date"),
+    ("rental_agreement", "end_date"),
+    ("contract", "end_date"),
+    ("insurance_policy", "end_date"),
+    ("warranty", "warranty_end_date"),
+    ("invoice", "due_date"),
+];
+
 /// The field keys `due_date` reads; callers that load fields for it need
 /// no others.
-pub const DUE_FIELD_KEYS: [&str; 5] = [
+pub const DUE_FIELD_KEYS: [&str; 8] = [
     "expiry_date",
+    "end_date",
+    "warranty_end_date",
+    "due_date",
     "nationality",
     "issuing_authority",
     "birth_date",
     "issue_date",
 ];
 
-/// The date `document` is due to be renewed or replaced, or `None` when it
-/// has no such date. `field` reads a stored field value by key.
+/// The date `document` is due to be renewed, replaced or paid, or `None`
+/// when it has no such date. `field` reads a stored field value by key.
 ///
-/// The printed `expiry_date` is the due date wherever a document has one. A
-/// Russian internal passport prints none: it has to be replaced on reaching
-/// 20 and 45 (Government Decree of the Russian Federation No. 828 of
-/// 8 July 1997, on the passport of a citizen of the Russian Federation), so
-/// its due date is the holder's 20th birthday when it was issued before that,
-/// the 45th birthday when it was issued from the 20th birthday up to the
-/// 45th, and none when it was issued at 45 or later (then it has no term).
+/// A type's own field comes first (see [`TYPE_DUE_FIELDS`]); a type the
+/// table does not know, usually one the operator defined, is read in the
+/// order of [`DATE_FIELD_KEYS`], whichever of those fields it defines and
+/// the document fills. A Russian internal passport prints none of them: it
+/// has to be replaced on reaching 20 and 45 (Government Decree of the
+/// Russian Federation No. 828 of 8 July 1997, on the passport of a citizen
+/// of the Russian Federation), so its due date is the holder's 20th birthday
+/// when it was issued before that, the 45th birthday when it was issued from
+/// the 20th birthday up to the 45th, and none when it was issued at 45 or
+/// later (then it has no term).
 pub fn due_date<'a>(
     type_key: Option<&str>,
     field: impl Fn(&str) -> Option<&'a FieldValue>,
@@ -53,8 +82,18 @@ pub fn due_date<'a>(
         Some(FieldValue::Text(t) | FieldValue::Identifier(t)) => Some(t.as_str()),
         _ => None,
     };
-    if let Some(expiry) = date("expiry_date") {
-        return Some(expiry);
+    let own = type_key.and_then(|key| {
+        TYPE_DUE_FIELDS
+            .iter()
+            .find(|(t, _)| *t == key)
+            .map(|(_, field)| *field)
+    });
+    let printed = match own {
+        Some(key) => date(key),
+        None => DATE_FIELD_KEYS.iter().find_map(|key| date(key)),
+    };
+    if let Some(due) = printed {
+        return Some(due);
     }
     if type_key == Some("passport") && is_russian(text("nationality"), text("issuing_authority")) {
         return replacement_due(date("birth_date")?, date("issue_date")?);
@@ -212,12 +251,76 @@ mod tests {
     fn other_documents_have_none() {
         assert_eq!(
             due(
-                "contract",
+                "letter",
                 &[
                     ("birth_date", date("1990-05-17")),
                     ("nationality", text("RUS"))
                 ]
             ),
+            None
+        );
+    }
+
+    // --- the field each type is due on -----------------------------------
+
+    #[test]
+    fn a_contract_runs_to_its_end_date() {
+        for key in ["rental_agreement", "contract", "insurance_policy"] {
+            assert_eq!(
+                due(key, &[("end_date", date("2026-12-06"))]),
+                Some(d("2026-12-06")),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_warranty_ends_on_its_warranty_end_date() {
+        assert_eq!(
+            due("warranty", &[("warranty_end_date", date("2028-01-31"))]),
+            Some(d("2028-01-31"))
+        );
+        // The type's own field only: an `expiry_date` it does not define is
+        // not what a warranty is due on.
+        assert_eq!(
+            due("warranty", &[("expiry_date", date("2028-01-31"))]),
+            None
+        );
+    }
+
+    #[test]
+    fn an_invoice_is_due_on_its_payment_date() {
+        assert_eq!(
+            due("invoice", &[("due_date", date("2026-11-25"))]),
+            Some(d("2026-11-25"))
+        );
+    }
+
+    #[test]
+    fn a_custom_type_is_due_on_the_first_date_field_it_fills() {
+        // A type the table does not know, in the documented read order.
+        assert_eq!(
+            due("club_card", &[("end_date", date("2027-03-01"))]),
+            Some(d("2027-03-01"))
+        );
+        assert_eq!(
+            due("club_card", &[("warranty_end_date", date("2028-03-01"))]),
+            Some(d("2028-03-01"))
+        );
+        // Both an expiry and an end date: the expiry is read first.
+        assert_eq!(
+            due(
+                "club_card",
+                &[
+                    ("end_date", date("2027-03-01")),
+                    ("expiry_date", date("2031-03-01")),
+                ]
+            ),
+            Some(d("2031-03-01"))
+        );
+        // None of the date fields, or the type's age rule: no due date.
+        assert_eq!(
+            due("club_card", &[("birth_date", date("1990-05-17"))]),
             None
         );
     }

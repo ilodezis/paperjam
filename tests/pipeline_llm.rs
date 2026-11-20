@@ -371,6 +371,91 @@ async fn a_handwritten_page_is_read_again_by_the_handwriting_model() {
 }
 
 #[tokio::test]
+async fn a_page_the_transcriber_could_not_read_flags_the_document() {
+    if !have_tesseract(&["eng", "rus", "ron", "osd"]) {
+        return;
+    }
+    let r = rig(&[]).await;
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "other"})),
+    );
+    r.mock
+        .route("field_extraction", fields_reply(&r.app, "other", &[]).await);
+
+    // The vision model did its best and marked what it could not read; the
+    // handwriting model reads it cleanly the second time, and its verdict
+    // wins, so no flag is up.
+    let clean_reread = upload_fixture(&r.app, "receipt_photo_skewed.jpg", false).await;
+    r.mock.enqueue(MockReply::ok(&json!({"pages": [
+        {"page": 1, "markdown": "Owner: Maric [illegible]", "illegible": true, "handwritten": true}
+    ]})));
+    r.mock.enqueue(MockReply::ok(&json!({"pages": [
+        {"page": 1, "markdown": "Owner: Maric Testov", "illegible": false, "handwritten": true}
+    ]})));
+    process_all(&r.app, clean_reread).await;
+    let doc = view(&r.app, clean_reread).await;
+    assert!(
+        doc.attention.iter().all(|f| f != "illegible"),
+        "the stronger reading cleared the flag: {:?}",
+        doc.attention
+    );
+
+    // A reading nobody could finish keeps the flag, so the reader compares
+    // the scan instead of trusting the text.
+    let unreadable = upload_fixture(&r.app, "scan_ru.png", false).await;
+    r.mock.enqueue(MockReply::ok(&json!({"pages": [
+        {"page": 1, "markdown": "Тестов [illegible]", "illegible": true, "handwritten": true}
+    ]})));
+    r.mock.enqueue(MockReply::ok(&json!({"pages": [
+        {"page": 1, "markdown": "Тестов [illegible]", "illegible": true, "handwritten": true}
+    ]})));
+    process_all(&r.app, unreadable).await;
+    let doc = view(&r.app, unreadable).await;
+    assert!(
+        doc.attention.iter().any(|f| f == "illegible"),
+        "the flag is up: {:?}",
+        doc.attention
+    );
+
+    // A clean re-read on a reprocess clears it again.
+    r.mock
+        .route("transcription", transcription_reply("Тестов Иван"));
+    process_all(&r.app, unreadable).await;
+    let doc = view(&r.app, unreadable).await;
+    assert!(
+        doc.attention.iter().all(|f| f != "illegible"),
+        "the re-read cleared the flag: {:?}",
+        doc.attention
+    );
+}
+
+#[tokio::test]
+async fn a_value_that_only_says_it_cannot_be_read_is_never_stored() {
+    let r = rig(&[]).await;
+    r.mock.route("classification", classify_reply(json!({})));
+    // The subject could not be read; the model says so instead of guessing.
+    let mut reply = fields_json(&r.app, "contract", &[("subject", json!("[illegible]"))]).await;
+    reply["facts"] = json!([
+        {"key": "witness", "label": "Witness", "value": "[illegible]", "page": 1},
+        {"key": "stamp", "label": "Stamp", "value": "round blue stamp", "page": 1},
+    ]);
+    r.mock.route("field_extraction", MockReply::ok(&reply));
+    let id = upload_fixture(&r.app, "contract_ru_digital.pdf", false).await;
+
+    process_all(&r.app, id).await;
+
+    let doc = view(&r.app, id).await;
+    assert!(
+        field(&doc, "subject").is_none(),
+        "a placeholder became a field: {:?}",
+        field(&doc, "subject").map(|f| &f.value)
+    );
+    assert_eq!(doc.facts.len(), 1, "only the real fact is stored");
+    assert_eq!(doc.facts[0].key, "stamp");
+}
+
+#[tokio::test]
 async fn a_printed_page_is_read_once() {
     if !have_tesseract(&["eng", "rus", "ron", "osd"]) {
         return;

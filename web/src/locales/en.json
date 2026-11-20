@@ -313,6 +313,7 @@
       "mrz_mismatch": "The passport's machine-readable zone does not match the extracted values. Compare the fields with the scan and fix the wrong ones.",
       "checksum_failed": "A number fails its check digit, so it was probably misread. Check it against the scan and fix it; editing the field clears this warning.",
       "ocr_llm_disagree": "A number from the AI extraction does not appear in the recognized text, so it may be misread. Check it against the scan and fix it; editing the field clears this warning.",
+      "illegible": "Something on the page could not be read; the text keeps [illegible] markers in those places. Compare the scan and fill in what is missing.",
       "llm_failed": "The AI step failed, so only the text and machine-readable zone data were used. Reprocess the document to try again.",
       "llm_budget": "AI processing was skipped because the monthly spending limit was reached. Reprocess the document after the limit resets.",
       "processing_failed": "Processing failed, so the document may be incomplete. Reprocess it or check the scan."

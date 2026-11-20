@@ -27,6 +27,7 @@ const ATTENTION_FLAGS = [
   "mrz_mismatch",
   "checksum_failed",
   "ocr_llm_disagree",
+  "illegible",
   "llm_failed",
   "llm_budget",
   "processing_failed",

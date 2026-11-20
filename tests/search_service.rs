@@ -208,6 +208,29 @@ async fn due_dates_find_what_is_about_to_expire() {
     )
     .await;
     let undated = typed_document(&app, "undated.txt", "id_card", json!({})).await;
+    // A rental agreement runs to its end_date, a warranty to its
+    // warranty_end_date, an invoice to its due_date.
+    let lease = typed_document(
+        &app,
+        "lease.txt",
+        "rental_agreement",
+        json!({"end_date": date_field(day(45))}),
+    )
+    .await;
+    let guarantee = typed_document(
+        &app,
+        "guarantee.txt",
+        "warranty",
+        json!({"warranty_end_date": date_field(day(500))}),
+    )
+    .await;
+    let bill = typed_document(
+        &app,
+        "bill.txt",
+        "invoice",
+        json!({"due_date": date_field(day(30))}),
+    )
+    .await;
     // A Russian internal passport prints no expiry: it is replaced at the
     // 20th birthday, which here falls 60 days from now.
     let twentieth = day(60);
@@ -240,17 +263,17 @@ async fn due_dates_find_what_is_about_to_expire() {
 
     let mut expiring = found(&app, "has:expiring").await;
     expiring.sort();
-    let mut expected = vec![soon, lapsed, internal];
+    let mut expected = vec![soon, lapsed, internal, lease, bill];
     expected.sort();
     assert_eq!(expiring, expected);
 
     let mut calm = found(&app, "-has:expiring").await;
     calm.sort();
-    let mut expected = vec![later, undated, foreign];
+    let mut expected = vec![later, undated, foreign, guarantee];
     expected.sort();
     assert_eq!(calm, expected);
 
-    assert_eq!(found(&app, "has:due").await.len(), 4);
+    assert_eq!(found(&app, "has:due").await.len(), 7);
     let mut without = found(&app, "-has:due").await;
     without.sort();
     let mut expected = vec![undated, foreign];
@@ -260,14 +283,19 @@ async fn due_dates_find_what_is_about_to_expire() {
     // `due:` compares like `date:`: a day, a month or a year.
     let mut before = found(&app, &format!("due:<{}", day(100))).await;
     before.sort();
-    let mut expected = vec![soon, lapsed, internal];
+    let mut expected = vec![soon, lapsed, internal, lease, bill];
     expected.sort();
     assert_eq!(before, expected);
-    assert_eq!(
-        found(&app, &format!("due:>={}", day(100))).await,
-        vec![later]
-    );
-    assert_eq!(found(&app, &format!("due:{}", day(30))).await, vec![soon]);
+    let mut later_or_guarantee = found(&app, &format!("due:>={}", day(100))).await;
+    later_or_guarantee.sort();
+    let mut expected = vec![later, guarantee];
+    expected.sort();
+    assert_eq!(later_or_guarantee, expected);
+    let mut due_soon = found(&app, &format!("due:{}", day(30))).await;
+    due_soon.sort();
+    let mut expected = vec![soon, bill];
+    expected.sort();
+    assert_eq!(due_soon, expected);
     assert!(found(&app, "due:1999").await.is_empty());
     assert_eq!(
         found(&app, &format!("due:{}", day(400).format("%Y-%m"))).await,
@@ -285,6 +313,17 @@ async fn due_dates_find_what_is_about_to_expire() {
         .await
         .unwrap();
     assert_eq!(view.due_date, None);
+    // A lease that runs out in six weeks, and the day it runs out.
+    let page = search(&app, "type:rental_agreement").await;
+    assert_eq!(page.hits[0].due_date, Some(day(45)));
+    let view = documents::get_document(&ctx, lease, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(view.due_date, Some(day(45)));
+    let view = documents::get_document(&ctx, guarantee, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(view.due_date, Some(day(500)));
 }
 
 #[tokio::test]

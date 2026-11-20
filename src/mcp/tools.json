@@ -582,7 +582,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Flags that need a human or agent look: mrz_mismatch, checksum_failed, ocr_llm_disagree, llm_failed, llm_budget, processing_failed."
+            "description": "Flags that need a human or agent look: mrz_mismatch, checksum_failed, ocr_llm_disagree, illegible, llm_failed, llm_budget, processing_failed."
           },
           "added_by": {
             "type": [
@@ -1947,7 +1947,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Flags that need a human or agent look: mrz_mismatch, checksum_failed, ocr_llm_disagree, llm_failed, llm_budget, processing_failed."
+            "description": "Flags that need a human or agent look: mrz_mismatch, checksum_failed, ocr_llm_disagree, illegible, llm_failed, llm_budget, processing_failed."
           },
           "added_by": {
             "type": [

@@ -851,8 +851,10 @@ pub async fn delete_correspondent(ctx: &Ctx<'_>, id: CorrespondentId) -> Result<
 
 /// Tidies stored correspondent names (whitespace, quote spacing) using
 /// `normalize::correspondent_name`, merges any duplicates created by the tidy,
-/// and merges bare abbreviations into their full names with parentheses (e.g.
-/// "ASP" into "Agenția Servicii Publice (ASP)").
+/// merges offices whose names differ only in the designation word at the
+/// front ("Отдел ЗАГС ..." / "Управление ЗАГС ..."), and merges bare
+/// abbreviations into their full names with parentheses (e.g. "ASP" into
+/// "Agenția Servicii Publice (ASP)").
 /// Returns (renamed_count, merged_count).
 pub async fn tidy_correspondents(ctx: &Ctx<'_>) -> Result<(usize, usize)> {
     let mut renamed = 0;
@@ -912,6 +914,27 @@ pub async fn tidy_correspondents(ctx: &Ctx<'_>) -> Result<(usize, usize)> {
         sqlx::query_as("SELECT id, name FROM correspondents ORDER BY id")
             .fetch_all(&ctx.app.db.read)
             .await?;
+
+    // Offices whose stored names differ only in the designation word at the
+    // front are one correspondent: the earlier record (ids are created in
+    // order) keeps its name, the later one merges into it and stays as an
+    // alias, so documents that print either spelling link to one office.
+    let mut gone: HashSet<CorrespondentId> = HashSet::new();
+    for (i, (into, into_name)) in current.iter().enumerate() {
+        if gone.contains(into) {
+            continue;
+        }
+        for (from, from_name) in &current[i + 1..] {
+            if gone.contains(from) {
+                continue;
+            }
+            if crate::matching::same_org_name(into_name, from_name) {
+                merge_correspondents(ctx, *into, *from).await?;
+                gone.insert(*from);
+                merged += 1;
+            }
+        }
+    }
 
     for (full_id, full_name) in &current {
         let exists: bool =
@@ -1816,6 +1839,77 @@ mod tests {
         assert!(full_view.aliases.contains(&"ASP".to_string()));
 
         // Check idempotency: second run does nothing
+        let (r2, m2) = tidy_correspondents(&ctx).await.unwrap();
+        assert_eq!((r2, m2), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn tidy_correspondents_merges_offices_differing_in_their_designation_word() {
+        let (_dir, app) = setup().await;
+        let ctx = app.ctx(Actor::cli());
+
+        // The two spellings of one ЗАГС, as real documents printed them.
+        let otdel = create_correspondent(
+            &ctx,
+            NewCorrespondent {
+                name:
+                    "Отдел ЗАГС администрации города Тестовска Тестинского автономного округа - Юга"
+                        .into(),
+                aliases: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let upravlenie = create_correspondent(
+            &ctx,
+            NewCorrespondent {
+                name: "Управление ЗАГС администрации города Тестовска Тестинского автономного округа - Юга".into(),
+                aliases: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        // A different ЗАГС is its own office, whatever its designation.
+        let other_city = create_correspondent(
+            &ctx,
+            NewCorrespondent {
+                name: "Управление ЗАГС города Москвы".into(),
+                aliases: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let _doc_upravlenie = insert_doc(&app, Some(upravlenie.id)).await;
+        let _doc_other = insert_doc(&app, Some(other_city.id)).await;
+
+        let (renamed, merged) = tidy_correspondents(&ctx).await.unwrap();
+        assert_eq!(renamed, 0);
+        assert_eq!(
+            merged, 1,
+            "the Управление spelling merged into the earlier record"
+        );
+
+        // The earlier record (ids are created in order) keeps its name and
+        // gains the other spelling as an alias; the document moved with the
+        // merge; the Moscow office is untouched.
+        assert!(
+            fetch_correspondent(&app.db.read, upravlenie.id)
+                .await
+                .is_err()
+        );
+        let kept = fetch_correspondent(&app.db.read, otdel.id).await.unwrap();
+        assert_eq!(kept.document_count, 1);
+        assert!(
+            kept.aliases
+                .iter()
+                .any(|a| a.starts_with("Управление ЗАГС"))
+        );
+        let moscow = fetch_correspondent(&app.db.read, other_city.id)
+            .await
+            .unwrap();
+        assert_eq!(moscow.document_count, 1);
+
+        // Idempotent.
         let (r2, m2) = tidy_correspondents(&ctx).await.unwrap();
         assert_eq!((r2, m2), (0, 0));
     }

@@ -5,7 +5,11 @@
 //! table below (ISO 9 / GOST 7.79 system B, simplified: `й` loses its breve
 //! to the mark stripping and becomes `i`, hard and soft signs vanish). The
 //! table only has to be consistent, since both sides of every comparison go
-//! through it, so "Марик" and "Maric" end up one edit apart.
+//! through it, so "Марик" and "Maric" end up one edit apart. Where other
+//! romanizations disagree with the table by more than an edit (`Artiom` for
+//! `Артём`), [`DIGRAPHS`] bridges the gap; a name's decorations (a
+//! patronymic, an office's designation word) may be missing from the
+//! document (see [`alias_score`]).
 
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
@@ -16,6 +20,25 @@ use crate::ids::{CorrespondentId, PersonId};
 const FUZZY_MIN_LEN: usize = 5;
 /// All tokens of an alias must be found within this many consecutive tokens.
 const WINDOW: usize = 6;
+
+/// How one romanization writes what another writes as one letter: Russian
+/// `ё` comes out `io`, `yo` or `jo` (`Artiom` for `Артём`, which the fixed
+/// table spells `Artem`), `ю` as `iu`/`yu`/`ju`, `я` as `ia`/`ya`/`ja`, and
+/// `х`/`ц` as `kh`/`ts`. Two spellings that differ by exactly one of these
+/// pairs, and nothing else, are the same word.
+const DIGRAPHS: [(&str, &str); 11] = [
+    ("io", "e"),
+    ("yo", "e"),
+    ("jo", "e"),
+    ("iu", "u"),
+    ("yu", "u"),
+    ("ju", "u"),
+    ("ia", "a"),
+    ("ya", "a"),
+    ("ja", "a"),
+    ("kh", "h"),
+    ("ts", "c"),
+];
 
 fn transliterate(c: char) -> Option<&'static str> {
     Some(match c {
@@ -69,9 +92,52 @@ pub fn normalize(s: &str) -> String {
 
 /// An organization's name as one comparison key: its normalized tokens joined
 /// by single spaces, so quotes, spacing around them and other punctuation do
-/// not tell `ООО " Ромашка"` from `ООО "Ромашка"`.
+/// not tell `ООО " Ромашка"` from `ООО "Ромашка"`. Digit tokens that sit next
+/// to each other are one number: `123-045`, `123 045` and `123045` are one
+/// code, and a leading zero alone (`МВД 075` and `МВД 75`) does not tell two
+/// offices apart.
 pub fn name_key(name: &str) -> String {
-    tokens(name).join(" ")
+    let tokens = tokens(name);
+    let mut key: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut digits = String::new();
+    let flush = |digits: &mut String, key: &mut Vec<String>| {
+        if !digits.is_empty() {
+            let number = digits.trim_start_matches('0');
+            key.push(if number.is_empty() { "0" } else { number }.to_string());
+            digits.clear();
+        }
+    };
+    for token in tokens {
+        if token.chars().all(|c| c.is_ascii_digit()) {
+            digits.push_str(&token);
+        } else {
+            flush(&mut digits, &mut key);
+            key.push(token);
+        }
+    }
+    flush(&mut digits, &mut key);
+    key.join(" ")
+}
+
+/// The comparison forms of an organization's name: the folded name, and the
+/// name without its leading designation word when it has one, so that
+/// `Отдел ЗАГС города Тестовска` and `Управление ЗАГС города
+/// Тестовска` share a form.
+pub fn org_name_keys(name: &str) -> Vec<String> {
+    let mut keys = vec![name_key(name)];
+    let tokens = tokens(name);
+    if tokens.len() > 1 && Decoration::Organization.optional(tokens[0].as_str()) {
+        keys.push(tokens[1..].join(" "));
+    }
+    keys
+}
+
+/// Whether two organization names name the same office: they share a
+/// comparison form (see [`org_name_keys`]) — the same folded name, or names
+/// that differ only in the designation word at the front.
+pub fn same_org_name(a: &str, b: &str) -> bool {
+    let (keys_a, keys_b) = (org_name_keys(a), org_name_keys(b));
+    keys_a.iter().any(|k| keys_b.contains(k))
 }
 
 /// Normalized alphanumeric tokens of `s`.
@@ -101,38 +167,117 @@ fn within_one_edit(a: &str, b: &str) -> bool {
     (a.len() - prefix - suffix).max(b.len() - prefix - suffix) <= 1
 }
 
+/// Whether `a` and `b` differ only where one writes a digraph the other
+/// spells as one letter (see [`DIGRAPHS`]); the rest must match exactly.
+fn one_digraph_apart(a: &str, b: &str) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (short, long) = if a.len() <= b.len() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    if long.len() - short.len() != 1 {
+        return false;
+    }
+    let prefix = short
+        .iter()
+        .zip(long.iter())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let suffix = short
+        .iter()
+        .rev()
+        .zip(long.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    // Repetition may make the middles overlap ("aa"/"aaa"): no digraph there.
+    if prefix + suffix >= short.len() {
+        return false;
+    }
+    let mid_short: String = short[prefix..short.len() - suffix].iter().collect();
+    let mid_long: String = long[prefix..long.len() - suffix].iter().collect();
+    mid_short.chars().count() == 1
+        && DIGRAPHS
+            .iter()
+            .any(|(digraph, single)| mid_long == *digraph && mid_short == *single)
+}
+
 pub fn token_matches(alias: &str, text: &str) -> bool {
-    alias == text
-        || (alias.chars().count() >= FUZZY_MIN_LEN
-            && text.chars().count() >= FUZZY_MIN_LEN
-            && within_one_edit(alias, text))
+    if alias == text {
+        return true;
+    }
+    alias.chars().count() >= FUZZY_MIN_LEN
+        && text.chars().count() >= FUZZY_MIN_LEN
+        && (within_one_edit(alias, text) || one_digraph_apart(alias, text))
+}
+
+/// Tokens a document may print a name without: a person's patronymic, the
+/// designation word of an office. See [`alias_score`].
+#[derive(Clone, Copy)]
+enum Decoration {
+    Person,
+    Organization,
+}
+
+impl Decoration {
+    fn optional(&self, token: &str) -> bool {
+        match self {
+            Decoration::Person => is_patronymic(token),
+            // "Отдел ЗАГС администрации города Тестовска" and its
+            // "Управление" are one office; either name matches a document
+            // that prints the other, or none.
+            Decoration::Organization => {
+                matches!(
+                    token,
+                    "otdel" | "otdelenie" | "upravlenie" | "office" | "department"
+                )
+            }
+        }
+    }
 }
 
 /// How well `alias` appears in `text` (already tokenized): the number of
 /// characters matched, or 0 when some alias token has no match within a
 /// window of [`WINDOW`] tokens.
-fn alias_score(alias: &str, text: &[String]) -> usize {
+///
+/// When the whole alias is not there, the alias is tried again without its
+/// optional tokens (see [`Decoration`]) as long as something to match on
+/// remains: a document names a person by given name and surname while the
+/// stored name also carries the patronymic, and prints an office without
+/// the designation word its stored name starts with. The shorter match
+/// scores less, so a document that prints the full name still prefers it.
+fn alias_score(alias: &str, text: &[String], decoration: Decoration) -> usize {
     let alias = tokens(alias);
     if alias.is_empty() {
         return 0;
     }
-    let found = (0..text.len()).any(|start| {
-        let window = &text[start..(start + WINDOW).min(text.len())];
-        alias
-            .iter()
-            .all(|a| window.iter().any(|t| token_matches(a, t)))
-    });
-    if found {
-        alias.iter().map(|t| t.chars().count()).sum()
-    } else {
-        0
+    let tokens_found = |required: &[String]| {
+        (0..text.len()).any(|start| {
+            let window = &text[start..(start + WINDOW).min(text.len())];
+            required
+                .iter()
+                .all(|a| window.iter().any(|t| token_matches(a, t)))
+        })
+    };
+    if tokens_found(&alias) {
+        return alias.iter().map(|t| t.chars().count()).sum();
     }
+    let required: Vec<String> = alias
+        .iter()
+        .filter(|t| !decoration.optional(t))
+        .cloned()
+        .collect();
+    if required.is_empty() || required.len() == alias.len() || !tokens_found(&required) {
+        return 0;
+    }
+    required.iter().map(|t| t.chars().count()).sum()
 }
 
-fn best_score(aliases: &[String], text: &[String]) -> usize {
+fn best_score(aliases: &[String], text: &[String], decoration: Decoration) -> usize {
     aliases
         .iter()
-        .map(|alias| alias_score(alias, text))
+        .map(|alias| alias_score(alias, text, decoration))
         .max()
         .unwrap_or(0)
 }
@@ -142,7 +287,7 @@ pub fn find_people(text: &str, people: &[(PersonId, Vec<String>)]) -> Vec<Person
     let text = tokens(text);
     people
         .iter()
-        .filter(|(_, aliases)| best_score(aliases, &text) > 0)
+        .filter(|(_, aliases)| best_score(aliases, &text, Decoration::Person) > 0)
         .map(|(id, _)| *id)
         .collect()
 }
@@ -268,10 +413,14 @@ pub fn pick_backed<'a>(
 }
 
 /// The entry of `list` that matches `text` best (most matched characters).
-fn best_match<Id: Copy>(text: &str, list: &[(Id, Vec<String>)]) -> Option<Id> {
+fn best_match<Id: Copy>(
+    text: &str,
+    list: &[(Id, Vec<String>)],
+    decoration: Decoration,
+) -> Option<Id> {
     let text = tokens(text);
     list.iter()
-        .map(|(id, aliases)| (best_score(aliases, &text), *id))
+        .map(|(id, aliases)| (best_score(aliases, &text, decoration), *id))
         .filter(|(score, _)| *score > 0)
         .max_by_key(|(score, _)| *score)
         .map(|(_, id)| id)
@@ -283,14 +432,14 @@ pub fn find_correspondent(
     text: &str,
     list: &[(CorrespondentId, Vec<String>)],
 ) -> Option<CorrespondentId> {
-    best_match(text, list)
+    best_match(text, list, Decoration::Organization)
 }
 
 /// The one person that matches `text` best: for a name read off an identity
 /// document, which has a single holder. `list` entries carry the name and all
 /// aliases.
 pub fn find_person(text: &str, list: &[(PersonId, Vec<String>)]) -> Option<PersonId> {
-    best_match(text, list)
+    best_match(text, list, Decoration::Person)
 }
 
 fn is_cyrillic(c: char) -> bool {
@@ -432,6 +581,110 @@ mod tests {
         );
         let far = "Marik one two three four five six seven Testov";
         assert!(find_people(far, std::slice::from_ref(&p)).is_empty());
+    }
+
+    #[test]
+    fn romanizations_that_differ_by_a_digraph_are_one_word() {
+        // `Artiom` is how Romanian documents spell `Артём`, which the fixed
+        // table transliterates as `artem`.
+        let artiom = person(&["Мараков Артём Иванович"]);
+        assert_eq!(
+            find_people("Tată: MARACOV ARTIOM", std::slice::from_ref(&artiom)),
+            vec![artiom.0]
+        );
+        for (alias, text) in [
+            ("Артём", "Artiom"),
+            ("Артём", "Artjom"),
+            ("Артём", "Artyom"),
+            ("Юрий", "Iurii"),
+            ("Яков", "Iakov"),
+            ("Михаил", "Mihail"),
+            ("Дмитрий Царёв", "Dmitrii Tsarev"),
+        ] {
+            assert!(
+                token_matches(&normalize(alias), &normalize(text)),
+                "{alias} does not match {text}"
+            );
+        }
+        // Nothing else may differ, and the digraph must really be one.
+        assert!(!token_matches("artem", "artiomx"));
+        assert!(!token_matches("boris", "artiom"));
+    }
+
+    #[test]
+    fn a_patronymic_the_document_does_not_print_is_optional() {
+        let full = person(&["Мараков Артём Иванович"]);
+        // The birth certificate names the father by given name and surname.
+        assert_eq!(
+            find_people("Tată: MARACOV ARTIOM", std::slice::from_ref(&full)),
+            vec![full.0]
+        );
+        // A document that prints the full name still matches, and two
+        // people that share the short form are both named.
+        let short = person(&["Maracov Artiom"]);
+        let list = [full.clone(), short.clone()];
+        assert_eq!(
+            find_people("Мараков Артём Иванович, born 1990", &list),
+            vec![full.0, short.0]
+        );
+        assert_eq!(find_person("Мараков Артём Иванович", &list), Some(full.0));
+        // An alias that is only a patronymic matches nothing but itself: it
+        // is not dropped to match a text that does not carry it.
+        let patronymic = person(&["Валерьевич"]);
+        assert!(find_people("MARACOV ARTIOM", std::slice::from_ref(&patronymic)).is_empty());
+    }
+
+    #[test]
+    fn an_offices_designation_word_does_not_make_it_another_office() {
+        let otdel = corr(&["Отдел ЗАГС города Москвы"]);
+        assert_eq!(
+            find_correspondent(
+                "УПРАВЛЕНИЕ ЗАГС ГОРОДА МОСКВЫ",
+                std::slice::from_ref(&otdel),
+            ),
+            Some(otdel.0)
+        );
+        // The designation is optional, not ignored: a different ЗАГС does
+        // not match.
+        assert_eq!(
+            find_correspondent(
+                "Управление ЗАГС Санкт-Петербурга",
+                std::slice::from_ref(&otdel)
+            ),
+            None
+        );
+        // The two spellings of one long-named office, as real documents
+        // print them, are one office by name: the text window is too short
+        // to match a ten-token name, but creation and the startup tidy
+        // compare names, and so does the LLM pick's backing.
+        assert!(same_org_name(
+            "Отдел ЗАГС администрации города Тестовска Тестинского автономного округа - Юга",
+            "Управление ЗАГС администрации города Тестовска Тестинского автономного округа - Юга",
+        ));
+        assert!(same_org_name("Отдел ЗАГС Москвы", "ЗАГС Москвы"));
+        assert!(!same_org_name(
+            "Отдел ЗАГС Москвы",
+            "Управление ЗАГС Санкт-Петербурга"
+        ));
+        assert!(!same_org_name(
+            "Отдел ЗАГС Москвы",
+            "Отдел ЗАГС Санкт-Петербурга"
+        ));
+    }
+
+    #[test]
+    fn digit_runs_of_one_code_fold_together() {
+        for variant in ["МВД 123-045", "МВД 123 045", "МВД 123045", "мвд 0123-045"] {
+            assert_eq!(name_key(variant), name_key("МВД 123045"), "{variant}");
+        }
+        // `12345` really is other digits: merging it with `123045` would
+        // guess a lost zero.
+        assert_ne!(name_key("МВД 12345"), name_key("МВД 123-045"));
+        // A leading zero alone tells no offices apart.
+        assert_eq!(name_key("МВД 075"), name_key("МВД 75"));
+        // Words between digits keep them apart, and other names are as before.
+        assert_ne!(name_key("Region 7 Room 30"), name_key("Region 730"));
+        assert_ne!(name_key("ООО Ромашка"), name_key("ООО Ромашка 2"));
     }
 
     #[test]
@@ -580,6 +833,12 @@ mod tests {
         assert!(person_backed(
             &names(&["Тестов Иван Петрович"]),
             "Наниматель: Тестов Иван"
+        ));
+        // Transliteration and a patronymic the document does not print: the
+        // Romanian birth certificate names the father as "Maracov Artiom".
+        assert!(person_backed(
+            &names(&["Мараков Артём Иванович"]),
+            "Tată: MARACOV ARTIOM"
         ));
         assert!(!person_backed(&names(&["Ion Rusu"]), "Ionescu Rusanov"));
     }
