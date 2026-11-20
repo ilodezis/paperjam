@@ -1048,8 +1048,16 @@ fn disagrees(mrz: &FieldValue, llm: &FieldValue) -> bool {
         (FieldValue::Identifier(a), FieldValue::Identifier(b)) => squash(a) != squash(b),
         (FieldValue::Text(a), FieldValue::Text(b)) => {
             // Short codes (sex, nationality) differ in form; names are
-            // compared by containment.
-            let (a, b) = (squash(a), squash(b));
+            // compared by containment, in the spelling a passport zone uses
+            // for Cyrillic (ICAO: Я = IA, Х = KH, Ц = TS, Щ = SHCH).
+            let icao = |s: &str| {
+                squash(s)
+                    .replace("shch", "shh")
+                    .replace("kh", "h")
+                    .replace("ts", "c")
+                    .replace('y', "i")
+            };
+            let (a, b) = (icao(a), icao(b));
             a.len() > 3 && b.len() > 3 && !a.contains(&b) && !b.contains(&a)
         }
         _ => false,
@@ -1099,6 +1107,13 @@ mod tests {
         assert!(!disagrees(&text("TESTOV"), &text("Тестов")));
         assert!(!disagrees(&text("IVAN MARIA"), &text("Ivan")));
         assert!(disagrees(&text("TESTOV"), &text("Petrov")));
+        // The zone spells Cyrillic the ICAO way.
+        assert!(!disagrees(&text("IAKOVLEVA"), &text("ЯКОВЛЕВА")));
+        assert!(!disagrees(&text("IURII"), &text("Юрий")));
+        assert!(!disagrees(&text("KHARITONOV"), &text("Харитонов")));
+        assert!(!disagrees(&text("TSVETKOVA"), &text("Цветкова")));
+        assert!(!disagrees(&text("SHCHUKIN"), &text("Щукин")));
+        assert!(disagrees(&text("IAKOVLEVA"), &text("Яковенко")));
     }
 
     #[test]
