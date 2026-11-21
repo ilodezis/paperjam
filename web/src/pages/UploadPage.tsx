@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { SelectDropdown } from "../components/controls/SelectDropdown";
 import { toggleId } from "../document";
 import { formatFileSize } from "../format";
+import { prefersReducedMotion } from "../lib/motion";
 import { invalidateArchive, taxonomyQuery } from "../queries";
 import { documentPath } from "../shell/nav";
 import { ScreenLink } from "../shell/navigation";
@@ -17,6 +18,8 @@ type UploadPhase = "waiting" | UploadUpdate["phase"];
 interface UploadEntry {
   key: string;
   file: File;
+  // Blob URL of an image's thumbnail, created once when the file is added; the page revokes it.
+  previewUrl?: string;
   // null follows the batch setting; a boolean is an explicit per-file choice.
   localOnly: boolean | null;
   // What the upload actually used, kept for the status badge once it has started.
@@ -51,18 +54,47 @@ export function UploadPage() {
   const queryClient = useQueryClient();
   const mounted = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const startRef = useRef<HTMLButtonElement>(null);
+  // Every live thumbnail URL by entry key, so each is revoked exactly once.
+  const previews = useRef(new Map<string, string>());
+  // Set by the upload button; the next render scrolls the first started file into view.
+  const justStarted = useRef(false);
+  const lastWaiting = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
 
+  useEffect(() => {
+    const urls = previews.current;
+    return () => {
+      for (const url of urls.values()) URL.revokeObjectURL(url);
+      urls.clear();
+    };
+  }, []);
+
+  // A removed or cleared file lets go of its thumbnail.
+  useEffect(() => {
+    const live = new Set(entries.map((entry) => entry.key));
+    for (const [key, url] of previews.current) {
+      if (live.has(key)) continue;
+      URL.revokeObjectURL(url);
+      previews.current.delete(key);
+    }
+  }, [entries]);
+
   function addFiles(files: File[]) {
     if (files.length === 0) return;
-    setEntries((current) => [
-      ...current,
-      ...files.map((file) => ({ key: crypto.randomUUID(), file, localOnly: null, phase: "waiting" as const })),
-    ]);
+    // Built outside the state updater: a (strict-mode) re-run of it would leak a second URL per file.
+    const added = files.map((file): UploadEntry => {
+      const key = crypto.randomUUID();
+      const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
+      if (previewUrl) previews.current.set(key, previewUrl);
+      return { key, file, previewUrl, localOnly: null, phase: "waiting" };
+    });
+    setEntries((current) => [...current, ...added]);
   }
 
   function chooseFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -83,6 +115,7 @@ export function UploadPage() {
   }
 
   function start(entriesToUpload: UploadEntry[]) {
+    justStarted.current = true;
     const waiting = entriesToUpload.filter((entry) => entry.phase === "waiting");
     // A lone file shows no per-file choice, so the switch alone decides for it.
     const effective = new Map(waiting.map((entry) => [entry.key, waiting.length > 1 ? entry.localOnly ?? batchLocalOnly : batchLocalOnly]));
@@ -106,6 +139,22 @@ export function UploadPage() {
   }
 
   const waitingCount = entries.filter((entry) => entry.phase === "waiting").length;
+
+  // The button sits below the fold and under the bottom bar once files are chosen: bring it into view.
+  useEffect(() => {
+    const grew = waitingCount > lastWaiting.current;
+    lastWaiting.current = waitingCount;
+    if (grew) startRef.current?.scrollIntoView?.({ block: "nearest", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  }, [waitingCount]);
+
+  // Starting removes the settings and the button, so the screen gets shorter and its scroller would
+  // clamp to wherever. Show the progress in place instead: the first started file stays in view.
+  useEffect(() => {
+    if (!justStarted.current) return;
+    justStarted.current = false;
+    listRef.current?.querySelector(".upload-item:not(.upload-item--waiting)")
+      ?.scrollIntoView?.({ block: "nearest", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  }, [entries]);
   const activeCount = entries.filter((entry) => activePhases.includes(entry.phase)).length;
   const finishedCount = entries.filter((entry) => finishedPhases.includes(entry.phase)).length;
   const addedCount = entries.filter((entry) => entry.phase === "ready").length;
@@ -229,10 +278,15 @@ export function UploadPage() {
               </details>
             </>
           ) : null}
-          <ul className="upload-list">
+          <ul className="upload-list" ref={listRef}>
             {entries.map((entry) => (
               <li className={`upload-item upload-item--${entry.phase}`} key={entry.key}>
-                <div className="upload-file-icon">{entry.file.type.startsWith("image/") ? <FileImage /> : <File />}</div>
+                <div className="upload-file-icon">
+                  {entry.previewUrl ? (
+                    // Decorative: the file name beside it says what it is. A format the browser cannot draw (HEIC) falls back to the icon.
+                    <img className="upload-thumb" src={entry.previewUrl} alt="" onError={() => setEntries((current) => current.map((item) => item.key === entry.key ? { ...item, previewUrl: undefined } : item))} />
+                  ) : entry.file.type.startsWith("image/") ? <FileImage /> : <File />}
+                </div>
                 <div className="upload-item-main">
                   {/* The extracted title is the row's name once known; the file name stays visible beneath it. */}
                   <div className="upload-file-heading">
@@ -304,7 +358,7 @@ export function UploadPage() {
           </ul>
           {/* Once the bytes are sent there is nothing to start; progress shows per file above. */}
           {waitingCount > 0 ? (
-            <button type="button" className="button button--primary upload-start" onClick={() => start(entries)}>
+            <button type="button" ref={startRef} className="button button--primary upload-start" onClick={() => start(entries)}>
               <Upload aria-hidden="true" />{t("upload.start", { count: waitingCount })}
             </button>
           ) : null}

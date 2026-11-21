@@ -563,6 +563,11 @@ describe("ArchivePage re-renders", () => {
 
     // Hovering a row re-renders only the row that lost and the row that gained the highlight.
     const rows = Array.from(container?.querySelectorAll(".result-row") ?? []);
+    // No row is lit before the first hover, so the first hover redraws one row.
+    await act(async () => { rows[1].dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerType: "mouse" })); });
+    await eventually(() => expect(rows[1].classList.contains("result-row--active")).toBe(true));
+    expect(thumbnail).toHaveBeenCalledTimes(1);
+    thumbnail.mockClear();
     await act(async () => { rows[2].dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerType: "mouse" })); });
     await eventually(() => expect(rows[2].classList.contains("result-row--active")).toBe(true));
     expect(thumbnail).toHaveBeenCalledTimes(2);
@@ -582,5 +587,102 @@ describe("ArchivePage re-renders", () => {
     });
     expect(rows[1].classList.contains("result-row--active")).toBe(false);
     expect(thumbnail).not.toHaveBeenCalled();
+  });
+});
+
+describe("ArchivePage touch", () => {
+  const opened: boolean[] = [];
+  // ScreenLink prevents the browser's own navigation and drives the app's; a prevented title click is an open.
+  const recordOpens = (event: Event) => { if ((event.target as Element).closest(".result-title")) opened.push(event.defaultPrevented); };
+  const passportRow = () => Array.from(container?.querySelectorAll<HTMLElement>(".result-row") ?? []).find((row) => row.querySelector(".result-title")?.textContent?.startsWith("Passport"))!;
+  const searchInput = () => container?.querySelector<HTMLInputElement>(".search-form input");
+
+  function stubPointer(fine: boolean) {
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: fine && query.includes("pointer: fine"), media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }));
+  }
+
+  beforeAll(() => document.addEventListener("click", recordOpens));
+  afterAll(() => document.removeEventListener("click", recordOpens));
+  afterEach(() => { opened.length = 0; });
+
+  it("opens the document from the empty card space, the date and a field value", async () => {
+    // Each open leaves the archive for the document, so every target gets a fresh page.
+    for (const pick of [(row: HTMLElement) => row, (row: HTMLElement) => row.querySelector("time")!, (row: HTMLElement) => row.querySelector("dd")!]) {
+      opened.length = 0;
+      await render();
+      await click(pick(passportRow()));
+      expect(opened).toEqual([true]);
+      await act(async () => root?.unmount());
+      container?.remove();
+      root = null;
+      container = null;
+    }
+  });
+
+  it("leaves a chip tap to the filter and does not open the document", async () => {
+    await render();
+    await click(passportRow().querySelector(".text-chip")!);
+    await idle();
+    expect(opened).toEqual([]);
+  });
+
+  it("does not open the document while text is selected, nor on a modified click", async () => {
+    await render();
+    const row = passportRow();
+    const selection = vi.spyOn(window, "getSelection").mockReturnValue({ toString: () => "Alex" } as Selection);
+    await click(row.querySelector("dd")!);
+    selection.mockRestore();
+    await act(async () => { row.querySelector("dd")!.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true })); });
+    await act(async () => { row.querySelector("dd")!.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 1 })); });
+    expect(opened).toEqual([]);
+  });
+
+  it("ticks the row instead of opening it while selecting", async () => {
+    await render();
+    await click(button("Select"));
+    await eventually(() => expect(checkboxes().length).toBeGreaterThan(1));
+    const row = passportRow();
+    const box = row.querySelector<HTMLInputElement>(".result-select input")!;
+    await click(row.querySelector(".result-body")!);
+    expect(box.checked).toBe(true);
+    await click(row.querySelector("dd")!);
+    expect(box.checked).toBe(false);
+    expect(opened).toEqual([]);
+  });
+
+  it("highlights no row on render or after a tap, only after the arrow keys", async () => {
+    await render();
+    await eventually(() => expect(container?.querySelectorAll(".result-row")).toHaveLength(hits.length));
+    const active = () => Array.from(container?.querySelectorAll(".result-row") ?? []).map((row) => row.classList.contains("result-row--active"));
+    expect(active().some(Boolean)).toBe(false);
+
+    const rows = Array.from(container?.querySelectorAll(".result-row") ?? []);
+    await act(async () => { rows[1].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" })); });
+    expect(active().some(Boolean)).toBe(false);
+
+    const press = (key: string) => act(async () => { document.body.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })); });
+    // A tap leaves the roving position alone (it would redraw the page before the click).
+    await press("ArrowDown");
+    expect(active().indexOf(true)).toBe(0);
+    await press("ArrowDown");
+    expect(active().indexOf(true)).toBe(1);
+    // A later tap puts the highlight away again.
+    await act(async () => { rows[0].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" })); });
+    expect(active().some(Boolean)).toBe(false);
+  });
+
+  it("does not focus the search field after a chip tap on a touch screen", async () => {
+    stubPointer(false);
+    await render();
+    await click(passportRow().querySelector(".text-chip")!);
+    await idle();
+    expect(document.activeElement).not.toBe(searchInput());
+  });
+
+  it("focuses the search field after a chip click with a fine pointer", async () => {
+    stubPointer(true);
+    await render();
+    await click(passportRow().querySelector(".text-chip")!);
+    await eventually(() => expect(document.activeElement).toBe(searchInput()));
   });
 });

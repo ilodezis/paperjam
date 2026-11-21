@@ -26,8 +26,16 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let queryClient: QueryClient | null = null;
 
+// jsdom has none of these; each test that needs one installs it and afterEach removes it again.
+const stubbed: Array<[object, string]> = [];
+function stub(target: object, name: string, value: unknown) {
+  Object.defineProperty(target, name, { value, configurable: true, writable: true });
+  stubbed.push([target, name]);
+}
+
 afterEach(async () => {
   vi.clearAllMocks();
+  for (const [target, name] of stubbed.splice(0)) delete (target as Record<string, unknown>)[name];
   if (root) await act(async () => root?.unmount());
   container?.remove();
   queryClient?.clear();
@@ -94,6 +102,14 @@ async function chooseFile(name: string) {
   const input = fileInput();
   const file = new File(["synthetic"], name, { type: "application/pdf" });
   Object.defineProperty(input, "files", { value: [file], configurable: true });
+  await act(async () => {
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+async function chooseFiles(files: File[]) {
+  const input = fileInput();
+  Object.defineProperty(input, "files", { value: files, configurable: true });
   await act(async () => {
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
@@ -357,5 +373,102 @@ describe("UploadPage", () => {
     await eventually(() => expect(stageTitle()).toBe("Not added: 1"));
     expect(container?.querySelector(".upload-item--failed .upload-status")?.textContent).not.toBe("");
     expect(container?.querySelector(".upload-retry")).toBeNull();
+  });
+
+  it("scrolls the upload button into view when files are chosen", async () => {
+    const scrolled: Element[] = [];
+    const scrollIntoView = vi.fn(function (this: Element) { scrolled.push(this); });
+    stub(Element.prototype, "scrollIntoView", scrollIntoView);
+    await renderPage();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    await chooseFile("statement.pdf");
+
+    await eventually(() => expect(startButton()).toBeTruthy());
+    expect(scrolled).toEqual([startButton()]);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", behavior: "smooth" });
+
+    // More files make the queue longer and push the button down again.
+    await chooseFile("receipt.pdf");
+    expect(scrolled).toHaveLength(2);
+    expect(scrolled[1]).toBe(startButton());
+  });
+
+  it("keeps the progress in view when the upload starts instead of resetting the scroll", async () => {
+    // The settings and the button vanish on start, so the scroller shortens; nothing may send it to the top.
+    vi.mocked(runUpload).mockImplementation((_file, _options, onUpdate) => {
+      onUpdate({ phase: "uploading" });
+      return new Promise<void>(() => undefined);
+    });
+    const scrolled: Element[] = [];
+    stub(Element.prototype, "scrollIntoView", vi.fn(function (this: Element) { scrolled.push(this); }));
+    const scrollTo = vi.fn();
+    stub(Element.prototype, "scrollTo", scrollTo);
+    const windowScrollTo = vi.fn();
+    stub(window, "scrollTo", windowScrollTo);
+    await renderPage();
+    await chooseFile("statement.pdf");
+    // Whatever the mount and the file choice did is not under test: count from the tap on.
+    scrolled.length = 0;
+    scrollTo.mockClear();
+    windowScrollTo.mockClear();
+
+    await act(async () => {
+      startButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    await eventually(() => expect(startButton()).toBeNull());
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(windowScrollTo).not.toHaveBeenCalled();
+    expect(scrolled).toEqual([container?.querySelector(".upload-item--uploading")]);
+  });
+
+  it("shows a thumbnail for an image and releases its URL when the file is removed", async () => {
+    const createObjectURL = vi.fn(() => "blob:thumb-1");
+    const revokeObjectURL = vi.fn();
+    stub(URL, "createObjectURL", createObjectURL);
+    stub(URL, "revokeObjectURL", revokeObjectURL);
+    await renderPage();
+
+    await chooseFiles([new File(["png"], "passport.png", { type: "image/png" }), new File(["pdf"], "contract.pdf", { type: "application/pdf" })]);
+
+    const images = container?.querySelectorAll("img");
+    expect(images).toHaveLength(1);
+    expect(images?.[0].getAttribute("src")).toBe("blob:thumb-1");
+    // One URL per file, however often the page renders; the PDF keeps its icon and gets none.
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const items = container?.querySelectorAll(".upload-item");
+    expect(items?.[0].querySelector("img")).toBeTruthy();
+    expect(items?.[1].querySelector("img")).toBeNull();
+    expect(items?.[1].querySelector(".upload-file-icon svg")).toBeTruthy();
+
+    // Unrelated renders neither recreate nor revoke it.
+    await act(async () => {
+      prefillCheckbox("Alex").click();
+    });
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>('button[aria-label="Remove passport.png"]')?.click();
+    });
+    expect(container?.querySelector("img")).toBeNull();
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:thumb-1");
+  });
+
+  it("releases the thumbnail URLs when the page is left", async () => {
+    const urls = ["blob:a", "blob:b"];
+    stub(URL, "createObjectURL", vi.fn(() => urls.shift() ?? "blob:extra"));
+    const revokeObjectURL = vi.fn();
+    stub(URL, "revokeObjectURL", revokeObjectURL);
+    await renderPage();
+    await chooseFiles([new File(["a"], "a.png", { type: "image/png" }), new File(["b"], "b.jpg", { type: "image/jpeg" })]);
+    expect(container?.querySelectorAll("img")).toHaveLength(2);
+
+    await act(async () => root?.unmount());
+    root = null;
+
+    expect(revokeObjectURL.mock.calls.map(([url]) => url).sort()).toEqual(["blob:a", "blob:b"]);
   });
 });

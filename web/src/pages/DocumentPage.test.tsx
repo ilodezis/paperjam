@@ -433,6 +433,17 @@ describe("DocumentPage date field", () => {
     expect(document.getElementById(labelledBy!)?.textContent).toBe("Document date");
     expect(input.labels?.length ?? 0).toBe(0);
   });
+
+  it("gives the date input a non-empty visible label in Russian, so its name is not built from the picker button", async () => {
+    await render("doc-rental", () => expect(container?.querySelector('input[type="date"]')).not.toBeNull(), "ru");
+
+    const input = container!.querySelector<HTMLInputElement>('input[type="date"]')!;
+    const labelledBy = input.getAttribute("aria-labelledby");
+    const labelElement = labelledBy ? document.getElementById(labelledBy) : null;
+    expect(labelElement).not.toBeNull();
+    expect(labelElement?.contains(input)).toBe(false);
+    expect(labelElement?.textContent?.trim()).toBe("Дата документа");
+  });
 });
 
 describe("DocumentPage fields", () => {

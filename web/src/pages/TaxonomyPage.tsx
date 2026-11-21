@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useBlocker } from "@tanstack/react-router";
 import { ArrowLeft, Building2, ChevronRight, FileText, LoaderCircle, Plus, Tags, Trash2, UsersRound, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, api, type CorrespondentView, type PersonView, type TagView } from "../api";
@@ -332,10 +332,28 @@ export function TaxonomyPage() {
     if (!creating && !selected) dirtyRef.current = false;
   }, [creating, selected]);
 
-  async function transition(action: () => void) {
-    if (busy || !(await confirmDiscard())) return;
+  async function transition(action: () => void): Promise<boolean> {
+    if (busy || !(await confirmDiscard())) return false;
     dirtyRef.current = false;
     action();
+    return true;
+  }
+
+  /** Arrow keys move the highlighted record through the list; the first press highlights the first record. */
+  async function onListKeyDown(event: KeyboardEvent<HTMLUListElement>) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const list = event.currentTarget;
+    const current = items.findIndex((item) => item.id === selection[section]);
+    const next = Math.min(items.length - 1, Math.max(0, current + (event.key === "ArrowDown" ? 1 : -1)));
+    const target = items[next];
+    if (!target) return;
+    const moved = await transition(() => {
+      setSelection((state) => ({ ...state, [section]: target.id }));
+      setCreating(false);
+      setActionError(null);
+    });
+    if (moved) list.querySelectorAll<HTMLButtonElement>("button")[next]?.focus();
   }
 
   async function run(action: () => Promise<string | void>) {
@@ -383,7 +401,7 @@ export function TaxonomyPage() {
       {taxonomy ? (
         <div key={section} className={`${workspaceClass} panel-in`}>
           <section className="taxonomy-list" aria-label={t(`taxonomy.tabs.${section}`)}>
-            {items.length > 0 ? <ul>{items.map((item) => <li key={item.id} className={selected?.id === item.id && !creating ? "taxonomy-list-item taxonomy-list-item--active" : "taxonomy-list-item"}><button type="button" onClick={() => void transition(() => { setSelection((current) => ({ ...current, [section]: item.id })); setCreating(false); setDetailOpen(true); setActionError(null); })}>{item.name}<ChevronRight /></button><span>{t("taxonomy.usedBy", { count: item.document_count })}</span></li>)}</ul> : <div className="taxonomy-empty"><p>{t(`taxonomy.empty.${section}`)}</p></div>}
+            {items.length > 0 ? <ul onKeyDown={(event) => void onListKeyDown(event)}>{items.map((item) => <li key={item.id} className={selection[section] === item.id && !creating ? "taxonomy-list-item taxonomy-list-item--active" : "taxonomy-list-item"}><button type="button" onClick={() => void transition(() => { setSelection((current) => ({ ...current, [section]: item.id })); setCreating(false); setDetailOpen(true); setActionError(null); })}>{item.name}<ChevronRight /></button><span>{t("taxonomy.usedBy", { count: item.document_count })}</span></li>)}</ul> : <div className="taxonomy-empty"><p>{t(`taxonomy.empty.${section}`)}</p></div>}
           </section>
           {hasDetail ? (
             <section className="taxonomy-detail" aria-label={t("taxonomy.recordDetails")}>

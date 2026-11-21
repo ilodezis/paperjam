@@ -35,6 +35,14 @@ function Snippet({ text, language }: { text: string; language: string }) {
   return <>{calmSnippet(parseSnippet(text), language).map((part, index) => part.mark ? <mark key={index}>{part.text}</mark> : <span key={index}>{part.text}</span>)}</>;
 }
 
+/** True when the browser would draw a focus ring: focus from the keyboard, not from a tap. */
+function focusVisible(element: Element): boolean {
+  try { return element.matches(":focus-visible"); } catch { return false; }
+}
+
+/** A click on these belongs to them, not to the card around them. */
+const INTERACTIVE = "a, button, input, label, select, textarea, summary, [role=button]";
+
 /** Every prop is a primitive or referentially stable across the page's re-renders, so a filter
  *  tap or a selection toggle re-renders only the rows whose own data changed. */
 const ResultItem = memo(function ResultItem({ hit, type, active, index, language, onActivate, onFilter, resultRef, checked, onToggle }: {
@@ -43,7 +51,8 @@ const ResultItem = memo(function ResultItem({ hit, type, active, index, language
   active: boolean;
   index: number;
   language: string;
-  onActivate: (index: number) => void;
+  /** Marks the row the keyboard roves from; `highlight` shows or hides its highlight, undefined leaves it as is. */
+  onActivate: (index: number, highlight?: boolean) => void;
   onFilter: (prefix: string, value?: string) => void;
   resultRef: (index: number, element: HTMLAnchorElement | null) => void;
   /** Whether the row is ticked; meaningful only while `onToggle` is set. */
@@ -58,7 +67,19 @@ const ResultItem = memo(function ResultItem({ hit, type, active, index, language
   const due = hit.due_date && !Object.values(hit.key_fields).some((value) => value.kind === "date" && value.value === hit.due_date) ? dueState(hit.due_date) : null;
   return (
     <li data-prefetch-id={hit.id}>
-      <article className={active ? "result-row result-row--active" : "result-row"} onPointerEnter={(event) => { if (event.pointerType === "mouse") onActivate(index); }}>
+      <article
+        className={active ? "result-row result-row--active" : "result-row"}
+        onPointerEnter={(event) => { if (event.pointerType === "mouse") onActivate(index, true); }}
+        onPointerDown={(event) => { if (event.pointerType !== "mouse") onActivate(index, false); }}
+        // The whole card opens the document (or ticks the row); text selection, links and controls keep their own clicks.
+        onClick={(event) => {
+          if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          if ((event.target as Element).closest(INTERACTIVE)) return;
+          if (window.getSelection()?.toString()) return;
+          if (onToggle) onToggle(hit.id, !checked);
+          else event.currentTarget.querySelector<HTMLAnchorElement>("a.result-title")?.click();
+        }}
+      >
         {onToggle ? (
           <label className="result-select">
             <input type="checkbox" checked={checked} onChange={(event) => onToggle(hit.id, event.target.checked)} aria-label={t("archive.selectDocument", { title: hit.title })} />
@@ -82,7 +103,7 @@ const ResultItem = memo(function ResultItem({ hit, type, active, index, language
         </ScreenLink>
         <div className="result-body">
           <div className="result-heading">
-            <ScreenLink ref={linkRef} to={documentPath(hit.id)} sharedSelector="[data-shared-source]" className="result-title" onFocus={() => onActivate(index)}>{hit.title}</ScreenLink>
+            <ScreenLink ref={linkRef} to={documentPath(hit.id)} sharedSelector="[data-shared-source]" className="result-title" onFocus={(event) => onActivate(index, focusVisible(event.currentTarget) ? true : undefined)}>{hit.title}</ScreenLink>
             {hit.document_date ? <time dateTime={hit.document_date}>{formatIsoDate(hit.document_date, language)}</time> : null}
             {(hit.attention ?? []).length > 0 ? <span className="result-attention"><AlertCircle aria-hidden="true" />{t("archive.needsAttention")}</span> : null}
           </div>
@@ -146,6 +167,8 @@ export function ArchivePage() {
   const [loadMoreError, setLoadMoreError] = useState(false);
   const [prevQueryKey, setPrevQueryKey] = useState(`${query}\0${sort}`);
   const [activeIndex, setActiveIndex] = useState(-1);
+  // The active row is drawn only after the keyboard or a mouse put it there, never on a tap or a fresh list.
+  const [highlight, setHighlight] = useState(false);
   const [prevPage, setPrevPage] = useState(page);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [selecting, setSelecting] = useState(false);
@@ -175,8 +198,17 @@ export function ArchivePage() {
 
   if (prevPage !== page) {
     setPrevPage(page);
-    setActiveIndex((page?.hits.length ?? 0) > 0 ? 0 : -1);
+    setActiveIndex(-1);
   }
+  const activate = useCallback((index: number, show?: boolean) => {
+    // A finger only hides the highlight; already hidden, the tap redraws nothing before its click.
+    if (show === false) {
+      setHighlight(false);
+      return;
+    }
+    setActiveIndex(index);
+    if (show !== undefined) setHighlight(show);
+  }, []);
 
   const hits = useMemo(() => (page ? [...page.hits, ...extraHits] : []), [page, extraHits]);
   const total = page?.total ?? 0;
@@ -228,6 +260,7 @@ export function ArchivePage() {
         const direction = event.key === "ArrowDown" ? 1 : -1;
         const next = Math.min(hits.length - 1, Math.max(0, activeIndex + direction));
         setActiveIndex(next);
+        setHighlight(true);
         resultRefs.current[next]?.focus();
       }
     }
@@ -256,7 +289,8 @@ export function ArchivePage() {
 
   const filter = useCallback((prefix: string, value?: string) => {
     changeQuery(toggleQueryFilter(latest.current.query, prefix, value));
-    searchRef.current?.focus();
+    // A fine pointer means a hardware keyboard to refine the query with; on a phone focus would only raise the on-screen keyboard.
+    if (window.matchMedia?.("(pointer: fine)").matches) searchRef.current?.focus();
   }, [changeQuery]);
 
   function changeSort(nextSort: Sort) {
@@ -583,10 +617,10 @@ export function ArchivePage() {
               key={hit.id}
               hit={hit}
               type={hit.type_key ? typeByKey.get(hit.type_key) : undefined}
-              active={activeIndex === index}
+              active={highlight && activeIndex === index}
               index={index}
               language={language}
-              onActivate={setActiveIndex}
+              onActivate={activate}
               onFilter={filter}
               resultRef={setResultRef}
               checked={selecting && selected.has(hit.id)}

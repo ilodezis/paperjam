@@ -29,6 +29,14 @@ interface Job {
   shared: HTMLElement | null;
 }
 
+/** A touch that began at the left edge and has not yet shown which way it goes. */
+interface Candidate {
+  pointer: number;
+  x0: number;
+  y0: number;
+  t0: number;
+}
+
 interface Swipe {
   pointer: number;
   x0: number;
@@ -49,6 +57,14 @@ export interface StackInfo {
 
 /** Pointer travel from the left edge that starts a swipe back, in pixels. */
 const EDGE = 28;
+
+/** Horizontal travel that turns an edge touch into a swipe, in pixels; less is still a tap. */
+const SLOP = 10;
+
+/** Installed to the home screen. In a browser tab the system's own back gesture owns the edge. */
+const standalone = (): boolean =>
+  typeof matchMedia === "function" &&
+  (matchMedia("(display-mode: standalone)").matches || (navigator as { standalone?: boolean }).standalone === true);
 
 const ARCHIVE: Dest = { id: "archive", path: "/", search: "" };
 
@@ -73,6 +89,8 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
   const busy = useRef(false);
   const job = useRef<Job | null>(null);
   const pending = useRef<Dest | null>(null);
+  const [caughtUp, setCaughtUp] = useState(0);
+  const candidate = useRef<Candidate | null>(null);
   const swipe = useRef<Swipe | null>(null);
 
   // One function for every screen, so a screen's props stay the same from one commit to the next.
@@ -112,12 +130,16 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
       }
     } finally {
       commit({ logical: viewRef.current.logical, leaving: [], moving: [] });
-      busy.current = false;
-      const next = pending.current;
-      pending.current = null;
-      if (next !== null) sync(next);
+      release();
     }
   });
+
+  // Every motion ends here: the stage is free again, and an address it missed meanwhile catches up.
+  // A gesture's handlers are no effect, so the catching up is left to the effect below.
+  const release = () => {
+    busy.current = false;
+    if (pending.current !== null) setCaughtUp((n) => n + 1);
+  };
 
   const sync = useEffectEvent((dest: Dest) => {
     // A change that arrives mid-motion waits its turn; the stack and the address must end up agreeing.
@@ -146,6 +168,12 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     const held = [topOf(before.logical).key, ...(fresh ? [toKey] : [])];
     commit({ logical: plan.state, leaving: plan.drop, moving: [plan.from.key, toKey], held });
   });
+
+  useEffect(() => {
+    const next = pending.current;
+    pending.current = null;
+    if (next !== null) sync(next);
+  }, [caughtUp]);
 
   useEffect(() => {
     const dest = destOf(location.pathname, location.searchStr);
@@ -189,30 +217,48 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
   /* ---------- Swipe back from the left edge (phone) ---------- */
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const stageEl = stage.current;
-    const v = viewRef.current;
-    if (desktop || busy.current || v.logical.entries.length < 2 || stageEl === null) return;
+    candidate.current = null;
+    if (desktop || busy.current || swipe.current !== null || viewRef.current.logical.entries.length < 2 || stageEl === null) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    if (e.clientX - stageEl.getBoundingClientRect().left > EDGE) return;
+    if (!standalone() || e.clientX - stageEl.getBoundingClientRect().left > EDGE) return;
+    // Only a candidate: a tap on the bar's back button starts here too and must reach its click untouched.
+    candidate.current = { pointer: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now() };
+  };
+
+  const startSwipe = (c: Candidate): boolean => {
+    const stageEl = stage.current;
+    const shadeEl = shade.current;
+    const v = viewRef.current;
+    if (busy.current || stageEl === null || shadeEl === null) return false;
     const [top, under] = [v.logical.entries[v.logical.entries.length - 1], v.logical.entries[v.logical.entries.length - 2]];
     const topEl = top === undefined ? undefined : nodes.current.get(top.key);
     const underEl = under === undefined ? undefined : nodes.current.get(under.key);
-    const shadeEl = shade.current;
-    if (top === undefined || under === undefined || topEl === undefined || underEl === undefined || shadeEl === null) return;
+    if (top === undefined || under === undefined || topEl === undefined || underEl === undefined) return false;
     // Bring the screen below out of hiding for the length of the gesture.
     commit({ ...v, moving: [top.key, under.key] });
     underEl.style.zIndex = "1";
     shadeEl.style.zIndex = "2";
     topEl.style.zIndex = "3";
     topEl.style.boxShadow = "-24px 0 48px -18px rgba(0,0,0,.55)";
-    swipe.current = { pointer: e.pointerId, x0: e.clientX, t0: performance.now(), top: topEl, under: underEl, width: stageEl.offsetWidth, dx: 0 };
+    swipe.current = { pointer: c.pointer, x0: c.x0, t0: c.t0, top: topEl, under: underEl, width: stageEl.offsetWidth, dx: 0 };
     try {
-      stageEl.setPointerCapture(e.pointerId);
+      stageEl.setPointerCapture(c.pointer);
     } catch {
       /* the pointer is already gone */
     }
+    return true;
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const c = candidate.current;
+    if (c !== null && e.pointerId === c.pointer && swipe.current === null) {
+      const dx = e.clientX - c.x0;
+      const dy = e.clientY - c.y0;
+      if (Math.abs(dx) < SLOP && Math.abs(dy) < SLOP) return;
+      candidate.current = null;
+      // Rightward and mostly horizontal starts the swipe; anything else was a scroll or a drift.
+      if (dx < SLOP || dx <= Math.abs(dy) || !startSwipe(c)) return;
+    }
     const s = swipe.current;
     if (s === null || e.pointerId !== s.pointer) return;
     s.dx = Math.min(Math.max(e.clientX - s.x0, 0), s.width);
@@ -223,6 +269,7 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
   };
 
   const endSwipe = async (e: React.PointerEvent<HTMLDivElement>) => {
+    if (candidate.current?.pointer === e.pointerId) candidate.current = null;
     const s = swipe.current;
     const shadeEl = shade.current;
     if (s === null || e.pointerId !== s.pointer || shadeEl === null) return;
@@ -239,7 +286,7 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
       commit({ logical: plan.state, leaving: plan.drop, moving: v.moving, held: [topOf(v.logical).key] });
       await slide(s.top, s.under, shadeEl, s.width, -1, progress);
       commit({ logical: plan.state, leaving: [], moving: [] });
-      busy.current = false;
+      release();
       // The address follows the stack; the change finds the stack already there and does nothing.
       router.history.back();
     } else {
@@ -253,7 +300,7 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
       for (const n of [s.top, s.under, shadeEl]) n.style.zIndex = "";
       s.top.style.boxShadow = "";
       commit({ ...viewRef.current, moving: [] });
-      busy.current = false;
+      release();
     }
   };
 

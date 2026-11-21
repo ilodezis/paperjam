@@ -58,3 +58,19 @@ describe("type scale", () => {
     expect(sizes.filter((size) => size < 11)).toEqual([]);
   });
 });
+
+describe("touch screens", () => {
+  const coarse = css.slice(css.indexOf("@media (pointer: coarse) {"));
+
+  it("keeps text fields at 16px on coarse pointers so iOS does not zoom", () => {
+    expect(coarse).toMatch(/:is\(input, select, textarea\)[^{]*\{[^}]*font-size:\s*16px/);
+  });
+
+  it("turns the tap highlight off", () => {
+    expect(css).toContain("-webkit-tap-highlight-color: transparent");
+  });
+
+  it("widens the result chip tap area without growing the chip", () => {
+    expect(css).toMatch(/\.text-chip::after\s*\{[^}]*inset:\s*-\d+px/);
+  });
+});

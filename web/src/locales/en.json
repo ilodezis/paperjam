@@ -85,7 +85,7 @@
     "due": "Due",
     "syntax": "Search syntax",
     "syntaxDescription": "Combine free text and filters in one query.",
-    "syntaxHint": "Click an example to drop it into the search field, edit it there and press Enter.",
+    "syntaxHint": "Pick an example to drop it into the search field, edit it there and search.",
     "syntaxFilters": "Filters",
     "syntaxCombinations": "Combining",
     "syntaxType": "document type",

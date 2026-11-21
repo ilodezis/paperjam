@@ -48,6 +48,7 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   if (root) await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -82,6 +83,30 @@ async function mount(path: string) {
   const screens = () => Array.from(container?.querySelectorAll<HTMLElement>(".screen") ?? []).map((el) => `${el.dataset.screen}${el.hidden ? "(hidden)" : ""}`);
   return { router, go, screens, info };
 }
+
+/** The page as an installed app (the edge swipe is ours) or as a browser tab (the system's is). */
+function stubStandalone(standalone: boolean) {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: standalone && query.includes("standalone"),
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  }));
+}
+
+/** A touch of the stage; the stage is 400px wide in the tests that drag. */
+function touch(type: "pointerdown" | "pointermove" | "pointerup", x: number, y = 300) {
+  const stage = container?.querySelector<HTMLElement>(".stage") as HTMLElement;
+  stage.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, pointerType: "touch", clientX: x, clientY: y, button: 0 }));
+}
+
+function sizeStage(width: number) {
+  const stage = container?.querySelector<HTMLElement>(".stage") as HTMLElement;
+  Object.defineProperty(stage, "offsetWidth", { configurable: true, value: width });
+  stage.setPointerCapture = vi.fn();
+}
+
+const screenEl = (id: string) => container?.querySelector<HTMLElement>(`[data-screen="${id}"]`) as HTMLElement;
 
 describe("Stage", () => {
   it("draws the screen the address names", async () => {
@@ -162,5 +187,82 @@ describe("Stage", () => {
     // The archive learns it is on top once the motion is over; the leaving document is never redrawn.
     expect(archive.renders).toBe(1);
     expect(documentPage.renders).toBe(0);
+  });
+
+  describe("swipe back from the left edge", () => {
+    it("leaves a tap on the back button alone, so the address and the stack still agree", async () => {
+      stubStandalone(true);
+      const { go, screens, router } = await mount("/");
+      await go("/documents/a", "push");
+      // A swipe that began on the touch would hold the stage busy for its settle motion; the
+      // button's click arrives meanwhile.
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const animate = vi.mocked(Element.prototype.animate);
+      animate.mockImplementation(() => ({ finished: held, cancel: vi.fn() }) as never);
+      try {
+        await act(async () => {
+          touch("pointerdown", 10);
+          touch("pointerup", 10);
+          router.history.back();
+        });
+        await act(async () => release());
+      } finally {
+        animate.mockImplementation(() => ({ finished: Promise.resolve(), cancel: vi.fn() }) as never);
+      }
+      expect(screens()).toEqual(["archive"]);
+      expect(router.state.location.pathname).toBe("/");
+    });
+
+    it("follows the finger from the edge when installed, then pops and takes the address along", async () => {
+      stubStandalone(true);
+      const { go, screens, router } = await mount("/");
+      await go("/documents/a", "push");
+      sizeStage(400);
+      await act(async () => {
+        touch("pointerdown", 10);
+        touch("pointermove", 14);
+      });
+      // Under the slop it is still a tap.
+      expect(screenEl("document").style.transform).toBe("");
+      await act(async () => touch("pointermove", 200));
+      expect(screenEl("document").style.transform).toMatch(/^translateX\(.+px\)$/);
+      expect(screenEl("archive").hidden).toBe(false);
+      await act(async () => touch("pointerup", 200));
+      await act(async () => undefined);
+      expect(screens()).toEqual(["archive"]);
+      expect(router.state.location.pathname).toBe("/");
+    });
+
+    it("does not start in a browser tab, where the system's back gesture owns the edge", async () => {
+      stubStandalone(false);
+      const { go, screens } = await mount("/");
+      await go("/documents/a", "push");
+      sizeStage(400);
+      await act(async () => {
+        touch("pointerdown", 10);
+        touch("pointermove", 200);
+        touch("pointerup", 200);
+      });
+      expect(screens()).toEqual(["archive(hidden)", "document"]);
+      expect(screenEl("document").style.transform).toBe("");
+    });
+
+    it("lets a mostly vertical move from the edge scroll instead", async () => {
+      stubStandalone(true);
+      const { go, screens } = await mount("/");
+      await go("/documents/a", "push");
+      sizeStage(400);
+      await act(async () => {
+        touch("pointerdown", 10, 100);
+        touch("pointermove", 14, 140);
+        // It drifts right later; the gesture was already given up.
+        touch("pointermove", 200, 145);
+      });
+      expect(screenEl("document").style.transform).toBe("");
+      expect(screenEl("archive").hidden).toBe(true);
+      await act(async () => touch("pointerup", 200, 145));
+      expect(screens()).toEqual(["archive(hidden)", "document"]);
+    });
   });
 });

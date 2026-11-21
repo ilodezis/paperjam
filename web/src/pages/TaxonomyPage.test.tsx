@@ -239,6 +239,18 @@ describe("TaxonomyPage", () => {
     expect(byLabel("Delete Alex Example")).not.toBeNull();
   });
 
+  it("highlights no person on first render and only once the arrow keys move through the list", async () => {
+    await renderPage();
+    const activeItems = () => container?.querySelectorAll(".taxonomy-list-item--active") ?? [];
+    expect(activeItems().length).toBe(0);
+
+    const list = container!.querySelector(".taxonomy-list-item button")!.closest("ul")!;
+    await act(async () => {
+      list.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
+    await eventually(() => expect(activeItems().length).toBe(1));
+  });
+
   it("switches between list and detail on mobile without losing the selected record", async () => {
     await renderPage();
     expect(container?.querySelector(".taxonomy-workspace--detail-open")).toBeNull();
