@@ -21,10 +21,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use indexmap::IndexMap;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use tantivy::directory::MmapDirectory;
 use tantivy::indexer::IndexWriterOptions;
-use tantivy::schema::Schema;
+use tantivy::schema::{OwnedValue, Schema};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -259,7 +258,6 @@ pub(crate) struct StoredMeta {
 
 pub(crate) struct Inner {
     pub index: Index,
-    pub schema: Schema,
     pub fields: Fields,
     pub reader: IndexReader,
     writer: Mutex<Option<IndexWriter>>,
@@ -345,7 +343,7 @@ impl SearchIndex {
             }
         };
         let _ = std::fs::write(&version_path, &version);
-        Self::from_index(index, schema, fields, &tags)
+        Self::from_index(index, fields, &tags)
     }
 
     /// An in-memory index with the stemmers of the default test languages
@@ -357,16 +355,11 @@ impl SearchIndex {
     pub fn open_in_ram_with(ocr_langs: &str) -> Self {
         let tags = analyzers::stem_tags(ocr_langs);
         let (schema, fields) = schema::build(&tags);
-        let index = Index::create_in_ram(schema.clone());
-        Self::from_index(index, schema, fields, &tags).expect("in-memory index")
+        let index = Index::create_in_ram(schema);
+        Self::from_index(index, fields, &tags).expect("in-memory index")
     }
 
-    fn from_index(
-        index: Index,
-        schema: Schema,
-        fields: Fields,
-        tags: &[&'static str],
-    ) -> Result<Self> {
+    fn from_index(index: Index, fields: Fields, tags: &[&'static str]) -> Result<Self> {
         analyzers::register(&index, tags);
         let reader = index
             .reader_builder()
@@ -376,7 +369,6 @@ impl SearchIndex {
         Ok(Self {
             inner: Arc::new(Inner {
                 index,
-                schema,
                 fields,
                 reader,
                 writer: Mutex::new(None),
@@ -426,13 +418,11 @@ impl SearchIndex {
 
     /// Adds or replaces the document. Searchable after the next commit.
     pub fn index_document(&self, doc: &IndexDoc) -> Result<()> {
-        let json = to_json(doc, &self.inner.fields);
-        let parsed =
-            TantivyDocument::parse_json(&self.inner.schema, &json.to_string()).map_err(internal)?;
+        let built = build_document(doc, &self.inner.fields);
         let id_term = Term::from_field_text(self.inner.fields.id, &doc.id.to_string());
         self.with_writer(|w| {
             w.delete_term(id_term);
-            w.add_document(parsed).map_err(internal)?;
+            w.add_document(built).map_err(internal)?;
             Ok(())
         })
     }
@@ -579,15 +569,17 @@ fn committer_step(idle: &mut u32, dirty: bool, used: bool, has_writer: bool) -> 
     }
 }
 
-fn field_json(value: &FieldValue) -> Option<Value> {
+fn field_value(value: &FieldValue) -> Option<OwnedValue> {
     Some(match value {
-        FieldValue::Text(s) => json!(s),
+        FieldValue::Text(s) => OwnedValue::Str(s.clone()),
         // Any spelling of an identifier finds it: stored without separators.
-        FieldValue::Identifier(s) => json!(ident::squash(s)),
-        FieldValue::Date(d) => json!(days(*d) as f64),
-        FieldValue::Money { amount, .. } => json!(amount.to_f64()?),
-        FieldValue::Number(n) => json!(n.to_f64()?),
-        FieldValue::List(items) => json!(items),
+        FieldValue::Identifier(s) => OwnedValue::Str(ident::squash(s)),
+        FieldValue::Date(d) => OwnedValue::F64(days(*d) as f64),
+        FieldValue::Money { amount, .. } => OwnedValue::F64(amount.to_f64()?),
+        FieldValue::Number(n) => OwnedValue::F64(n.to_f64()?),
+        FieldValue::List(items) => {
+            OwnedValue::Array(items.iter().cloned().map(OwnedValue::Str).collect())
+        }
     })
 }
 
@@ -602,7 +594,7 @@ fn field_text(value: &FieldValue) -> String {
     }
 }
 
-fn to_json(doc: &IndexDoc, fields: &Fields) -> Value {
+fn build_document(doc: &IndexDoc, fields: &Fields) -> TantivyDocument {
     let mut all = String::new();
     let mut push = |s: &str| {
         all.push_str(s);
@@ -632,18 +624,6 @@ fn to_json(doc: &IndexDoc, fields: &Fields) -> Value {
     for value in doc.fields.values() {
         push(&field_text(value));
     }
-
-    let from_text: Vec<String> = doc
-        .correspondent
-        .iter()
-        .map(|n| matching::normalize(n))
-        .collect();
-    let person_text: Vec<String> = doc
-        .people
-        .iter()
-        .flat_map(|(_, aliases)| aliases)
-        .map(|n| matching::normalize(n))
-        .collect();
 
     let in_type_order: Vec<&String> = if doc.field_order.is_empty() {
         doc.fields.keys().collect()
@@ -680,10 +660,39 @@ fn to_json(doc: &IndexDoc, fields: &Fields) -> Value {
         summary: doc.summary.clone(),
     };
 
-    let mut has: Vec<String> = Vec::new();
+    let mut out = TantivyDocument::new();
+    out.add_text(fields.id, doc.id.to_string());
+    out.add_text(fields.body, markup::plain(&doc.texts.join("\n\n")));
+    out.add_text(
+        fields.meta,
+        serde_json::to_string(&meta).unwrap_or_default(),
+    );
+    out.add_text(fields.text_ident, ident::glued_spellings(&all));
+    out.add_text(fields.text_exact, &all);
+    for stem in fields.stems() {
+        out.add_text(stem.field, &all);
+    }
+    for name in &doc.correspondent {
+        out.add_text(fields.from_text, matching::normalize(name));
+    }
+    for (_, aliases) in &doc.people {
+        for alias in aliases {
+            out.add_text(fields.person_text, matching::normalize(alias));
+        }
+    }
+    for (id, _) in &doc.people {
+        out.add_text(fields.person_id, id.to_string());
+    }
+    for id in &doc.correspondent_ids {
+        out.add_text(fields.correspondent_id, id.to_string());
+    }
+    for tag in &doc.tags {
+        out.add_text(fields.tag, tag.to_lowercase());
+    }
+
     let mut mark = |condition: bool, name: &str| {
         if condition {
-            has.push(name.to_string());
+            out.add_text(fields.has, name);
         }
     };
     mark(!doc.attention.is_empty(), "attention");
@@ -700,47 +709,38 @@ fn to_json(doc: &IndexDoc, fields: &Fields) -> Value {
         !doc.correspondent_ids.is_empty() || !doc.correspondent.is_empty(),
         "from",
     );
-    has.extend(doc.fields.keys().map(|k| format!("field.{k}")));
-
-    let typed: serde_json::Map<String, Value> = doc
-        .fields
-        .iter()
-        .filter_map(|(k, v)| field_json(v).map(|j| (k.clone(), j)))
-        .collect();
-
-    let mut out = json!({
-        "id": doc.id.to_string(),
-        "body": markup::plain(&doc.texts.join("\n\n")),
-        "meta": serde_json::to_string(&meta).unwrap_or_default(),
-        "text_ident": ident::glued_spellings(&all),
-        "text_exact": all,
-        "from_text": from_text,
-        "person_text": person_text,
-        "person_id": doc.people.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>(),
-        "correspondent_id": doc.correspondent_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
-        "tag": doc.tags.iter().map(|t| t.to_lowercase()).collect::<Vec<_>>(),
-        "has": has,
-        "date_sort_desc": doc.document_date.map_or(i64::MIN, days),
-        "date_sort_asc": doc.document_date.map_or(i64::MAX, days),
-        "added_day": days(doc.added_at.date_naive()),
-        "added_ts": doc.added_at.timestamp(),
-        "local_only": u64::from(doc.local_only),
-        "trashed": u64::from(doc.trashed),
-        "fields": typed,
-    });
-    let object = out.as_object_mut().expect("object literal");
-    for stem in fields.stems() {
-        object.insert(format!("text_{}", stem.analyzer), json!(all));
+    for key in doc.fields.keys() {
+        out.add_text(fields.has, format!("field.{key}"));
     }
+
     if let Some(type_key) = &doc.type_key {
-        object.insert("type_key".into(), json!(type_key.to_lowercase()));
+        out.add_text(fields.type_key, type_key.to_lowercase());
     }
     if let Some(date) = doc.document_date {
-        object.insert("document_date".into(), json!(days(date)));
+        out.add_i64(fields.document_date, days(date));
     }
+    out.add_i64(
+        fields.date_sort_desc,
+        doc.document_date.map_or(i64::MIN, days),
+    );
+    out.add_i64(
+        fields.date_sort_asc,
+        doc.document_date.map_or(i64::MAX, days),
+    );
+    out.add_i64(fields.added_day, days(doc.added_at.date_naive()));
     if let Some(date) = due_date {
-        object.insert("due_day".into(), json!(days(date)));
+        out.add_i64(fields.due_day, days(date));
     }
+    out.add_i64(fields.added_ts, doc.added_at.timestamp());
+    out.add_u64(fields.local_only, u64::from(doc.local_only));
+    out.add_u64(fields.trashed, u64::from(doc.trashed));
+
+    let typed: BTreeMap<String, OwnedValue> = doc
+        .fields
+        .iter()
+        .filter_map(|(k, v)| field_value(v).map(|ov| (k.clone(), ov)))
+        .collect();
+    out.add_object(fields.fields, typed);
     out
 }
 

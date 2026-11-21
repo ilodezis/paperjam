@@ -13,8 +13,9 @@
 //! but unusable answer (refusal, truncation, garbage) hands its usage back in
 //! the error details so the caller can still account for the spend.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
@@ -37,6 +38,12 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// Reasoning effort OpenRouter gets when the operator sets none.
 const DEFAULT_REASONING_EFFORT: &str = "low";
+
+static TRANSCRIPTION_VALIDATOR: LazyLock<std::result::Result<jsonschema::Validator, String>> =
+    LazyLock::new(|| {
+        jsonschema::validator_for(crate::llm::schemas::transcription_schema_ref())
+            .map_err(|e| e.to_string())
+    });
 
 /// What one call cost: as the endpoint reports it, else from the configured
 /// price table.
@@ -111,6 +118,8 @@ pub struct LlmClient {
     prices: HashMap<String, ModelPrice>,
     /// Set after the first call whose cost could not be determined.
     cost_warned: AtomicBool,
+    /// OpenRouter models known to reject `reasoning.effort = "none"` with 400.
+    no_none_effort: Mutex<HashSet<String>>,
 }
 
 fn build_http(timeout: Duration) -> reqwest::Client {
@@ -135,6 +144,7 @@ impl LlmClient {
             provider: LlmProvider::from_base_url(base_url),
             prices: HashMap::new(),
             cost_warned: AtomicBool::new(false),
+            no_none_effort: Mutex::new(HashSet::new()),
         }
     }
 
@@ -181,8 +191,8 @@ impl LlmClient {
     /// exhausted), `llm_rejected` (4xx), `llm_bad_response` (not a
     /// chat-completions answer), and for a billed but unusable answer `llm_refusal`,
     /// `llm_truncated`, `llm_invalid_json` or `llm_schema_mismatch`.
-    pub async fn chat_json<T: DeserializeOwned>(&self, req: JsonRequest) -> Result<(T, Usage)> {
-        let validator = jsonschema::validator_for(&req.schema).map_err(|_| {
+    pub async fn chat_json<T: DeserializeOwned>(&self, mut req: JsonRequest) -> Result<(T, Usage)> {
+        let bad_schema = || {
             ServiceError::internal(
                 "llm_bad_schema",
                 format!(
@@ -190,7 +200,27 @@ impl LlmClient {
                     req.schema_name
                 ),
             )
-        })?;
+        };
+        let owned_validator;
+        let validator: &jsonschema::Validator = if req.schema_name
+            == crate::llm::schemas::TRANSCRIPTION
+            && &req.schema == crate::llm::schemas::transcription_schema_ref()
+        {
+            TRANSCRIPTION_VALIDATOR.as_ref().map_err(|_| bad_schema())?
+        } else {
+            owned_validator = jsonschema::validator_for(&req.schema).map_err(|_| bad_schema())?;
+            &owned_validator
+        };
+        if self.provider == LlmProvider::OpenRouter
+            && req.reasoning_effort.as_deref() == Some("none")
+            && self
+                .no_none_effort
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&req.model)
+        {
+            req.reasoning_effort = Some(DEFAULT_REASONING_EFFORT.to_string());
+        }
         let mut body = request_body(&req, self.provider);
         let answer = match self.complete(&body).await {
             // Some OpenRouter endpoints (e.g. Sonnet/Opus 5.5) require
@@ -202,6 +232,10 @@ impl LlmClient {
                     && e.code == "llm_rejected"
                     && e.message.ends_with("(HTTP 400)") =>
             {
+                self.no_none_effort
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(req.model.clone());
                 tracing::info!(
                     model = %req.model,
                     "provider rejected reasoning effort `none`, retrying with `{DEFAULT_REASONING_EFFORT}`"
@@ -527,10 +561,25 @@ fn request_body(req: &JsonRequest, provider: LlmProvider) -> Value {
             }),
         })
         .collect();
+    let system_message = if provider == LlmProvider::OpenRouter
+        && req.model.starts_with("anthropic/")
+        && req.system.len() >= 1024
+    {
+        json!({
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": req.system,
+                "cache_control": {"type": "ephemeral"},
+            }],
+        })
+    } else {
+        json!({"role": "system", "content": req.system})
+    };
     let mut body = json!({
         "model": req.model,
         "messages": [
-            {"role": "system", "content": req.system},
+            system_message,
             {"role": "user", "content": parts},
         ],
         "max_tokens": req.max_tokens,

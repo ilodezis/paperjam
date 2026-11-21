@@ -162,8 +162,10 @@ impl Isolation {
         };
         let mut worker = self.spawn(request, Arc::new(bytes))?;
         let image = match timeout(self.timeout, wire::read_frame(&mut worker.stdout)).await {
-            Ok(Ok(Some((wire::IMAGE, payload)))) => wire::take_u32s::<2>(&payload)
-                .and_then(|([width, height], rgb)| wire::rgb_image(width, height, rgb)),
+            Ok(Ok(Some((wire::IMAGE, payload)))) => match wire::take_u32s::<2>(&payload) {
+                Some(([width, height], _)) => wire::into_rgb_image(width, height, payload, 8),
+                None => None,
+            },
             Ok(Ok(Some((wire::FAILED, payload)))) => {
                 worker.reap().await;
                 return Err(reported(&payload, "image_corrupt"));
@@ -244,7 +246,7 @@ async fn forward(mut worker: Worker, sender: mpsc::Sender<Rendered>, total: u32,
             frame = timeout(limit, wire::read_frame(&mut worker.stdout)) => frame,
         };
         let failure = match frame {
-            Ok(Ok(Some((wire::PAGE, payload)))) => match page(&payload) {
+            Ok(Ok(Some((wire::PAGE, payload)))) => match page(payload) {
                 Some(rendered) => {
                     next = rendered.0.saturating_add(1);
                     if sender.send(rendered).await.is_err() {
@@ -285,11 +287,11 @@ async fn forward(mut worker: Worker, sender: mpsc::Sender<Rendered>, total: u32,
     }
 }
 
-fn page(payload: &[u8]) -> Option<Rendered> {
-    let ([n, width, height], rest) = wire::take_u32s::<3>(payload)?;
-    let (micros, rgb) = rest.split_at_checked(8)?;
+fn page(payload: Vec<u8>) -> Option<Rendered> {
+    let ([n, width, height], rest) = wire::take_u32s::<3>(&payload)?;
+    let (micros, _) = rest.split_at_checked(8)?;
     let micros = u64::from_le_bytes(micros.try_into().ok()?);
-    let image = wire::rgb_image(width, height, rgb)?;
+    let image = wire::into_rgb_image(width, height, payload, 20)?;
     Some((n, Ok(image), Duration::from_micros(micros)))
 }
 

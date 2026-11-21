@@ -457,11 +457,14 @@ pub async fn page_image(
     // A document with a clean copy shows the clean page; the page as it was
     // read is kept beside it. Without one, both names are the same picture.
     if original
-        && state
-            .app
-            .files
-            .derived_path(id, &format!("original-{n}.webp"))
-            .is_file()
+        && tokio::fs::try_exists(
+            state
+                .app
+                .files
+                .derived_path(id, &format!("original-{n}.webp")),
+        )
+        .await
+        .unwrap_or(false)
     {
         return derived_image(&state, id, &format!("original-{n}.webp"), &request).await;
     }

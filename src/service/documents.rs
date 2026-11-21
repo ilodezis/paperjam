@@ -91,6 +91,11 @@ pub async fn get_document(
 ) -> Result<DocumentView> {
     let mut conn = ctx.app.db.read.acquire().await?;
     let row = load_row(&mut conn, id).await?;
+    let status = row
+        .status
+        .parse::<DocumentStatus>()
+        .map_err(|_| ServiceError::internal("data_invalid", "unknown document status"))?;
+    let attention: Vec<String> = serde_json::from_str(&row.attention).unwrap_or_default();
     let defs = type_field_defs(&row);
 
     let people: Vec<(PersonId, String, Provenance)> = sqlx::query_as(
@@ -132,9 +137,16 @@ pub async fn get_document(
             })
         })
         .collect();
-    for (key, flag) in checks::field_issues(&mut conn, id).await? {
-        if let Some(field) = fields.iter_mut().find(|f| f.key == key) {
-            field.issues.push(flag.to_string());
+    if !fields.is_empty() {
+        let issues = if status == DocumentStatus::Ready {
+            checks::field_issues_for_attention(&mut conn, id, &attention).await?
+        } else {
+            checks::field_issues(&mut conn, id).await?
+        };
+        for (key, flag) in issues {
+            if let Some(field) = fields.iter_mut().find(|f| f.key == key) {
+                field.issues.push(flag.to_string());
+            }
         }
     }
     // The type's own order first; values orphaned by a type edit last.
@@ -204,12 +216,9 @@ pub async fn get_document(
         summary_provenance: row.summary_provenance,
         language: row.language,
         local_only: row.local_only,
-        status: row
-            .status
-            .parse::<DocumentStatus>()
-            .map_err(|_| ServiceError::internal("data_invalid", "unknown document status"))?,
+        status,
         status_reason: row.status_reason,
-        attention: serde_json::from_str(&row.attention).unwrap_or_default(),
+        attention,
         added_by: row.added_by,
         updated_by: row.updated_by,
         created_at: row.created_at,
@@ -618,7 +627,9 @@ pub async fn update_document(
         if had_tracked_mrz && checks::mrz_mismatch_fields(&mut tx, id).await?.is_empty() {
             checks::remove_flags(&mut tx, id, &[checks::MRZ_MISMATCH]).await?;
         }
-        // Flags tied to the edited fields clear (or appear) at once.
+    }
+    if !patch.fields.is_empty() || patch.type_id.is_some() {
+        // Flags tied to the type's validators or edited fields clear (or appear) at once.
         checks::recompute_in(&mut tx, id, &[]).await?;
     }
     if !patch.dismiss_attention.is_empty() {
@@ -1977,5 +1988,74 @@ mod tests {
                 .is_err()
         );
         assert_eq!(empty_trash(&web(&app)).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn ready_clean_doc_skips_unflagged_field_checks_and_type_patch_recomputes() {
+        let (_dir, app) = test_app().await;
+        let id = make_doc(&app, "clean_checks").await;
+        let passport = passport_type(&app).await;
+        update_document(
+            &ctx(&app),
+            id,
+            serde_json::from_value(json!({"type_id": passport})).unwrap(),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO field_values (document_id, field_key, value, provenance, page, updated_at) \
+             VALUES (?, 'number', '{\"kind\":\"identifier\",\"value\":\"AB 1234567\"}', 'llm', 1, '2026-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .execute(&app.db.write)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO text_layers (document_id, page, source, text, created_at) \
+             VALUES (?, 1, 'tesseract', 'No AB 1234561', '2026-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .execute(&app.db.write)
+        .await
+        .unwrap();
+
+        // A ready document with no recorded attention skips the read-time OCR scan.
+        sqlx::query("UPDATE documents SET status = 'ready', attention = '[]' WHERE id = ?")
+            .bind(id)
+            .execute(&app.db.write)
+            .await
+            .unwrap();
+        let clean_view = get_document(&ctx(&app), id, GetOptions::default())
+            .await
+            .unwrap();
+        let number = clean_view
+            .fields
+            .iter()
+            .find(|f| f.key == "number")
+            .unwrap();
+        assert!(number.issues.is_empty(), "{:?}", number.issues);
+
+        // Switching the document type recomputes attention without editing any fields.
+        let flagged_view = update_document(
+            &ctx(&app),
+            id,
+            serde_json::from_value(json!({"type_id": null})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            flagged_view
+                .attention
+                .iter()
+                .any(|f| f == checks::OCR_LLM_DISAGREE),
+            "{:?}",
+            flagged_view.attention
+        );
+        let number = flagged_view
+            .fields
+            .iter()
+            .find(|f| f.key == "number")
+            .unwrap();
+        assert_eq!(number.issues, vec![checks::OCR_LLM_DISAGREE.to_string()]);
     }
 }

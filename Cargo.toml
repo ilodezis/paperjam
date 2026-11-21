@@ -46,7 +46,6 @@ unicode-normalization = "0.1.26"
 url = "2.5.8"
 ipnet = "2.12.2"
 uuid = { version = "1.29.0", features = ["v7", "serde"] }
-zstd = "0.14.3"
 axum = { version = "0.8.9", features = ["macros", "multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 tower-http = { version = "0.7.1", features = ["set-header", "limit", "trace"] }

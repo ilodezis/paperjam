@@ -6,7 +6,7 @@
 //! the dependency tree.
 
 use std::fmt::Write as _;
-use std::io::Cursor;
+use std::io::{self, Cursor, Write as _};
 
 use ::image::codecs::jpeg::JpegEncoder;
 use ::image::{DynamicImage, GrayImage, RgbImage, imageops};
@@ -166,81 +166,106 @@ fn rotate(image: &RgbImage, degrees: f32, fill: [u8; 3]) -> RgbImage {
     RgbImage::from_raw(w, h, pixels).expect("a buffer of the image's size")
 }
 
-/// A PDF of `pages`, each image filling its page.
-pub fn pdf(pages: &[Page]) -> Vec<u8> {
-    let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+/// Streams a PDF of `pages` directly into `out`, returning the bytes written.
+pub fn write_pdf(pages: &[Page], out: &mut impl std::io::Write) -> io::Result<u64> {
+    struct CountingWriter<'a, W: std::io::Write> {
+        inner: &'a mut W,
+        written: usize,
+    }
+    impl<W: std::io::Write> std::io::Write for CountingWriter<'_, W> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner.write_all(buf)?;
+            self.written += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    let mut w = CountingWriter {
+        inner: out,
+        written: 0,
+    };
+    w.write_all(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")?;
     // Objects: 1 catalog, 2 page tree, 3 info, then per page: page, image, content.
     let count = 3 + pages.len() * 3;
     let mut offsets = vec![0usize; count + 1];
     let page_obj = |i: usize| 4 + i * 3;
 
-    let mut object = |out: &mut Vec<u8>, n: usize, body: &[u8]| {
-        offsets[n] = out.len();
-        out.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
+    let write_obj_header = |w: &mut CountingWriter<'_, _>, offsets: &mut [usize], n: usize| {
+        offsets[n] = w.written;
+        writeln!(w, "{n} 0 obj")
     };
 
-    object(&mut out, 1, b"<< /Type /Catalog /Pages 2 0 R >>");
+    write_obj_header(&mut w, &mut offsets, 1)?;
+    w.write_all(b"<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")?;
+
     let mut kids = String::new();
     for i in 0..pages.len() {
         let _ = write!(kids, "{} 0 R ", page_obj(i));
     }
-    object(
-        &mut out,
-        2,
-        format!(
-            "<< /Type /Pages /Kids [{}] /Count {} >>",
-            kids.trim_end(),
-            pages.len()
-        )
-        .as_bytes(),
-    );
-    object(&mut out, 3, b"<< /Producer (paperjam) >>");
+    write_obj_header(&mut w, &mut offsets, 2)?;
+    write!(
+        w,
+        "<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n",
+        kids.trim_end(),
+        pages.len()
+    )?;
+
+    write_obj_header(&mut w, &mut offsets, 3)?;
+    w.write_all(b"<< /Producer (paperjam) >>\nendobj\n")?;
 
     for (i, page) in pages.iter().enumerate() {
         let (p, img, content) = (page_obj(i), page_obj(i) + 1, page_obj(i) + 2);
-        let (w, h) = (round2(page.width_pt), round2(page.height_pt));
-        object(
-            &mut out,
-            p,
-            format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] \
-                 /Resources << /XObject << /Im0 {img} 0 R >> >> /Contents {content} 0 R >>"
-            )
-            .as_bytes(),
-        );
-        let mut image = format!(
+        let (pw, ph) = (round2(page.width_pt), round2(page.height_pt));
+        write_obj_header(&mut w, &mut offsets, p)?;
+        write!(
+            w,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw} {ph}] \
+             /Resources << /XObject << /Im0 {img} 0 R >> >> /Contents {content} 0 R >>\nendobj\n"
+        )?;
+
+        write_obj_header(&mut w, &mut offsets, img)?;
+        write!(
+            w,
             "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /{} \
              /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
             page.width,
             page.height,
             if page.gray { "DeviceGray" } else { "DeviceRGB" },
             page.jpeg.len()
-        )
-        .into_bytes();
-        image.extend_from_slice(&page.jpeg);
-        image.extend_from_slice(b"\nendstream");
-        object(&mut out, img, &image);
-        let draw = format!("q {w} 0 0 {h} 0 0 cm /Im0 Do Q");
-        object(
-            &mut out,
-            content,
-            format!("<< /Length {} >>\nstream\n{draw}\nendstream", draw.len()).as_bytes(),
-        );
+        )?;
+        w.write_all(&page.jpeg)?;
+        w.write_all(b"\nendstream\nendobj\n")?;
+
+        let draw = format!("q {pw} 0 0 {ph} 0 0 cm /Im0 Do Q");
+        write_obj_header(&mut w, &mut offsets, content)?;
+        write!(
+            w,
+            "<< /Length {} >>\nstream\n{draw}\nendstream\nendobj\n",
+            draw.len()
+        )?;
     }
 
-    let xref = out.len();
-    let mut table = format!("xref\n0 {}\n0000000000 65535 f \n", count + 1);
+    let xref = w.written;
+    write!(w, "xref\n0 {}\n0000000000 65535 f \n", count + 1)?;
     for offset in &offsets[1..] {
-        let _ = writeln!(table, "{offset:010} 00000 n ");
+        writeln!(w, "{offset:010} 00000 n ")?;
     }
-    let _ = write!(
-        table,
+    write!(
+        w,
         "trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref}\n%%EOF\n",
         count + 1
-    );
-    out.extend_from_slice(table.as_bytes());
+    )?;
+    w.flush()?;
+    Ok(w.written as u64)
+}
+
+/// A PDF of `pages`, each image filling its page.
+pub fn pdf(pages: &[Page]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let _ = write_pdf(pages, &mut out);
     out
 }
 

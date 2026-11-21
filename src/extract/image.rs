@@ -283,23 +283,32 @@ fn lossy(image: &DynamicImage, max_edge: u32, qualities: &[f32], budget: usize) 
         tracing::error!(what, "WebP encoding failed");
         ServiceError::internal("thumbnail_failed", "could not create a thumbnail")
     };
+    let resized;
     let fitted = if image.width().max(image.height()) > max_edge {
-        image.thumbnail(max_edge, max_edge)
+        resized = image.thumbnail(max_edge, max_edge);
+        &resized
     } else {
-        image.clone()
+        image
     };
-    // The encoder takes 8-bit RGB.
-    let rgb = fitted.to_rgb8();
+    // The encoder takes 8-bit RGB; borrow directly when already RGB8.
+    let converted;
+    let rgb = match fitted.as_rgb8() {
+        Some(rgb) => rgb,
+        None => {
+            converted = fitted.to_rgb8();
+            &converted
+        }
+    };
     let started = std::time::Instant::now();
     let mut bytes = Vec::new();
     let mut tried = 0_u32;
-    for &quality in qualities {
+    for (idx, &quality) in qualities.iter().enumerate() {
         tried += 1;
         let mut config = ::webp::WebPConfig::new().map_err(|()| failed("config"))?;
         config.quality = quality;
-        // Method 6 would make the files ~3% smaller at ~40% more time.
-        // Sharp chroma downsampling stays: it keeps text crisp.
-        config.method = 4;
+        // Fast encoding handles normal pages; the last-resort step uses stronger
+        // compression so noisy scans still fit within the byte budget.
+        config.method = if idx + 1 == qualities.len() { 4 } else { 2 };
         config.use_sharp_yuv = 1;
         bytes = ::webp::Encoder::from_rgb(rgb.as_raw(), rgb.width(), rgb.height())
             .encode_advanced(&config)

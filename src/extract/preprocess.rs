@@ -1,5 +1,7 @@
 //! Image clean-up before OCR: grayscale, deskew, border trimming.
 
+use std::borrow::Cow;
+
 use ::image::{DynamicImage, GrayImage, imageops};
 
 /// Largest skew angle (degrees, either direction) that is corrected.
@@ -25,6 +27,18 @@ impl Straightening {
     /// True when the page was turned or lost a border.
     pub fn changes(&self, width: u32, height: u32) -> bool {
         self.degrees != 0.0 || self.crop != (0, 0, width, height)
+    }
+
+    /// True when straightening made a visible change worth keeping a separate
+    /// clean copy for: a skew correction of at least 1°, or border trimming
+    /// that removes more than 8% of the page area.
+    pub fn meaningful_change(&self, width: u32, height: u32) -> bool {
+        if self.degrees.abs() >= 1.0 {
+            return true;
+        }
+        let total = u64::from(width) * u64::from(height);
+        let kept = u64::from(self.crop.2) * u64::from(self.crop.3);
+        total > 0 && kept * 100 < total * 92
     }
 }
 
@@ -79,13 +93,18 @@ const UNIFORM_TOLERANCE: u8 = 12;
 /// it. Returns `0` when no clear peak exists inside `±MAX_SKEW_DEGREES` (a
 /// peak on the search boundary means the real skew is out of range).
 pub fn estimate_skew(gray: &GrayImage) -> f32 {
-    let small = if gray.width() > ANALYSIS_WIDTH {
+    let small: Cow<'_, GrayImage> = if gray.width() > ANALYSIS_WIDTH {
         let height = (u64::from(gray.height()) * u64::from(ANALYSIS_WIDTH)
             / u64::from(gray.width()))
         .max(1) as u32;
-        imageops::resize(gray, ANALYSIS_WIDTH, height, imageops::FilterType::Triangle)
+        Cow::Owned(imageops::resize(
+            gray,
+            ANALYSIS_WIDTH,
+            height,
+            imageops::FilterType::Triangle,
+        ))
     } else {
-        gray.clone()
+        Cow::Borrowed(gray)
     };
     let threshold = otsu(&small);
     let ink: Vec<(f32, f32)> = small
@@ -100,15 +119,34 @@ pub fn estimate_skew(gray: &GrayImage) -> f32 {
     let steps = (MAX_SKEW_DEGREES / ANGLE_STEP).round() as i32;
     let bins = (small.width() + small.height()) as usize + 2;
     let offset = small.width() as f32 * MAX_SKEW_DEGREES.to_radians().sin();
-    let mut best = (0_i32, f64::MIN);
-    for step in -steps..=steps {
+    let mut histogram = vec![0_u32; bins];
+
+    let mut score_step = |step: i32| -> f64 {
         let (sin, cos) = (step as f32 * ANGLE_STEP).to_radians().sin_cos();
-        let mut histogram = vec![0_u32; bins];
+        histogram.fill(0);
         for &(x, y) in &ink {
             let row = (y * cos - x * sin + offset) as usize;
             histogram[row.min(bins - 1)] += 1;
         }
-        let score: f64 = histogram.iter().map(|&c| f64::from(c) * f64::from(c)).sum();
+        histogram.iter().map(|&c| f64::from(c) * f64::from(c)).sum()
+    };
+
+    // Coarse 1.0° sweep followed by fine 0.25° refinement around the winner.
+    let fine_per_coarse = (1.0 / ANGLE_STEP).round() as i32;
+    let mut best = (0_i32, f64::MIN);
+    for step in (-steps..=steps).step_by(fine_per_coarse as usize) {
+        let score = score_step(step);
+        if score > best.1 {
+            best = (step, score);
+        }
+    }
+    let lo = (best.0 - (fine_per_coarse - 1)).max(-steps);
+    let hi = (best.0 + (fine_per_coarse - 1)).min(steps);
+    for step in lo..=hi {
+        if step == best.0 {
+            continue;
+        }
+        let score = score_step(step);
         if score > best.1 {
             best = (step, score);
         }
@@ -240,8 +278,19 @@ pub fn trim_borders(gray: &GrayImage) -> GrayImage {
 /// when it is uniform throughout.
 pub fn border_box(gray: &GrayImage) -> (u32, u32, u32, u32) {
     let (w, h) = gray.dimensions();
-    let row_uniform = |y: u32| spread((0..w).map(|x| gray.get_pixel(x, y).0[0]));
-    let col_uniform = |x: u32| spread((0..h).map(|y| gray.get_pixel(x, y).0[0]));
+    if w == 0 || h == 0 {
+        return (0, 0, w, h);
+    }
+    let raw = gray.as_raw();
+    let stride = w as usize;
+    let row_uniform = |y: u32| {
+        let start = y as usize * stride;
+        spread(raw[start..start + stride].iter().copied())
+    };
+    let col_uniform = |x: u32| {
+        let col = x as usize;
+        spread((0..h as usize).map(|y| raw[y * stride + col]))
+    };
 
     let Some(top) = (0..h).find(|&y| !row_uniform(y)) else {
         return (0, 0, w, h);
@@ -260,8 +309,11 @@ fn spread(values: impl Iterator<Item = u8>) -> bool {
     for v in values {
         lo = lo.min(v);
         hi = hi.max(v);
+        if hi - lo > UNIFORM_TOLERANCE {
+            return false;
+        }
     }
-    hi - lo <= UNIFORM_TOLERANCE
+    true
 }
 
 #[cfg(test)]
