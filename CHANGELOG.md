@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-21
+
 ### Added
 - Inbound email webhook (`POST /api/v1/ingest/email`) gated by a write-only bearer secret (`PAPERJAM_EMAIL_SECRET`), rate limiting and an optional sender allowlist (`PAPERJAM_EMAIL_ALLOWED_SENDERS`). Extracts supported attachments (PDFs, images including iPhone inline photos, explicit `.txt`/`.md`, and nested `message/rfc822` forwards) while skipping embedded signature assets, tracking pixels and non-document parts (`.ics`, `.vcf`, `.p7s`, `winmail.dat`). Falls back to converting attachment-less email bodies into `.md` when `PAPERJAM_EMAIL_BODY_FALLBACK=true` (default), with optional `PAPERJAM_EMAIL_USER`, `PAPERJAM_EMAIL_LOCAL_ONLY` and `PAPERJAM_EMAIL_TAG` settings, plus a Cloudflare Email Worker guide in `docs/email-intake.md`.
 - A built-in `power_of_attorney` type (Доверенность): principal, representatives, powers, issue date, term, expiry date, notary (the issuer field), registry and form numbers, right of substitution. It is due on its printed `expiry_date`, or a printed term after its `issue_date` ("сроком на десять лет"). Existing archives get the type at the next start; documents filed as Other move to it on a reprocess.

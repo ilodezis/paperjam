@@ -22,7 +22,7 @@ searchable.
 - **Built for agents.** The MCP server covers the whole document API: search,
   read the text, the fields or the page image, upload, edit, reprocess, trash.
   The one thing it can't do is delete for good.
-- **Fields you can trust.** 21 document types, each with its own fields.
+- **Fields you can trust.** 22 document types, each with its own fields.
   Machine-readable zones are parsed with every check digit verified, and IBANs
   and national ID numbers from ten countries are checksum-validated. A failed
   check flags the document instead of storing a wrong number quietly.
@@ -186,7 +186,7 @@ Checked on 2026-11-13 against each project's repository and latest release.
 | | paperjam | [Paperless-ngx](https://github.com/paperless-ngx/paperless-ngx) 3.4 | [Papra](https://github.com/papra-hq/papra) | [Readur](https://github.com/readur/readur) |
 |---|---|---|---|---|
 | Native MCP server | Yes | No; community bridges over REST | No; open feature request | No |
-| Structured data | 21 typed document types, MRZ, checksums | Custom fields | Custom properties | Labels |
+| Structured data | 22 typed document types, MRZ, checksums | Custom fields | Custom properties | Labels |
 | Runs on | One binary, SQLite | Django, a database, a Redis-compatible broker | TypeScript, SQLite | Rust, PostgreSQL |
 | Email intake | Yes (webhook) | Yes | Yes | No |
 | License | AGPL-3.0 | GPL-3.0 | AGPL-3.0 | MIT |
