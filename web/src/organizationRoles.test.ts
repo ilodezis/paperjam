@@ -31,6 +31,7 @@ describe("defaultRoleForType", () => {
       "marriage_certificate",
       "diploma",
       "certificate_other",
+      "power_of_attorney",
       "medical_document",
       "tax_document",
       "invoice",

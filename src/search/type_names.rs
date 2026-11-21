@@ -266,6 +266,19 @@ const SYNONYMS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "power_of_attorney",
+        &[
+            "доверенность",
+            "нотариальная доверенность",
+            "procură",
+            "procura",
+            "Vollmacht",
+            "procuration",
+            "poder notarial",
+            "pełnomocnictwo",
+        ],
+    ),
+    (
         "payment_confirmation",
         &[
             "платёжка",
@@ -345,7 +358,7 @@ mod tests {
     /// built-in type that has one (German, French, Spanish, Italian, Polish).
     #[test]
     fn european_languages_have_their_everyday_names() {
-        let cases: [(&str, [&str; 5]); 18] = [
+        let cases: [(&str, [&str; 5]); 19] = [
             (
                 "travel_passport",
                 [
@@ -492,6 +505,16 @@ mod tests {
                     "contrato de alquiler",
                     "contratto di locazione",
                     "umowa najmu",
+                ],
+            ),
+            (
+                "power_of_attorney",
+                [
+                    "Vollmacht",
+                    "procuration",
+                    "poder notarial",
+                    "procura",
+                    "pełnomocnictwo",
                 ],
             ),
             (
