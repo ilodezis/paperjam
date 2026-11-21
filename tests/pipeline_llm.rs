@@ -1238,6 +1238,20 @@ where
     panic!("timed out waiting for {what}");
 }
 
+async fn wait_for_local_phase(app: &App, id: DocumentId) {
+    wait_for("the local phase", || async {
+        // Read the document before the queue counts so a freshly claimed job
+        // cannot pair pre-claim counts with a post-claim `Processing` status.
+        let doc = view(app, id).await;
+        let counts = app.jobs.counts().await.unwrap();
+        doc.status == DocumentStatus::Processing
+            && doc.title_provenance == Some(Provenance::Local)
+            && counts.running == 0
+            && counts.queued == 1
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn llm_follow_up_runs_in_the_llm_pool() {
     let r = rig(&[]).await;
@@ -1258,13 +1272,7 @@ async fn llm_follow_up_runs_in_the_llm_pool() {
         cancel.clone(),
         pipeline::handler(),
     );
-    wait_for("the local phase", || async {
-        let counts = r.app.jobs.counts().await.unwrap();
-        view(&r.app, id).await.status == DocumentStatus::Processing
-            && counts.running == 0
-            && counts.queued == 1
-    })
-    .await;
+    wait_for_local_phase(&r.app, id).await;
     assert_eq!(
         r.mock.request_count(),
         0,
@@ -1335,13 +1343,7 @@ async fn a_holder_waits_for_the_llm_follow_up_before_becoming_a_person() {
         cancel.clone(),
         pipeline::handler(),
     );
-    wait_for("the local phase", || async {
-        let counts = r.app.jobs.counts().await.unwrap();
-        view(&r.app, id).await.status == DocumentStatus::Processing
-            && counts.running == 0
-            && counts.queued == 1
-    })
-    .await;
+    wait_for_local_phase(&r.app, id).await;
     assert!(
         view(&r.app, id).await.people.is_empty(),
         "the zone's name became a person before the model read the page"
