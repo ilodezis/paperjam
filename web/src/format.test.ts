@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { dueState, EXPIRING_DAYS, formatFileSize, formatIsoDate } from "./format";
 import en from "./locales/en.json";
@@ -52,6 +52,30 @@ describe("formatFileSize", () => {
     expect(formatFileSize(179_609, "en")).toBe("175.4\u00a0KB");
     expect(formatFileSize(1_258_291, "ru")).toBe("1,2\u00a0МБ");
     expect(formatFileSize(1_258_291, "en")).toBe("1.2\u00a0MB");
+  });
+});
+
+describe("formatter caching", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("builds one date formatter per language and reuses it", () => {
+    const spy = vi.spyOn(Intl, "DateTimeFormat");
+    const outputs = [1, 2, 3].map(() => formatIsoDate("2031-07-11", "de"));
+    expect(new Set(outputs).size).toBe(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    formatIsoDate("2031-07-11", "fr");
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("builds one size formatter per language and reuses it", () => {
+    const spy = vi.spyOn(Intl, "NumberFormat");
+    const outputs = [1, 2, 3].map(() => formatFileSize(1_258_291, "de"));
+    expect(new Set(outputs).size).toBe(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    formatFileSize(1_258_291, "fr");
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });
 

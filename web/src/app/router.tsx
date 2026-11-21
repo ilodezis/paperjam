@@ -7,7 +7,7 @@ import { NotFoundPage } from "../pages/NotFoundPage";
 import { preloadImage } from "../lib/preloadImage";
 import { documentQuery, ensureFresh, searchQuery, statsQuery, taxonomyQuery, tokensQuery, trashQuery, usersQuery } from "../queries";
 import type { SearchSort } from "../queries";
-import { openScreen } from "../shell/screens";
+import { isScreenMounted, openScreen } from "../shell/screens";
 import { queryClient } from "./queryClient";
 import { Root } from "./Root";
 import { hasSessionHint } from "./session";
@@ -60,9 +60,22 @@ const archiveRoute = createRoute({
   }),
   loaderDeps: ({ search }) => ({ q: search.q ?? "", sort: (search.sort ?? "relevance") as SearchSort }),
   loader: async ({ context, deps }) => {
+    // The archive is already on the stage (back from a document, a filter chip): it keeps what it
+    // shows (`placeholderData`) while the new answer arrives, so nothing here holds the tap.
+    if (isScreenMounted("archive")) {
+      await openScreen(
+        "archive",
+        reads(
+          () => context.queryClient.ensureQueryData(taxonomyQuery),
+          () => context.queryClient.prefetchQuery(searchQuery(deps.q, deps.sort)),
+        ),
+        { waitMs: 0 },
+      );
+      return;
+    }
     await openScreen(
       "archive",
-      ...reads(
+      reads(
         () => context.queryClient.ensureQueryData(taxonomyQuery),
         // An old copy of a search kept from an earlier visit would draw first and be swapped a
         // moment later (the list blinks); a short wait draws the current answer once.
@@ -76,14 +89,18 @@ const documentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/documents/$id",
   loader: async ({ context, params }) => {
+    // The motion starts on the tap: the screen opens on its loading state (the page's canvas
+    // already carries the shared target) and the document fills in. The reads and the first page's
+    // image warm the cache behind it; nothing here waits for them.
     await openScreen(
       "document",
-      ...reads(
+      reads(
         () => context.queryClient.ensureQueryData(documentQuery(params.id, 1)),
         () => context.queryClient.ensureQueryData(taxonomyQuery),
         // Only a document with page images has a first page to preload.
         () => context.queryClient.ensureQueryData(documentQuery(params.id, 1)).then((document) => (hasPageImages(document) ? preloadImage(api.pageImageUrl(params.id, 1)) : undefined)),
       ),
+      { waitMs: 0 },
     );
   },
 });
@@ -100,7 +117,7 @@ const taxonomyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/taxonomy",
   loader: async ({ context }) => {
-    await openScreen("taxonomy", ...reads(() => context.queryClient.ensureQueryData(taxonomyQuery)));
+    await openScreen("taxonomy", reads(() => context.queryClient.ensureQueryData(taxonomyQuery)));
   },
 });
 
@@ -108,7 +125,7 @@ const trashRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/trash",
   loader: async ({ context }) => {
-    await openScreen("trash", ...reads(() => context.queryClient.ensureQueryData(trashQuery)));
+    await openScreen("trash", reads(() => context.queryClient.ensureQueryData(trashQuery)));
   },
 });
 
@@ -118,7 +135,7 @@ const settingsRoute = createRoute({
   loader: async ({ context }) => {
     await openScreen(
       "settings",
-      ...reads(
+      reads(
         () => context.queryClient.ensureQueryData(statsQuery),
         () => context.queryClient.ensureQueryData(tokensQuery),
         () => context.queryClient.ensureQueryData(usersQuery),

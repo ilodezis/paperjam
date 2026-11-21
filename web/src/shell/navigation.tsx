@@ -91,7 +91,7 @@ type ScreenLinkProps = {
 } & Omit<ComponentProps<"a">, "href">;
 
 /** A link to a screen: a real anchor (open in a new tab works), driven by the app's motion. */
-export function ScreenLink({ to, mode, sharedSelector, onClick, onPointerEnter, onFocus, children, ...rest }: ScreenLinkProps) {
+export function ScreenLink({ to, mode, sharedSelector, onClick, onPointerEnter, onPointerDown, onFocus, children, ...rest }: ScreenLinkProps) {
   const go = useGo();
   const router = useRouter();
   return (
@@ -107,6 +107,11 @@ export function ScreenLink({ to, mode, sharedSelector, onClick, onPointerEnter, 
       }}
       onPointerEnter={(e) => {
         onPointerEnter?.(e);
+        preloadHref(router, to);
+      }}
+      // On touch, pointerenter fires with the tap itself; pointerdown buys the ~100 ms before click.
+      onPointerDown={(e) => {
+        onPointerDown?.(e);
         preloadHref(router, to);
       }}
       onFocus={(e) => {

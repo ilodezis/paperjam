@@ -29,6 +29,7 @@ afterEach(async () => {
   server.resetHandlers();
   vi.restoreAllMocks();
   clearToasts();
+  vi.unstubAllGlobals();
   if (root) await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -477,5 +478,109 @@ describe("ArchivePage expiring documents", () => {
     expect(due[1]).not.toBeNull();
     // Not repeated when a key field shows the same date.
     expect(due[2]).toBeNull();
+  });
+});
+
+/** A stand-in for IntersectionObserver that reports whatever the test says is on screen. */
+class FakeIntersectionObserver {
+  static instances: FakeIntersectionObserver[] = [];
+  static observed = new Set<Element>();
+  constructor(readonly callback: IntersectionObserverCallback) {
+    FakeIntersectionObserver.instances.push(this);
+  }
+  observe(element: Element) { FakeIntersectionObserver.observed.add(element); }
+  unobserve() {}
+  disconnect() {}
+  takeRecords() { return []; }
+  /** Report one result card as visible. */
+  static show(id: string) {
+    const target = Array.from(FakeIntersectionObserver.observed).find((element) => element.getAttribute("data-prefetch-id") === id);
+    const observer = FakeIntersectionObserver.instances.at(-1);
+    if (!target || !observer) throw new Error(`Nothing observes ${id}`);
+    observer.callback([{ isIntersecting: true, target } as unknown as IntersectionObserverEntry], observer as unknown as IntersectionObserver);
+  }
+}
+
+function stubDevice(touch: boolean) {
+  FakeIntersectionObserver.instances = [];
+  FakeIntersectionObserver.observed = new Set();
+  vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+  vi.stubGlobal("matchMedia", (query: string) => ({ matches: touch && query.includes("hover: none"), media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }));
+}
+
+/** Pathnames of every request the mock server sees from now on. */
+function recordRequests(): string[] {
+  const paths: string[] = [];
+  server.events.on("request:start", ({ request }) => { paths.push(new URL(request.url).pathname); });
+  return paths;
+}
+
+const idle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
+
+describe("ArchivePage prefetching", () => {
+  afterEach(() => server.events.removeAllListeners());
+
+  it("warms the JSON of a card that scrolls into view on a touch device, once and without page images", async () => {
+    stubDevice(true);
+    const paths = recordRequests();
+    await render();
+    await eventually(() => expect(container?.querySelectorAll(".result-row")).toHaveLength(hits.length));
+
+    await act(async () => FakeIntersectionObserver.show("doc-passport"));
+    await idle();
+    await act(async () => FakeIntersectionObserver.show("doc-passport"));
+    await idle();
+
+    expect(paths.filter((path) => path === "/api/v1/documents/doc-passport")).toHaveLength(1);
+    expect(paths.filter((path) => /\/pages\/|thumbnail/.test(path))).toEqual([]);
+    expect(paths.filter((path) => path.startsWith("/api/v1/documents/") && path !== "/api/v1/documents/doc-passport")).toEqual([]);
+  });
+
+  it("warms nothing on a device with hover", async () => {
+    stubDevice(false);
+    const paths = recordRequests();
+    await render();
+    await eventually(() => expect(container?.querySelectorAll(".result-row")).toHaveLength(hits.length));
+    await idle();
+
+    expect(FakeIntersectionObserver.instances).toHaveLength(0);
+    expect(paths.filter((path) => path.startsWith("/api/v1/documents/"))).toEqual([]);
+  });
+});
+
+describe("ArchivePage re-renders", () => {
+  it("leaves the result rows alone when only the page around them changes", async () => {
+    // A row's render asks for its thumbnail address, so the calls count the row renders.
+    const thumbnail = vi.spyOn(api, "thumbnailUrl");
+    await render();
+    await eventually(() => expect(container?.querySelectorAll(".result-row")).toHaveLength(hits.length));
+    thumbnail.mockClear();
+
+    // Opening the filters sheet re-renders the page but no row.
+    await click(button("Filters"));
+    await eventually(() => expect(document.querySelector(".filters-sheet")).not.toBeNull());
+    expect(thumbnail).not.toHaveBeenCalled();
+
+    // Hovering a row re-renders only the row that lost and the row that gained the highlight.
+    const rows = Array.from(container?.querySelectorAll(".result-row") ?? []);
+    await act(async () => { rows[2].dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerType: "mouse" })); });
+    await eventually(() => expect(rows[2].classList.contains("result-row--active")).toBe(true));
+    expect(thumbnail).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not light up or redraw a row a finger lands on", async () => {
+    const thumbnail = vi.spyOn(api, "thumbnailUrl");
+    await render();
+    await eventually(() => expect(container?.querySelectorAll(".result-row")).toHaveLength(hits.length));
+    thumbnail.mockClear();
+
+    // A tap sends pointer (and compatibility mouse) events; only a real mouse moves the highlight.
+    const rows = Array.from(container?.querySelectorAll(".result-row") ?? []);
+    await act(async () => {
+      rows[1].dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerType: "touch" }));
+      rows[1].dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    });
+    expect(rows[1].classList.contains("result-row--active")).toBe(false);
+    expect(thumbnail).not.toHaveBeenCalled();
   });
 });

@@ -45,12 +45,30 @@ export function screenComponent(id: ScreenId): ComponentType {
 /** How long a tap waits for a screen's data, once its code is here, before the screen opens without it. */
 const DATA_WAIT_MS = 250;
 
+export interface OpenOptions {
+  /** How long to wait for the reads once the code is here; 0 opens the screen on its own loading state. */
+  waitMs?: number;
+}
+
 /** Everything a screen needs to open filled in: its code and its reads (`ensureQueryData` calls the
  *  route has already started). Data already on the device, even an old copy, is taken as it is and
- *  refreshed behind the screen; a slow read does not hold the tap past `DATA_WAIT_MS` — the screen
- *  opens and fills in when it arrives. */
-export async function openScreen(id: ScreenId, ...reads: Promise<unknown>[]): Promise<void> {
+ *  refreshed behind the screen; a slow read does not hold the tap past `waitMs` (`DATA_WAIT_MS`) —
+ *  the screen opens and fills in when it arrives. With `waitMs: 0` only the code is awaited; the
+ *  reads keep running (a failure is the screen's to show, not an unhandled rejection). */
+export async function openScreen(id: ScreenId, reads: Promise<unknown>[] = [], { waitMs = DATA_WAIT_MS }: OpenOptions = {}): Promise<void> {
   const settled = Promise.allSettled(reads);
   await preloadScreen(id);
-  await Promise.race([settled, wait(DATA_WAIT_MS)]);
+  if (waitMs > 0) await Promise.race([settled, wait(waitMs)]);
+}
+
+/** The screens the stage has mounted right now, published by it for the routes: a screen that is
+ *  already drawn opens at once, whatever its data is doing. */
+let mounted: ReadonlySet<ScreenId> = new Set();
+
+export function setMountedScreens(ids: Iterable<ScreenId>): void {
+  mounted = new Set(ids);
+}
+
+export function isScreenMounted(id: ScreenId): boolean {
+  return mounted.has(id);
 }

@@ -1,12 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, ArrowDown, CalendarClock, CheckSquare, ChevronRight, FileText, LoaderCircle, RefreshCw, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, api, type FieldValue, type Hit, type TypeView } from "../api";
 import { SelectDropdown } from "../components/controls/SelectDropdown";
 import { toast } from "../components/controls/toast";
-import { invalidateArchive, searchQuery, taxonomyQuery } from "../queries";
+import { usePrefetchVisible } from "../lib/prefetchVisible";
+import { documentQuery, invalidateArchive, searchQuery, taxonomyQuery } from "../queries";
 import { dueState, formatIsoDate } from "../format";
 import { archiveSearchOf, calmSnippet, hasFilterTokens, hasQueryToken, parseSnippet, queryFilter, toggleQueryFilter } from "../search";
 import { documentPath } from "../shell/nav";
@@ -34,7 +35,9 @@ function Snippet({ text, language }: { text: string; language: string }) {
   return <>{calmSnippet(parseSnippet(text), language).map((part, index) => part.mark ? <mark key={index}>{part.text}</mark> : <span key={index}>{part.text}</span>)}</>;
 }
 
-function ResultItem({ hit, type, active, index, language, onActivate, onFilter, resultRef, selection }: {
+/** Every prop is a primitive or referentially stable across the page's re-renders, so a filter
+ *  tap or a selection toggle re-renders only the rows whose own data changed. */
+const ResultItem = memo(function ResultItem({ hit, type, active, index, language, onActivate, onFilter, resultRef, checked, onToggle }: {
   hit: Hit;
   type?: TypeView;
   active: boolean;
@@ -42,20 +45,23 @@ function ResultItem({ hit, type, active, index, language, onActivate, onFilter, 
   language: string;
   onActivate: (index: number) => void;
   onFilter: (prefix: string, value?: string) => void;
-  resultRef: (element: HTMLAnchorElement | null) => void;
+  resultRef: (index: number, element: HTMLAnchorElement | null) => void;
+  /** Whether the row is ticked; meaningful only while `onToggle` is set. */
+  checked: boolean;
   /** Present while the archive is in selection mode. */
-  selection?: { checked: boolean; onToggle: (checked: boolean) => void };
+  onToggle?: (id: string, checked: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const linkRef = useCallback((element: HTMLAnchorElement | null) => resultRef(index, element), [resultRef, index]);
   const typeLabel = type?.labels[language] ?? type?.labels.en ?? hit.type_key ?? t("archive.untyped");
   // The due date shows beside the key fields, unless one of them already prints that very date.
   const due = hit.due_date && !Object.values(hit.key_fields).some((value) => value.kind === "date" && value.value === hit.due_date) ? dueState(hit.due_date) : null;
   return (
-    <li>
-      <article className={active ? "result-row result-row--active" : "result-row"} onMouseEnter={() => onActivate(index)}>
-        {selection ? (
+    <li data-prefetch-id={hit.id}>
+      <article className={active ? "result-row result-row--active" : "result-row"} onPointerEnter={(event) => { if (event.pointerType === "mouse") onActivate(index); }}>
+        {onToggle ? (
           <label className="result-select">
-            <input type="checkbox" checked={selection.checked} onChange={(event) => selection.onToggle(event.target.checked)} aria-label={t("archive.selectDocument", { title: hit.title })} />
+            <input type="checkbox" checked={checked} onChange={(event) => onToggle(hit.id, event.target.checked)} aria-label={t("archive.selectDocument", { title: hit.title })} />
           </label>
         ) : null}
         <ScreenLink to={documentPath(hit.id)} sharedSelector="[data-shared-source]" className="result-thumbnail" tabIndex={-1} aria-hidden="true">
@@ -76,7 +82,7 @@ function ResultItem({ hit, type, active, index, language, onActivate, onFilter, 
         </ScreenLink>
         <div className="result-body">
           <div className="result-heading">
-            <ScreenLink ref={resultRef} to={documentPath(hit.id)} sharedSelector="[data-shared-source]" className="result-title" onFocus={() => onActivate(index)}>{hit.title}</ScreenLink>
+            <ScreenLink ref={linkRef} to={documentPath(hit.id)} sharedSelector="[data-shared-source]" className="result-title" onFocus={() => onActivate(index)}>{hit.title}</ScreenLink>
             {hit.document_date ? <time dateTime={hit.document_date}>{formatIsoDate(hit.document_date, language)}</time> : null}
             {(hit.attention ?? []).length > 0 ? <span className="result-attention"><AlertCircle aria-hidden="true" />{t("archive.needsAttention")}</span> : null}
           </div>
@@ -113,7 +119,7 @@ function ResultItem({ hit, type, active, index, language, onActivate, onFilter, 
       </article>
     </li>
   );
-}
+});
 
 export function ArchivePage() {
   const { t, i18n } = useTranslation();
@@ -186,6 +192,13 @@ export function ArchivePage() {
   }
   const searchRef = useRef<HTMLInputElement>(null);
   const resultRefs = useRef<(HTMLAnchorElement | null)[]>([]);
+  const setResultRef = useCallback((index: number, element: HTMLAnchorElement | null) => { resultRefs.current[index] = element; }, []);
+  const typeByKey = useMemo(() => new Map((taxonomy?.types ?? []).map((type) => [type.key, type])), [taxonomy]);
+
+  // On a phone there is no hover to warm a card before the tap: fetch the text of the ones in view.
+  const resultsRef = useRef<HTMLOListElement>(null);
+  const prefetchDocument = useCallback((id: string) => { void queryClient.prefetchQuery(documentQuery(id, 1)); }, [queryClient]);
+  usePrefetchVisible(resultsRef, active, hits, prefetchDocument);
 
   useEffect(() => {
     if (!active) return;
@@ -222,22 +235,29 @@ export function ArchivePage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [active, activeIndex, hits, query, selecting, setSearchParams, sort]);
 
-  function changeQuery(next: string) {
+  // The result rows are memoized, so what they call must not change with the query: the handlers
+  // read the current query and sort from here instead of closing over them.
+  const latest = useRef({ query, sort });
+  useEffect(() => {
+    latest.current = { query, sort };
+  });
+
+  const changeQuery = useCallback((next: string) => {
     const params: Record<string, string> = {};
     if (next) params.q = next;
-    if (sort !== "relevance") params.sort = sort;
+    if (latest.current.sort !== "relevance") params.sort = latest.current.sort;
     setSearchParams(params);
-  }
+  }, [setSearchParams]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
     changeQuery(searchRef.current?.value.trim() ?? "");
   }
 
-  function filter(prefix: string, value?: string) {
-    changeQuery(toggleQueryFilter(query, prefix, value));
+  const filter = useCallback((prefix: string, value?: string) => {
+    changeQuery(toggleQueryFilter(latest.current.query, prefix, value));
     searchRef.current?.focus();
-  }
+  }, [changeQuery]);
 
   function changeSort(nextSort: Sort) {
     const params: Record<string, string> = {};
@@ -316,14 +336,14 @@ export function ArchivePage() {
     }
   }
 
-  function toggleSelected(id: string, checked: boolean) {
-    setSelected((current) => {
-      const next = new Set(current);
+  const toggleSelected = useCallback((id: string, checked: boolean) => {
+    setSelected((previous) => {
+      const next = new Set(previous);
       if (checked) next.add(id);
       else next.delete(id);
       return next;
     });
-  }
+  }, []);
 
   function stopSelecting() {
     setSelecting(false);
@@ -557,19 +577,20 @@ export function ArchivePage() {
       ) : null}
 
       {!loading && hits.length > 0 ? (
-        <ol className={["results-list", query ? "results-list--searching" : "", isPlaceholderData ? "results-list--stale" : ""].filter(Boolean).join(" ")} aria-busy={isPlaceholderData || undefined}>
+        <ol ref={resultsRef} className={["results-list", query ? "results-list--searching" : "", isPlaceholderData ? "results-list--stale" : ""].filter(Boolean).join(" ")} aria-busy={isPlaceholderData || undefined}>
           {hits.map((hit, index) => (
             <ResultItem
               key={hit.id}
               hit={hit}
-              type={taxonomy?.types.find((type) => type.key === hit.type_key)}
+              type={hit.type_key ? typeByKey.get(hit.type_key) : undefined}
               active={activeIndex === index}
               index={index}
               language={language}
               onActivate={setActiveIndex}
               onFilter={filter}
-              resultRef={(element) => { resultRefs.current[index] = element; }}
-              selection={selecting ? { checked: selected.has(hit.id), onToggle: (checked) => toggleSelected(hit.id, checked) } : undefined}
+              resultRef={setResultRef}
+              checked={selecting && selected.has(hit.id)}
+              onToggle={selecting ? toggleSelected : undefined}
             />
           ))}
         </ol>

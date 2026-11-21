@@ -8,7 +8,8 @@ import { animate, EASE_OUT, prefersReducedMotion, settle } from "../lib/motion";
 export const PARALLAX = 0.28;
 /** How dark the screen underneath goes at the end of a push. */
 export const SHADE = 0.32;
-export const SLIDE_MS = 540;
+/** Close to iOS's own push (about 350 ms): longer reads as a lag on a phone. */
+export const SLIDE_MS = 360;
 
 const RAISED_EDGE = "-24px 0 48px -18px rgba(0,0,0,.55)";
 
@@ -60,9 +61,9 @@ export async function fade(a: HTMLElement | null, b: HTMLElement): Promise<void>
   b.style.zIndex = "2";
   if (a !== null) a.style.zIndex = "1";
   const jobs = [
-    animate(b, [{ opacity: 0 }, { opacity: 1 }], { duration: 380, delay: 40, easing: EASE_OUT }).finished,
+    animate(b, [{ opacity: 0 }, { opacity: 1 }], { duration: 300, delay: 30, easing: EASE_OUT }).finished,
   ];
-  if (a !== null) jobs.push(animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: "linear" }).finished);
+  if (a !== null) jobs.push(animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "linear" }).finished);
   await Promise.all(jobs);
   if (a !== null) {
     a.hidden = true;
@@ -74,9 +75,10 @@ export async function fade(a: HTMLElement | null, b: HTMLElement): Promise<void>
 }
 
 /** The element once it exists. A screen that was only just loaded may still be drawing itself when
- *  the motion starts; this waits for it a moment instead of giving the motion up. Timers, not
- *  frames: a hidden page draws none, and the navigation must not hang on it. */
-export async function whenPresent<T>(find: () => T | null, timeoutMs = 500, stepMs = 16): Promise<T | null> {
+ *  the motion starts; this waits for it a frame or two (32 ms) instead of giving the motion up: the
+ *  morph must never hold the navigation back for its target. Timers, not frames: a hidden page
+ *  draws none, and the navigation must not hang on it. */
+export async function whenPresent<T>(find: () => T | null, timeoutMs = 32, stepMs = 16): Promise<T | null> {
   for (let waited = 0; ; waited += stepMs) {
     const found = find();
     if (found !== null || waited >= timeoutMs) return found;
@@ -103,7 +105,9 @@ function landingRect(source: DOMRect, target: HTMLElement, canvas: DOMRect): DOM
 
 /** An archive card's thumbnail leaves the list and lands as the document screen's page: a clone of
  *  the source flies from one rectangle to the other while the new screen fades up beneath it.
- *  The clone is resized by its box (not a scale), so the picture is never stretched. */
+ *  The clone keeps the source's box and only moves and scales from its top-left corner, a pure
+ *  transform on the compositor; the landing rect has the source's proportions, so one factor
+ *  covers both axes and the picture is never stretched. */
 export async function sharedMorph(
   a: HTMLElement,
   b: HTMLElement,
@@ -125,6 +129,7 @@ export async function sharedMorph(
     top: `${r0.top - root.top}px`,
     width: `${r0.width}px`,
     height: `${r0.height}px`,
+    transformOrigin: "0 0",
   });
   host.appendChild(flyer);
   source.style.visibility = "hidden";
@@ -134,22 +139,19 @@ export async function sharedMorph(
   b.style.zIndex = "2";
   a.style.zIndex = "1";
 
+  const scale = r1.width / r0.width;
   try {
     await Promise.all([
       animate(
         flyer,
         [
-          { transform: "none", width: `${r0.width}px`, height: `${r0.height}px` },
-          {
-            transform: `translate(${r1.left - r0.left}px, ${r1.top - r0.top}px)`,
-            width: `${r1.width}px`,
-            height: `${r1.height}px`,
-          },
+          { transform: "none" },
+          { transform: `translate(${r1.left - r0.left}px, ${r1.top - r0.top}px) scale(${scale})` },
         ],
-        { duration: 480 },
+        { duration: 380 },
       ).finished,
-      animate(b, [{ opacity: 0, transform: "scale(.985)" }, { opacity: 1, transform: "none" }], { duration: 420, delay: 70, easing: EASE_OUT }).finished,
-      animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 220, easing: "linear" }).finished,
+      animate(b, [{ opacity: 0, transform: "scale(.985)" }, { opacity: 1, transform: "none" }], { duration: 300, delay: 40, easing: EASE_OUT }).finished,
+      animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: "linear" }).finished,
     ]);
   } finally {
     target.style.visibility = "";

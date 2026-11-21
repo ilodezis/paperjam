@@ -1,4 +1,4 @@
-import { createContext, use, useLayoutEffect, useRef, type ReactNode } from "react";
+import { createContext, use, useCallback, useLayoutEffect, useRef, type ReactNode } from "react";
 
 import type { ScreenId } from "./nav";
 
@@ -47,21 +47,27 @@ export function ScreenFrame({ id, hidden, register, children }: ScreenFrameProps
   const saved = useRef(0);
   const progress = useRef("0.000");
 
-  // A hidden screen has no layout, so its scroll position is put back when it returns.
+  // A hidden screen has no layout, so its scroll position is put back when it returns. A screen
+  // that never scrolled (and a new one) has nothing to put back: writing 0 would only force a layout.
   useLayoutEffect(() => {
-    if (!hidden && node.current !== null) {
-      node.current.style.display = "";
-      node.current.scrollTop = saved.current;
-    }
+    const el = node.current;
+    if (hidden || el === null) return;
+    el.style.display = "";
+    if (saved.current !== 0 && el.scrollTop !== saved.current) el.scrollTop = saved.current;
   }, [hidden]);
+
+  const bind = useCallback(
+    (el: HTMLElement | null) => {
+      node.current = el;
+      register(el);
+      return () => register(null);
+    },
+    [register],
+  );
 
   return (
     <section
-      ref={(el) => {
-        node.current = el;
-        register(el);
-        return () => register(null);
-      }}
+      ref={bind}
       className="screen"
       data-screen={id}
       hidden={hidden}

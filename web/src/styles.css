@@ -1427,8 +1427,9 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
 .screen[hidden] { display: none; }
 .screen-shade { position: absolute; inset: 0; z-index: 30; background: #000; opacity: 0; pointer-events: none; }
 .page { position: relative; }
-/* The card that flies from the archive to the document: a clone, sized by its box. */
-.flyer { position: absolute; z-index: 80; overflow: hidden; margin: 0; pointer-events: none; background: var(--sidebar); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+/* The card that flies from the archive to the document: a clone at the source's box, moved and scaled by transform from its top-left corner.
+   No border: it would scale with the clone and land several pixels thick. */
+.flyer { position: absolute; z-index: 80; overflow: hidden; will-change: transform; transform-origin: 0 0; margin: 0; pointer-events: none; background: var(--sidebar); border: 0; border-radius: var(--radius-sm); }
 .flyer img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .result-thumbnail-frame { position: absolute; inset: 0; display: grid; place-items: center; }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } }

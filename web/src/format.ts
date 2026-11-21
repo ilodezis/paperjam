@@ -1,5 +1,27 @@
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+// Formatters are costly to construct, so keep one per language instead of one per call.
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+const sizeFormatters = new Map<string, Intl.NumberFormat>();
+
+function dateFormatter(language: string): Intl.DateTimeFormat {
+  let formatter = dateFormatters.get(language);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(language, { dateStyle: "medium", timeZone: "UTC" });
+    dateFormatters.set(language, formatter);
+  }
+  return formatter;
+}
+
+function sizeFormatter(language: string): Intl.NumberFormat {
+  let formatter = sizeFormatters.get(language);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(language, { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+    sizeFormatters.set(language, formatter);
+  }
+  return formatter;
+}
+
 /**
  * Formats a calendar date ("YYYY-MM-DD") for display in the given language.
  * The date is treated as a calendar day in UTC, so the day never shifts with the
@@ -13,7 +35,7 @@ export function formatIsoDate(value: string, language: string): string {
   const day = Number(match[3]);
   const date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return value;
-  return new Intl.DateTimeFormat(language, { dateStyle: "medium", timeZone: "UTC" }).format(date);
+  return dateFormatter(language).format(date);
 }
 
 /** A file size for display: kilobytes below a megabyte, megabytes above, always with one decimal. */
@@ -21,10 +43,10 @@ export function formatFileSize(bytes: number, language: string): string {
   const megabyte = 1024 * 1024;
   const ru = language.startsWith("ru");
   if (bytes >= megabyte) {
-    const value = new Intl.NumberFormat(language, { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(bytes / megabyte);
+    const value = sizeFormatter(language).format(bytes / megabyte);
     return `${value}\u00a0${ru ? "МБ" : "MB"}`;
   }
-  const value = new Intl.NumberFormat(language, { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(bytes / 1024);
+  const value = sizeFormatter(language).format(bytes / 1024);
   return `${value}\u00a0${ru ? "КБ" : "KB"}`;
 }
 

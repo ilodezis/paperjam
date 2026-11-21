@@ -1,4 +1,4 @@
-import { Suspense, createElement, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import { Suspense, createElement, memo, useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 
 import { animate, prefersReducedMotion, settle } from "../lib/motion";
@@ -6,9 +6,9 @@ import { useLayout } from "./layout";
 import { SCROLL_TOP_EVENT } from "./navigation";
 import { destOf, type ScreenId } from "./nav";
 import { takeNavigationIntent } from "./navIntent";
-import { screenComponent } from "./screens";
+import { screenComponent, setMountedScreens } from "./screens";
 import { ScreenBoundary } from "./ScreenBoundary";
-import { ScreenFrame, ScreenProvider } from "./ScreenFrame";
+import { ScreenFrame, ScreenProvider, type ScreenInfo } from "./ScreenFrame";
 import { initialStack, planGo, planPop, topOf, type Dest, type NavPlan, type StackEntry, type StackState } from "./stack";
 import { fade, sharedMorph, slide, swipeCommits, swipeFrame, whenPresent } from "./stageMotion";
 
@@ -18,6 +18,10 @@ interface StageView {
   logical: StackState;
   leaving: StackEntry[];
   moving: number[];
+  /** While a motion runs, the screens that answer the keyboard: the one that did before it and a
+   *  screen mounted for it. A screen already drawn learns it became (or stopped being) the top only
+   *  once the motion is over, so the commit that starts the motion redraws no page. Unset: the top. */
+  held?: number[];
 }
 
 interface Job {
@@ -70,6 +74,12 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
   const job = useRef<Job | null>(null);
   const pending = useRef<Dest | null>(null);
   const swipe = useRef<Swipe | null>(null);
+
+  // One function for every screen, so a screen's props stay the same from one commit to the next.
+  const registerNode = useCallback((key: number, node: HTMLElement | null) => {
+    if (node === null) nodes.current.delete(key);
+    else nodes.current.set(key, node);
+  }, []);
 
   const commit = (next: StageView) => {
     viewRef.current = next;
@@ -130,7 +140,11 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     }
     busy.current = true;
     job.current = { plan, shared: intent?.shared ?? null };
-    commit({ logical: plan.state, leaving: plan.drop, moving: [plan.from.key, plan.to.key] });
+    const before = viewRef.current;
+    const toKey = plan.to.key;
+    const fresh = !stageMountedEntries(before.logical.entries, before.leaving).some((entry) => entry.key === toKey);
+    const held = [topOf(before.logical).key, ...(fresh ? [toKey] : [])];
+    commit({ logical: plan.state, leaving: plan.drop, moving: [plan.from.key, toKey], held });
   });
 
   useEffect(() => {
@@ -149,6 +163,12 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     window.addEventListener(SCROLL_TOP_EVENT, scrollToTop);
     return () => window.removeEventListener(SCROLL_TOP_EVENT, scrollToTop);
   }, []);
+
+  // The routes ask what is on the stage before the next tap's loader runs, so this is current by then.
+  useLayoutEffect(() => {
+    setMountedScreens(stageMountedEntries(view.logical.entries, view.leaving).map((entry) => entry.id));
+  }, [view]);
+  useLayoutEffect(() => () => setMountedScreens([]), []);
 
   // The plan is run once its screens are in the DOM and before they are painted.
   useLayoutEffect(() => {
@@ -216,7 +236,7 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     const v = viewRef.current;
     if (swipeCommits(progress, velocity)) {
       const plan = planPop(v.logical);
-      commit({ logical: plan.state, leaving: plan.drop, moving: v.moving });
+      commit({ logical: plan.state, leaving: plan.drop, moving: v.moving, held: [topOf(v.logical).key] });
       await slide(s.top, s.under, shadeEl, s.width, -1, progress);
       commit({ logical: plan.state, leaving: [], moving: [] });
       busy.current = false;
@@ -250,31 +270,55 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     >
       <div ref={shade} className="screen-shade" />
       {mounted.map((entry) => (
-        <ScreenFrame
+        <StageScreen
           key={entry.key}
+          entryKey={entry.key}
           id={entry.id}
+          path={entry.path}
+          search={entry.search}
+          back={desktop ? null : entry.back}
+          active={view.held ? view.held.includes(entry.key) : entry.key === top.key}
           hidden={entry.key !== top.key && !view.moving.includes(entry.key)}
-          register={(node) => {
-            if (node === null) nodes.current.delete(entry.key);
-            else nodes.current.set(entry.key, node);
-          }}
-        >
-          <ScreenProvider info={{ id: entry.id, path: entry.path, search: entry.search, back: desktop ? null : entry.back, active: entry.key === top.key }}>
-            <ScreenBoundary id={entry.id}>
-              <Suspense fallback={null}>
-                <ScreenBody id={entry.id} />
-              </Suspense>
-            </ScreenBoundary>
-          </ScreenProvider>
-        </ScreenFrame>
+          registerNode={registerNode}
+        />
       ))}
     </div>
   );
 }
 
-function ScreenBody({ id }: { id: ScreenId }) {
-  return createElement(screenComponent(id));
+interface StageScreenProps {
+  entryKey: number;
+  id: ScreenId;
+  path: string;
+  search: string;
+  back: ScreenId | null;
+  active: boolean;
+  hidden: boolean;
+  registerNode: (key: number, node: HTMLElement | null) => void;
 }
+
+/** One mounted screen. Primitives only, so a commit that does not touch this screen (a hidden one
+ *  under a motion) does not draw it again. */
+const StageScreen = memo(function StageScreen({ entryKey, id, path, search, back, active, hidden, registerNode }: StageScreenProps) {
+  const register = useCallback((node: HTMLElement | null) => registerNode(entryKey, node), [registerNode, entryKey]);
+  const info = useMemo<ScreenInfo>(() => ({ id, path, search, back, active }), [id, path, search, back, active]);
+  return (
+    <ScreenFrame id={id} hidden={hidden} register={register}>
+      <ScreenProvider info={info}>
+        <ScreenBoundary id={id}>
+          <Suspense fallback={null}>
+            <ScreenBody id={id} />
+          </Suspense>
+        </ScreenBoundary>
+      </ScreenProvider>
+    </ScreenFrame>
+  );
+});
+
+/** Draws only when the screen changes; what the page inside reads from its context reaches it on its own. */
+const ScreenBody = memo(function ScreenBody({ id }: { id: ScreenId }) {
+  return createElement(screenComponent(id));
+});
 
 export function stageMountedEntries(logical: StackEntry[], leaving: StackEntry[]): StackEntry[] {
   return [...leaving, ...logical];

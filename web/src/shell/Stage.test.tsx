@@ -11,8 +11,23 @@ import { Stage, type StackInfo } from "./Stage";
 import { preloadScreen } from "./screens";
 import { useScreen } from "./ScreenFrame";
 
-vi.mock("../pages/ArchivePage", () => ({ ArchivePage: () => <p data-testid="archive">archive</p> }));
-vi.mock("../pages/DocumentPage", () => ({ DocumentPage: () => <p data-testid="document">document {useScreen().path}</p> }));
+// The archive reads its screen context, as the real one does, and counts how often it is drawn.
+const archive = vi.hoisted(() => ({ renders: 0 }));
+vi.mock("../pages/ArchivePage", () => ({
+  ArchivePage: () => {
+    useScreen();
+    archive.renders += 1;
+    return <p data-testid="archive">archive</p>;
+  },
+}));
+const documentPage = vi.hoisted(() => ({ renders: 0 }));
+vi.mock("../pages/DocumentPage", () => ({
+  DocumentPage: () => {
+    const { path } = useScreen();
+    documentPage.renders += 1;
+    return <p data-testid="document">document {path}</p>;
+  },
+}));
 vi.mock("../pages/UploadPage", () => ({ UploadPage: () => <p>upload</p> }));
 vi.mock("../pages/TaxonomyPage", () => ({ TaxonomyPage: () => <p>taxonomy</p> }));
 vi.mock("../pages/TrashPage", () => ({ TrashPage: () => <p>trash</p> }));
@@ -111,5 +126,41 @@ describe("Stage", () => {
     const { screens, info } = await mount("/documents/xyz");
     expect(screens()).toEqual(["document"]);
     expect(info.at(-1)).toEqual({ root: "document", top: "document", depth: 1 });
+  });
+
+  it("does not redraw a hidden screen on every commit", async () => {
+    const { go, screens } = await mount("/");
+    archive.renders = 0;
+    await go("/documents/a", "push");
+    expect(screens()).toEqual(["archive(hidden)", "document"]);
+    // Its own `active` flip is the only change it is told about; the stage's commits and the
+    // router's updates around the motion leave it alone.
+    expect(archive.renders).toBe(1);
+  });
+
+  it("starts a pop's motion before redrawing either page", async () => {
+    const { go, screens, router } = await mount("/");
+    await go("/documents/a", "push");
+    archive.renders = 0;
+    documentPage.renders = 0;
+    // What each page had drawn by the time the first frame of the motion was asked for.
+    let atMotion: { archive: number; document: number } | null = null;
+    const animate = vi.mocked(Element.prototype.animate);
+    animate.mockImplementation(() => {
+      atMotion ??= { archive: archive.renders, document: documentPage.renders };
+      return { finished: Promise.resolve(), cancel: vi.fn() } as never;
+    });
+    try {
+      await act(async () => {
+        router.history.back();
+      });
+    } finally {
+      animate.mockImplementation(() => ({ finished: Promise.resolve(), cancel: vi.fn() }) as never);
+    }
+    expect(screens()).toEqual(["archive"]);
+    expect(atMotion).toEqual({ archive: 0, document: 0 });
+    // The archive learns it is on top once the motion is over; the leaving document is never redrawn.
+    expect(archive.renders).toBe(1);
+    expect(documentPage.renders).toBe(0);
   });
 });
