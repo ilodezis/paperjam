@@ -7,7 +7,7 @@
 //! or shown; whether it is "soon" is decided at query time (`has:expiring`),
 //! because an index-time flag would be stale the next day.
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate};
 
 use super::fields::FieldValue;
 use crate::matching;
@@ -23,13 +23,14 @@ const DATE_FIELD_KEYS: [&str; 4] = ["expiry_date", "end_date", "warranty_end_dat
 /// identity documents and certificates print `expiry_date`, contracts run
 /// to `end_date`, a warranty ends on `warranty_end_date`, an invoice is
 /// paid by `due_date`.
-const TYPE_DUE_FIELDS: [(&str, &str); 11] = [
+const TYPE_DUE_FIELDS: [(&str, &str); 12] = [
     ("passport", "expiry_date"),
     ("travel_passport", "expiry_date"),
     ("id_card", "expiry_date"),
     ("residence_permit", "expiry_date"),
     ("driver_license", "expiry_date"),
     ("certificate_other", "expiry_date"),
+    ("power_of_attorney", "expiry_date"),
     ("rental_agreement", "end_date"),
     ("contract", "end_date"),
     ("insurance_policy", "end_date"),
@@ -39,7 +40,7 @@ const TYPE_DUE_FIELDS: [(&str, &str); 11] = [
 
 /// The field keys `due_date` reads; callers that load fields for it need
 /// no others.
-pub const DUE_FIELD_KEYS: [&str; 8] = [
+pub const DUE_FIELD_KEYS: [&str; 9] = [
     "expiry_date",
     "end_date",
     "warranty_end_date",
@@ -48,6 +49,7 @@ pub const DUE_FIELD_KEYS: [&str; 8] = [
     "issuing_authority",
     "birth_date",
     "issue_date",
+    "validity_term",
 ];
 
 /// The date `document` is due to be renewed, replaced or paid, or `None`
@@ -95,6 +97,14 @@ pub fn due_date<'a>(
     if let Some(due) = printed {
         return Some(due);
     }
+    // A document valid for a term ("сроком на десять лет", "for 3 years")
+    // runs out on the same day that many years or months after its issue.
+    if let (Some(issued), Some(months)) = (
+        date("issue_date"),
+        text("validity_term").and_then(term_months),
+    ) {
+        return issued.checked_add_months(Months::new(months));
+    }
     if type_key == Some("passport") && is_russian(text("nationality"), text("issuing_authority")) {
         return replacement_due(date("birth_date")?, date("issue_date")?);
     }
@@ -113,6 +123,72 @@ fn is_russian(nationality: Option<&str>, authority: Option<&str>) -> bool {
         || nationality == "rf"
         || nationality == "ru";
     nationality_ru || authority.contains("mvd") || authority.contains("fms")
+}
+
+/// Longest term read from a document, in months: anything longer is a misread.
+const MAX_TERM_MONTHS: u32 = 100 * 12;
+
+/// A printed term as months: the first number (digits or a Russian or
+/// English word) followed within two words by a unit of years or months, so
+/// "10 (десять) лет", "сроком на три года", "six months" and "полгода" all
+/// read. `None` when the text states no term ("бессрочно", "until revoked").
+fn term_months(text: &str) -> Option<u32> {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.contains(&"полгода") {
+        return Some(6);
+    }
+    for (i, word) in words.iter().enumerate() {
+        let Some(count) = term_number(word) else {
+            continue;
+        };
+        let unit = words.iter().skip(i + 1).take(3).find_map(|w| term_unit(w));
+        if let Some(unit) = unit {
+            let months = count.checked_mul(unit)?;
+            return (1..=MAX_TERM_MONTHS).contains(&months).then_some(months);
+        }
+    }
+    None
+}
+
+/// A count written in digits or as a common Russian or English word.
+fn term_number(word: &str) -> Option<u32> {
+    if let Ok(n) = word.parse::<u32>() {
+        return Some(n);
+    }
+    let n = match word {
+        "один" | "одного" | "одну" | "одна" | "one" | "a" => 1,
+        "два" | "две" | "двух" | "two" => 2,
+        "три" | "трех" | "трёх" | "three" => 3,
+        "четыре" | "четырех" | "четырёх" | "four" => 4,
+        "пять" | "пяти" | "five" => 5,
+        "шесть" | "шести" | "six" => 6,
+        "семь" | "семи" | "seven" => 7,
+        "восемь" | "восьми" | "eight" => 8,
+        "девять" | "девяти" | "nine" => 9,
+        "десять" | "десяти" | "ten" => 10,
+        "одиннадцать" | "eleven" => 11,
+        "двенадцать" | "двенадцати" | "twelve" => 12,
+        "пятнадцать" | "пятнадцати" | "fifteen" => 15,
+        "двадцать" | "двадцати" | "twenty" => 20,
+        "тридцать" | "тридцати" | "thirty" => 30,
+        _ => return None,
+    };
+    Some(n)
+}
+
+/// Months in a unit word: a year (год, года, лет, years) or a month.
+fn term_unit(word: &str) -> Option<u32> {
+    if word == "лет" || word.starts_with("год") || word.starts_with("year") {
+        Some(12)
+    } else if word.starts_with("месяц") || word.starts_with("month") {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 /// The birthday `age` years after `birth`; a 29 February birthday falls on
@@ -321,6 +397,62 @@ mod tests {
         // None of the date fields, or the type's age rule: no due date.
         assert_eq!(
             due("club_card", &[("birth_date", date("1990-05-17"))]),
+            None
+        );
+    }
+
+    fn power_of_attorney(term: &str) -> Option<NaiveDate> {
+        due(
+            "power_of_attorney",
+            &[
+                ("issue_date", date("2026-11-21")),
+                ("validity_term", text(term)),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_power_of_attorney_runs_out_a_printed_term_after_its_issue() {
+        assert_eq!(power_of_attorney("десять лет"), Some(d("2036-11-21")));
+        assert_eq!(
+            power_of_attorney("сроком на 10 (десять) лет"),
+            Some(d("2036-11-21"))
+        );
+        assert_eq!(power_of_attorney("на три года"), Some(d("2029-11-21")));
+        assert_eq!(power_of_attorney("1 (один) год"), Some(d("2027-11-21")));
+        assert_eq!(power_of_attorney("шесть месяцев"), Some(d("2027-05-21")));
+        assert_eq!(power_of_attorney("полгода"), Some(d("2027-05-21")));
+        assert_eq!(
+            power_of_attorney("valid for a period of 3 years"),
+            Some(d("2029-11-21"))
+        );
+    }
+
+    #[test]
+    fn a_printed_expiry_wins_over_the_term() {
+        assert_eq!(
+            due(
+                "power_of_attorney",
+                &[
+                    ("issue_date", date("2026-11-21")),
+                    ("validity_term", text("десять лет")),
+                    ("expiry_date", date("2030-01-01")),
+                ]
+            ),
+            Some(d("2030-01-01"))
+        );
+    }
+
+    #[test]
+    fn no_term_or_no_issue_date_means_no_due_date() {
+        assert_eq!(power_of_attorney("бессрочно"), None);
+        assert_eq!(power_of_attorney("until revoked"), None);
+        assert_eq!(power_of_attorney("1000 лет"), None);
+        assert_eq!(
+            due(
+                "power_of_attorney",
+                &[("validity_term", text("десять лет"))]
+            ),
             None
         );
     }

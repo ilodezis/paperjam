@@ -1218,7 +1218,7 @@ mod tests {
     use crate::service::testing::test_app;
     use crate::service::{Actor, App};
 
-    const SPEC_TYPES: [&str; 21] = [
+    const SPEC_TYPES: [&str; 22] = [
         "passport",
         "travel_passport",
         "id_card",
@@ -1229,6 +1229,7 @@ mod tests {
         "diploma",
         "contract",
         "rental_agreement",
+        "power_of_attorney",
         "insurance_policy",
         "bank_statement",
         "payment_confirmation",

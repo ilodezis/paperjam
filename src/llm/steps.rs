@@ -918,6 +918,19 @@ mod tests {
         );
     }
 
+    /// A deed that copies its parties' identity documents named the office
+    /// that issued a representative's identity document as its own issuer.
+    #[test]
+    fn the_classify_prompt_keeps_cited_identity_issuers_out() {
+        let p = CLASSIFY_PROMPT;
+        assert!(p.contains("Identity details copied into a document are not its organizations"));
+        assert!(p.contains("every person the document names"));
+        assert!(
+            p.contains("certified by a notary"),
+            "the notary issues a notarial deed"
+        );
+    }
+
     #[test]
     fn the_classify_prompt_demands_the_domain_tag_when_one_fits() {
         let p = CLASSIFY_PROMPT;

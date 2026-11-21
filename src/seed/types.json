@@ -940,6 +940,111 @@
     ]
   },
   {
+    "key": "power_of_attorney",
+    "labels": {
+      "en": "Power of Attorney",
+      "ru": "Доверенность"
+    },
+    "fields": [
+      {
+        "key": "principal",
+        "labels": {
+          "en": "Principal",
+          "ru": "Доверитель"
+        },
+        "kind": "text",
+        "required": true
+      },
+      {
+        "key": "representatives",
+        "labels": {
+          "en": "Representatives",
+          "ru": "Представители"
+        },
+        "kind": "list",
+        "required": true
+      },
+      {
+        "key": "powers",
+        "labels": {
+          "en": "Powers",
+          "ru": "Полномочия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "issue_date",
+        "labels": {
+          "en": "Issue Date",
+          "ru": "Дата выдачи"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "validity_term",
+        "labels": {
+          "en": "Term",
+          "ru": "Срок действия"
+        },
+        "kind": "text",
+        "required": false
+      },
+      {
+        "key": "expiry_date",
+        "labels": {
+          "en": "Expiry Date",
+          "ru": "Действительна до"
+        },
+        "kind": "date",
+        "required": false
+      },
+      {
+        "key": "notary",
+        "labels": {
+          "en": "Notary",
+          "ru": "Нотариус"
+        },
+        "kind": "text",
+        "required": false,
+        "issuer": true
+      },
+      {
+        "key": "registry_number",
+        "labels": {
+          "en": "Registry Number",
+          "ru": "Номер в реестре"
+        },
+        "kind": "identifier",
+        "required": false
+      },
+      {
+        "key": "form_number",
+        "labels": {
+          "en": "Form Number",
+          "ru": "Номер бланка"
+        },
+        "kind": "identifier",
+        "required": false
+      },
+      {
+        "key": "substitution",
+        "labels": {
+          "en": "Right of Substitution",
+          "ru": "Право передоверия"
+        },
+        "kind": "text",
+        "required": false
+      }
+    ],
+    "summary_fields": [
+      "representatives",
+      "expiry_date",
+      "notary"
+    ]
+  },
+  {
     "key": "insurance_policy",
     "labels": {
       "en": "Insurance Policy",
