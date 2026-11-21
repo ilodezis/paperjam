@@ -29,7 +29,7 @@ The crate is a library plus a binary. A small `xtask` crate generates the synthe
 | `src/pipeline`, `src/extract`, `src/llm` | Processing: the local phase and checks, PDF and image handling with Tesseract, and the LLM client with its prompts, schemas and budget |
 | `src/search`, `src/jobs`, `src/db` | The tantivy index and query language, the job queue and workers, SQLite access and migrations |
 | `src/validators`, `src/mrz.rs` | Identifier checks, described in [validators](validators.md) |
-| `src/cli`, `src/inbox.rs` | The subcommands and the watched inbox folder |
+| `src/cli`, `src/inbox.rs`, `src/email` | The subcommands, the watched inbox folder, and inbound email parsing and ingestion |
 
 ## Layers
 
@@ -156,6 +156,7 @@ Four kinds of link exist, with different secrets:
 - A **one-time upload link** (`/api/v1/ul/<token>`) holds a random token, stored hashed, valid for 15 minutes and for one file. It is how a large file reaches the server without passing through a chat.
 - A **share link** (`/s/<token>`) shows a document to anyone who holds it, for 15 minutes, an hour or a day. The token is the share's id plus a signature of it, so the database holds no secret, and the link can be shown again while it is live. People list and revoke live links in the web app.
 - The **calendar feed** (`/calendar/<secret>.ics`) has a secret that is stored hashed and shown once. It can be rotated or revoked.
+- The **inbound email webhook** (`POST /api/v1/ingest/email`) accepts raw RFC 5322 mail authenticated with the write-only `PAPERJAM_EMAIL_SECRET` and optional sender allowlist (`PAPERJAM_EMAIL_ALLOWED_SENDERS`).
 
 ## Operations
 

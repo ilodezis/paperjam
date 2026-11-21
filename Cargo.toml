@@ -68,6 +68,7 @@ libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 # Passkeys (pure Rust crypto). `conditional-ui` enables discoverable,
 # username-less sign-in.
 webauthn-rs = { version = "0.6.2", features = ["conditional-ui"] }
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 
 [build-dependencies]
 flate2 = "1.1.10"

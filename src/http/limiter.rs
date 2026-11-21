@@ -208,6 +208,23 @@ impl LoginLimiter {
         });
     }
 
+    pub fn check_email_ingest(&self, ip: IpAddr) -> Result<(), ServiceError> {
+        let pair = self.pair_key(ip, "email_ingest", "");
+        self.with(|maps| Self::check_pair(maps, pair, Instant::now()))
+    }
+
+    pub fn email_ingest_failed(&self, ip: IpAddr) {
+        let pair = self.pair_key(ip, "email_ingest", "");
+        self.with(|maps| Self::fail_pair(maps, pair, Instant::now()));
+    }
+
+    pub fn email_ingest_succeeded(&self, ip: IpAddr) {
+        let pair = self.pair_key(ip, "email_ingest", "");
+        self.with(|maps| {
+            maps.pairs.remove(&pair);
+        });
+    }
+
     /// Counts a passkey challenge; refuses past [`MAX_CHALLENGES`] per
     /// address, so one client cannot fill the shared ceremony store.
     pub fn allow_challenge(&self, ip: IpAddr) -> Result<(), ServiceError> {
@@ -385,5 +402,26 @@ mod tests {
             l.password_failed(IpAddr::from(i.to_be_bytes()), &format!("user{i}"));
         }
         assert!(l.len() <= 2 * MAX_ENTRIES + 2);
+    }
+
+    #[test]
+    fn email_ingest_is_limited_per_address() {
+        let l = LoginLimiter::default();
+        let a = ip("198.51.100.66");
+        for _ in 0..FREE_FAILURES {
+            l.check_email_ingest(a).unwrap();
+            l.email_ingest_failed(a);
+        }
+        l.check_email_ingest(a).unwrap();
+        l.email_ingest_failed(a);
+        assert!(l.check_email_ingest(a).is_err());
+        l.rewind(Duration::from_secs(1));
+        l.check_email_ingest(a).unwrap();
+        l.email_ingest_failed(a);
+        l.rewind(Duration::from_secs(1));
+        assert!(l.check_email_ingest(a).is_err());
+        l.check_email_ingest(ip("203.0.113.7")).unwrap();
+        l.email_ingest_succeeded(a);
+        l.check_email_ingest(a).unwrap();
     }
 }

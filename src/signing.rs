@@ -41,6 +41,17 @@ pub fn verify_prefix(key: &[u8], purpose: &str, data: &str, prefix_hex: &str) ->
             .is_ok()
 }
 
+/// Constant-time comparison of two byte slices of arbitrary length.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    const KEY: &[u8] = b"paperjam-constant-time-eq";
+    let mut ma = HmacSha256::new_from_slice(KEY).expect("HMAC accepts any key length");
+    ma.update(a);
+    let expected = ma.finalize().into_bytes();
+    let mut mb = HmacSha256::new_from_slice(KEY).expect("HMAC accepts any key length");
+    mb.update(b);
+    mb.verify_slice(&expected).is_ok()
+}
+
 fn from_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) || !s.is_ascii() {
         return None;
@@ -87,5 +98,21 @@ mod tests {
         assert!(!verify(KEY, "session", "abc", "zz"));
         assert!(!verify(KEY, "session", "abc", ""));
         assert!(!verify(KEY, "session", "abc", &sig[..sig.len() - 2]));
+    }
+
+    #[test]
+    fn constant_time_eq_compares_bytes_and_lengths() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(
+            b"secret-token-value",
+            b"secret-token-value"
+        ));
+        assert!(!constant_time_eq(
+            b"secret-token-value",
+            b"secret-token-valuX"
+        ));
+        assert!(!constant_time_eq(b"secret-token", b"secret-token-value"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(!constant_time_eq(b"a", b""));
     }
 }

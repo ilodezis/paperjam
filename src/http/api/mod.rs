@@ -3,6 +3,7 @@
 pub mod calendar_feed;
 pub mod connections;
 pub mod documents;
+pub mod email;
 pub mod links;
 pub mod passkeys;
 pub mod search;
@@ -51,7 +52,7 @@ pub fn route_list() -> Vec<(axum::http::Method, String)> {
     routes
 }
 
-/// `upload_limit` is the body ceiling of the two routes that carry a file;
+/// `upload_limit` is the body ceiling of the three routes that carry a file;
 /// every other route keeps the small default set on the whole server.
 pub fn router(upload_limit: usize) -> OpenApiRouter<HttpState> {
     OpenApiRouter::with_openapi(openapi::build())
@@ -63,6 +64,13 @@ pub fn router(upload_limit: usize) -> OpenApiRouter<HttpState> {
         .routes(routes!(auth::passkey_challenge))
         .routes(routes!(auth::passkey_login))
         .routes(routes!(documents::create).layer(DefaultBodyLimit::max(upload_limit)))
+        .routes(
+            routes!(email::ingest).layer(
+                ServiceBuilder::new()
+                    .layer(DefaultBodyLimit::max(upload_limit))
+                    .layer(RequestBodyLimitLayer::new(upload_limit)),
+            ),
+        )
         .routes(routes!(documents::get, documents::patch, documents::purge))
         .routes(routes!(documents::original))
         .routes(routes!(documents::download))

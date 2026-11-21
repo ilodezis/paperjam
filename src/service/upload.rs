@@ -14,7 +14,7 @@ use crate::service::{Ctx, events};
 use crate::time;
 
 /// How many leading bytes are inspected to identify a file.
-const SNIFF_BYTES: usize = 8192;
+pub(crate) const SNIFF_BYTES: usize = 8192;
 const MAX_NAME_CHARS: usize = 255;
 /// ISO base media brands that mean HEIC/HEIF image data.
 const HEIC_BRANDS: [&[u8; 4]; 8] = [

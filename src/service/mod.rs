@@ -38,6 +38,7 @@ pub enum Via {
     Cli,
     System,
     Inbox,
+    Email,
 }
 
 impl Via {
@@ -49,6 +50,7 @@ impl Via {
             Via::Cli => "cli",
             Via::System => "system",
             Via::Inbox => "inbox",
+            Via::Email => "email",
         }
     }
 }

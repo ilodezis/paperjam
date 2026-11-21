@@ -81,6 +81,21 @@ How the scanner treats files:
 - **Rejected files are moved, not retried.** An unsupported type, an oversize file or content that cannot be used goes to `<inbox>/.failed/` with a `<name>.reason.txt` beside it. A file that cannot be read at all, say because of a network share hiccup, is not rejected. It stays where it is and is tried again later.
 - **Errors that are not the file's fault**, such as a full disk, are logged once. The file stays and is retried after it changes or the server restarts.
 
+## Email intake (optional)
+
+Inbound email is off unless `PAPERJAM_EMAIL_SECRET` is set. `POST /api/v1/ingest/email` accepts a raw RFC 5322 email (`message/rfc822`), skips inline signature logos and non-document attachments (such as `.ics`, `.vcf`, `.p7s` and `winmail.dat`), keeps iPhone inline photos and forwarded `.eml` attachments, and hands each file to the normal upload path. See the [Email intake guide](email-intake.md) for the Cloudflare Email Worker setup and troubleshooting.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PAPERJAM_EMAIL_SECRET` | unset | Write-only bearer secret (`Authorization: Bearer …`), at least 32 bytes. Cannot read or change existing documents. |
+| `PAPERJAM_EMAIL_USER` | the only active user | Username the documents are attributed to. Optional while one active user exists; required when several exist. |
+| `PAPERJAM_EMAIL_ALLOWED_SENDERS` | unset (any sender) | Comma-separated exact addresses (`alice@example.org`) and `@domain` suffixes (`@example.org`). Checked against `X-Envelope-From` when supplied, else every `From` address. |
+| `PAPERJAM_EMAIL_BODY_FALLBACK` | `true` | Convert an email with no eligible attachments into a `.md` document from its headers and body text. |
+| `PAPERJAM_EMAIL_LOCAL_ONLY` | `false` | Mark ingested documents *Process on this server only* (no LLM calls). |
+| `PAPERJAM_EMAIL_TAG` | unset | Tag name (up to 64 characters) created if missing and added to every ingested document. |
+
+Setting any secondary `PAPERJAM_EMAIL_*` variable without `PAPERJAM_EMAIL_SECRET` stops the server at startup.
+
 ## Recognition
 
 | Variable | Default | Meaning |

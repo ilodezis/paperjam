@@ -139,8 +139,8 @@ and safety details: [docs/mcp.md](docs/mcp.md).
 
 - **Takes in** PDF, JPEG, PNG, WebP, TIFF, HEIC and plain text from the web
   page, the REST API, a [watched folder](docs/configuration.md#inbox-folder-optional),
-  an [iOS Shortcut](docs/ios-shortcut.md) or an agent. Duplicates are caught by
-  content hash.
+  [email](docs/email-intake.md), an [iOS Shortcut](docs/ios-shortcut.md) or an
+  agent. Duplicates are caught by content hash.
 - **Reads locally, always:** PDF text, Tesseract OCR with deskewing, and ICAO
   9303 machine-readable zones (TD1, TD2, TD3) with check digits.
 - **Enriches with an LLM, if you want:** type, title, date, correspondent,
@@ -188,10 +188,10 @@ Checked on 2026-11-13 against each project's repository and latest release.
 | Native MCP server | Yes | No; community bridges over REST | No; open feature request | No |
 | Structured data | 21 typed document types, MRZ, checksums | Custom fields | Custom properties | Labels |
 | Runs on | One binary, SQLite | Django, a database, a Redis-compatible broker | TypeScript, SQLite | Rust, PostgreSQL |
-| Email intake | No | Yes | Yes | No |
+| Email intake | Yes (webhook) | Yes | Yes | No |
 | License | AGPL-3.0 | GPL-3.0 | AGPL-3.0 | MIT |
 
-Paperless-ngx is the mature choice, with workflows, permissions, email intake,
+Paperless-ngx is the mature choice, with workflows, permissions, IMAP mail rules,
 document versions and, since version 3, built-in LLM features that can run on
 a model you host. For an office-style archive, use it. paperjam is for the case
 where an agent is a main way in, and the numbers on your documents matter more
@@ -214,6 +214,7 @@ snapshots off the disk. Restore, export and Paperless import:
 [MCP server](docs/mcp.md) ·
 [Architecture](docs/architecture.md) ·
 [Validators](docs/validators.md) ·
+[Email intake](docs/email-intake.md) ·
 [iOS Shortcut](docs/ios-shortcut.md) ·
 [Releasing and verifying images](docs/releasing.md) ·
 [Changelog](CHANGELOG.md)

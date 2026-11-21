@@ -329,6 +329,145 @@ fn inbox_settings(
     ))
 }
 
+const MAX_EMAIL_TAG_CHARS: usize = 64;
+
+/// Who may submit documents over the inbound email webhook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SenderRule {
+    Exact(String),
+    Domain(String),
+}
+
+impl SenderRule {
+    pub fn matches(&self, addr: &str) -> bool {
+        let norm = addr.trim().to_ascii_lowercase();
+        match self {
+            SenderRule::Exact(exact) => norm == *exact,
+            SenderRule::Domain(domain) => norm.split_once('@').is_some_and(|(local, host)| {
+                !local.is_empty() && !host.contains('@') && host == &domain[1..]
+            }),
+        }
+    }
+}
+
+/// Inbound email webhook settings; `None` keeps `POST /api/v1/ingest/email` off.
+#[derive(Debug, Clone)]
+pub struct EmailIntakeConfig {
+    pub secret: SecretString,
+    pub user: Option<String>,
+    pub allowed_senders: Vec<SenderRule>,
+    pub body_fallback: bool,
+    pub local_only: bool,
+    pub tag: Option<String>,
+}
+
+fn valid_domain_part(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.contains('.')
+        && !domain.contains('@')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+}
+
+fn parse_sender_rule(entry: &str) -> Result<SenderRule, ConfigError> {
+    const VAR: &str = "PAPERJAM_EMAIL_ALLOWED_SENDERS";
+    let item = entry.trim().to_ascii_lowercase();
+    if item.is_empty() || item.chars().any(char::is_whitespace) {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: format!("{entry:?} is not a sender address or @domain"),
+        });
+    }
+    if let Some(domain) = item.strip_prefix('@') {
+        if !valid_domain_part(domain) {
+            return Err(ConfigError::Invalid {
+                var: VAR,
+                reason: format!("{entry:?} is not a valid @domain rule"),
+            });
+        }
+        return Ok(SenderRule::Domain(item));
+    }
+    let Some((local, domain)) = item.split_once('@') else {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: format!("{entry:?} is not a sender address or @domain"),
+        });
+    };
+    if local.is_empty() || !valid_domain_part(domain) {
+        return Err(ConfigError::Invalid {
+            var: VAR,
+            reason: format!("{entry:?} is not a valid sender address"),
+        });
+    }
+    Ok(SenderRule::Exact(item))
+}
+
+fn email_intake_settings(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<EmailIntakeConfig>, ConfigError> {
+    let secret = get("PAPERJAM_EMAIL_SECRET");
+    let user = get("PAPERJAM_EMAIL_USER").map(|u| u.trim().to_string());
+    let senders = get("PAPERJAM_EMAIL_ALLOWED_SENDERS");
+    let body_fallback = parse_bool(get, "PAPERJAM_EMAIL_BODY_FALLBACK")?;
+    let local_only = parse_bool(get, "PAPERJAM_EMAIL_LOCAL_ONLY")?;
+    let tag = get("PAPERJAM_EMAIL_TAG").map(|t| t.trim().to_string());
+
+    let Some(secret) = secret else {
+        if user.is_some()
+            || senders.is_some()
+            || body_fallback.is_some()
+            || local_only.is_some()
+            || tag.is_some()
+        {
+            return Err(ConfigError::Missing("PAPERJAM_EMAIL_SECRET"));
+        }
+        return Ok(None);
+    };
+
+    let secret = secret.trim().to_string();
+    if secret.len() < MIN_SECRET_KEY_BYTES {
+        return Err(ConfigError::Invalid {
+            var: "PAPERJAM_EMAIL_SECRET",
+            reason: format!("must be at least {MIN_SECRET_KEY_BYTES} bytes"),
+        });
+    }
+
+    let allowed_senders = match senders {
+        None => Vec::new(),
+        Some(raw) => {
+            let mut rules = Vec::new();
+            for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                rules.push(parse_sender_rule(entry)?);
+            }
+            if rules.is_empty() {
+                return Err(ConfigError::Invalid {
+                    var: "PAPERJAM_EMAIL_ALLOWED_SENDERS",
+                    reason: "list at least one sender address or @domain".to_string(),
+                });
+            }
+            rules
+        }
+    };
+
+    if let Some(ref t) = tag
+        && (t.chars().count() > MAX_EMAIL_TAG_CHARS || t.chars().any(char::is_control))
+    {
+        return Err(ConfigError::Invalid {
+            var: "PAPERJAM_EMAIL_TAG",
+            reason: format!("must be at most {MAX_EMAIL_TAG_CHARS} printable characters"),
+        });
+    }
+
+    Ok(Some(EmailIntakeConfig {
+        secret: SecretString::from(secret),
+        user,
+        allowed_senders,
+        body_fallback: body_fallback.unwrap_or(true),
+        local_only: local_only.unwrap_or(false),
+        tag,
+    }))
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -376,6 +515,8 @@ pub struct Config {
     pub inbox_dir: Option<PathBuf>,
     pub inbox_user: Option<String>,
     pub inbox_interval_secs: u64,
+    /// Inbound email webhook; `None` keeps the feature off.
+    pub email_intake: Option<EmailIntakeConfig>,
     /// Proxies whose client-address header is believed.
     pub trusted_proxies: Vec<ipnet::IpNet>,
     /// The header a trusted proxy puts the client address in.
@@ -464,6 +605,7 @@ impl Config {
         };
 
         let (inbox_dir, inbox_user, inbox_interval_secs) = inbox_settings(&get, &data_dir)?;
+        let email_intake = email_intake_settings(&get)?;
 
         Ok(Config {
             data_dir,
@@ -499,6 +641,7 @@ impl Config {
             inbox_dir,
             inbox_user,
             inbox_interval_secs,
+            email_intake,
             trusted_proxies: trusted_proxies(&get)?,
             client_ip_header: client_ip_header(&get)?,
         })
@@ -1102,10 +1245,122 @@ mod tests {
         let c = Config::from_lookup(lookup(&[
             ("PAPERJAM_SECRET_KEY", KEY),
             ("PAPERJAM_LLM_API_KEY", "test-very-secret-key"),
+            (
+                "PAPERJAM_EMAIL_SECRET",
+                "test-very-secret-email-webhook-key-0123",
+            ),
         ]))
         .unwrap();
         let dbg = format!("{c:?}");
         assert!(!dbg.contains(KEY));
         assert!(!dbg.contains("test-very-secret-key"));
+        assert!(!dbg.contains("test-very-secret-email-webhook-key-0123"));
+    }
+
+    #[test]
+    fn email_intake_is_off_by_default_and_validated() {
+        let off = Config::from_lookup(lookup(&[("PAPERJAM_SECRET_KEY", KEY)])).unwrap();
+        assert!(off.email_intake.is_none());
+
+        for var in [
+            ("PAPERJAM_EMAIL_USER", "alice"),
+            ("PAPERJAM_EMAIL_ALLOWED_SENDERS", "alice@example.org"),
+            ("PAPERJAM_EMAIL_BODY_FALLBACK", "false"),
+            ("PAPERJAM_EMAIL_LOCAL_ONLY", "true"),
+            ("PAPERJAM_EMAIL_TAG", "email"),
+        ] {
+            let err = Config::from_lookup(lookup(&[("PAPERJAM_SECRET_KEY", KEY), var]))
+                .err()
+                .unwrap();
+            assert!(
+                matches!(err, ConfigError::Missing("PAPERJAM_EMAIL_SECRET")),
+                "{var:?}: {err:?}"
+            );
+        }
+
+        let short = Config::from_lookup(lookup(&[
+            ("PAPERJAM_SECRET_KEY", KEY),
+            ("PAPERJAM_EMAIL_SECRET", "too-short"),
+        ]))
+        .err()
+        .unwrap();
+        assert!(matches!(
+            short,
+            ConfigError::Invalid {
+                var: "PAPERJAM_EMAIL_SECRET",
+                ..
+            }
+        ));
+
+        let c = Config::from_lookup(lookup(&[
+            ("PAPERJAM_SECRET_KEY", KEY),
+            (
+                "PAPERJAM_EMAIL_SECRET",
+                "  email-ingest-secret-at-least-32-bytes!  ",
+            ),
+            ("PAPERJAM_EMAIL_USER", " alice "),
+            (
+                "PAPERJAM_EMAIL_ALLOWED_SENDERS",
+                " Alice@Example.org , @Partner.Example.com ",
+            ),
+            ("PAPERJAM_EMAIL_BODY_FALLBACK", "false"),
+            ("PAPERJAM_EMAIL_LOCAL_ONLY", "true"),
+            ("PAPERJAM_EMAIL_TAG", " inbox-mail "),
+        ]))
+        .unwrap();
+        let email = c.email_intake.unwrap();
+        assert_eq!(
+            email.secret.expose_secret(),
+            "email-ingest-secret-at-least-32-bytes!"
+        );
+        assert_eq!(email.user.as_deref(), Some("alice"));
+        assert!(!email.body_fallback);
+        assert!(email.local_only);
+        assert_eq!(email.tag.as_deref(), Some("inbox-mail"));
+        assert_eq!(
+            email.allowed_senders,
+            vec![
+                SenderRule::Exact("alice@example.org".into()),
+                SenderRule::Domain("@partner.example.com".into()),
+            ]
+        );
+        assert!(email.allowed_senders[0].matches("ALICE@example.org"));
+        assert!(!email.allowed_senders[0].matches("bob@example.org"));
+        assert!(email.allowed_senders[1].matches("Billing@partner.example.com"));
+        assert!(!email.allowed_senders[1].matches("@partner.example.com"));
+        assert!(!email.allowed_senders[1].matches("x@notpartner.example.com"));
+        assert!(!email.allowed_senders[1].matches("a@b@partner.example.com"));
+
+        for bad in [
+            "alice",
+            "@localhost",
+            "alice@localhost",
+            "a@b@example.org",
+            "alice @example.org",
+            "@.example.org",
+            "@example.org.",
+            ",",
+        ] {
+            let err = Config::from_lookup(lookup(&[
+                ("PAPERJAM_SECRET_KEY", KEY),
+                (
+                    "PAPERJAM_EMAIL_SECRET",
+                    "email-ingest-secret-at-least-32-bytes!",
+                ),
+                ("PAPERJAM_EMAIL_ALLOWED_SENDERS", bad),
+            ]))
+            .err()
+            .unwrap_or_else(|| panic!("{bad:?} should be rejected"));
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "PAPERJAM_EMAIL_ALLOWED_SENDERS",
+                        ..
+                    }
+                ),
+                "{bad:?}: {err:?}"
+            );
+        }
     }
 }

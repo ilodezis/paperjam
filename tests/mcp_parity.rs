@@ -29,6 +29,8 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     // Links carry their own authority; the tools mint them.
     ("GET", "/dl/{token}"),
     ("PUT", "/ul/{token}"),
+    // Inbound email webhook is authenticated by its own write-only secret.
+    ("POST", "/ingest/email"),
     ("GET", "/shared/{token}/pages/{file}"),
     ("GET", "/shared/{token}/download"),
     // Live share links are reviewed and revoked by people in the web UI.

@@ -942,6 +942,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("get", "/stats"),
     ("get", "/dl/{token}"),
     ("put", "/ul/{token}"),
+    ("post", "/ingest/email"),
     ("get", "/documents/{id}/download"),
     ("post", "/documents/{id}/shares"),
     ("get", "/documents/{id}/shares"),

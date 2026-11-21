@@ -763,7 +763,7 @@ mod tests {
         )
         .await
         .unwrap();
-        for via in [Via::Token, Via::OAuth, Via::System, Via::Inbox] {
+        for via in [Via::Token, Via::OAuth, Via::System, Via::Inbox, Via::Email] {
             let err = create_user(
                 &app.ctx(Actor::user(admin.id, via)),
                 new_user("mallory", "correct horse"),

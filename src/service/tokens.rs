@@ -168,7 +168,7 @@ mod tests {
     async fn a_token_cannot_issue_tokens() {
         let (_dir, app) = test_app().await;
         let alice = user(&app, "alice").await;
-        for via in [Via::Token, Via::OAuth, Via::System, Via::Inbox] {
+        for via in [Via::Token, Via::OAuth, Via::System, Via::Inbox, Via::Email] {
             let err = create_token(&app.ctx(Actor::user(alice.id, via)), "spare")
                 .await
                 .unwrap_err();
