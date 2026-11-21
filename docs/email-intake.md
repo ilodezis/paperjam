@@ -4,7 +4,7 @@ Forward or send an email to an address on your domain and have its attachments l
 
 paperjam does not run an SMTP server of its own or poll IMAP mailboxes. Instead, it exposes a single webhook endpoint — `POST /api/v1/ingest/email` — that accepts a raw RFC 5322 email (`message/rfc822`), verifies a write-only secret and an optional sender allowlist, and hands each extracted file to the normal upload pipeline (size check, content-hash deduplication, local OCR/MRZ and optional LLM enrichment).
 
-The usual bridge in front of it is a small **Cloudflare Email Worker** (~45 lines, free plan), which receives mail on an address such as `docs@example.org`, checks DMARC and the sender allowlist at the edge, and streams the raw message to paperjam. Any other mail server or script (Postfix, Exim, Stalwart, `curl`) can `POST` to the same endpoint directly.
+The usual bridge in front of it is a small **Cloudflare Email Worker** (free plan), which receives mail on an address such as `docs@example.org`, checks DMARC and the sender allowlist at the edge, and streams the raw message to paperjam. Any other mail server or script (Postfix, Exim, Stalwart, `curl`) can `POST` to the same endpoint directly.
 
 ## 1. Enable the endpoint in paperjam
 
@@ -56,13 +56,38 @@ Using Cloudflare Email Routing keeps passwords and OAuth apps out of paperjam an
 
 ### Why DMARC + allowlist replaces a secret address
 
-Email `From:` headers can be forged by any sender. Before invoking an Email Worker, Cloudflare validates SPF, DKIM and DMARC and prepends its own `Authentication-Results` header starting with `mx.cloudflare.net;`. Requiring `dmarc=pass` in that first header alongside an allowlist of your own addresses ensures forged mail and random spam are rejected at Cloudflare's edge before reaching your server or spending LLM budget.
+Email `From:` headers can be forged by any sender. Before invoking an Email Worker, Cloudflare validates SPF, DKIM and DMARC and prepends its own `Authentication-Results` header starting with `mx.cloudflare.net;`. Requiring `dmarc=pass` in that first header guarantees the `From:` header has not been spoofed, so the Worker matches `ALLOWED_SENDERS` against `From:` rather than the envelope `MAIL FROM` (which relays such as Amazon SES/Resend and "Send mail as" aliases replace with per-message bounce addresses) and omits `X-Envelope-From` so paperjam checks `From:` as well.
 
 ### Create and deploy the Worker
 
 1. In the Cloudflare dashboard, open **Compute (Workers)** → **Create Worker** (or deploy with Wrangler) and paste the script below:
 
 ```js
+function extractAddresses(header) {
+  const cleaned = header
+    .replace(/"(?:\\.|[^"\\])*"/g, " ")
+    .replace(/\((?:\\.|[^()\\])*\)/g, " ");
+  const out = [];
+  for (const part of cleaned.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const angles = trimmed.match(/<([^<>]+)>/g);
+    let candidate;
+    if (angles) {
+      if (angles.length !== 1) return null;
+      candidate = angles[0].slice(1, -1).trim();
+    } else {
+      candidate = trimmed;
+    }
+    const lower = candidate.toLowerCase();
+    if (!/^[^\s@<>()]+@[^\s@<>()]+\.[^\s@<>()]+$/.test(lower)) {
+      return null;
+    }
+    out.push(lower);
+  }
+  return out.length > 0 ? out : null;
+}
+
 export default {
   async email(message, env) {
     // Only trust the first Authentication-Results header prepended by Cloudflare.
@@ -77,25 +102,30 @@ export default {
       .split(",")
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
-    const sender = message.from.trim().toLowerCase();
+    const senders = extractAddresses(message.headers.get("from") || "");
     const ok =
-      allowed.length === 0 ||
-      allowed.some((rule) =>
-        rule.startsWith("@")
-          ? sender.endsWith(rule) && sender.length > rule.length
-          : sender === rule,
-      );
+      senders !== null &&
+      (allowed.length === 0 ||
+        senders.every((sender) =>
+          allowed.some((rule) =>
+            rule.startsWith("@")
+              ? sender.endsWith(rule) && sender.length > rule.length
+              : sender === rule,
+          ),
+        ));
     if (!ok) {
       message.setReject("Sender is not allowed");
       return;
     }
 
+    // Relays and "Send mail as" aliases rewrite envelope MAIL FROM to a
+    // per-message VERP address, so omit X-Envelope-From once DMARC passes and
+    // let paperjam validate the authenticated From: header as well.
     const response = await fetch(`${env.PAPERJAM_URL.replace(/\/+$/, "")}/api/v1/ingest/email`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.EMAIL_SECRET}`,
         "Content-Type": "message/rfc822",
-        "X-Envelope-From": message.from,
       },
       body: message.raw,
     });
@@ -171,7 +201,7 @@ When `X-Envelope-From` is omitted, paperjam validates `PAPERJAM_EMAIL_ALLOWED_SE
 ## Troubleshooting
 
 - **`401 invalid_email_secret`.** `EMAIL_SECRET` in the Worker does not match `PAPERJAM_EMAIL_SECRET` in `.env`, or the `Authorization: Bearer …` header is missing.
-- **`403 sender_not_allowed`.** Check `PAPERJAM_EMAIL_ALLOWED_SENDERS` against the `X-Envelope-From` address (for auto-forwarded mail, some providers rewrite the envelope sender to a VERP bounce address; pass the original `From` or use an explicit forwarding rule in your mailbox rather than server-level silent redirects if needed).
+- **`403 sender_not_allowed`.** Check `PAPERJAM_EMAIL_ALLOWED_SENDERS` against `X-Envelope-From` (when supplied) or every address in `From:`. Transactional relays (SES, Resend) and "Send mail as" aliases rewrite envelope `MAIL FROM` to a VERP bounce address, so omit `X-Envelope-From` after DMARC passes and match the authenticated `From:` header instead.
 - **`413 file_too_large`.** The message exceeds `PAPERJAM_MAX_UPLOAD_BYTES` (or Cloudflare's 25 MiB limit, or a reverse proxy's `client_max_body_size` — nginx defaults to 1 MB).
 - **`422 invalid_email`.** The body is empty or not a valid RFC 5322 email (for example, raw PDF bytes sent instead of a `.eml` message).
 - **`503 email_not_configured` / `email_user_unconfigured`.** Either `PAPERJAM_EMAIL_SECRET` is unset, or there are multiple active users and `PAPERJAM_EMAIL_USER` is unset or disabled.
