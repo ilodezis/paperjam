@@ -58,18 +58,46 @@ fn pdf_of(size: usize, tag: &str) -> Vec<u8> {
 
 // --- 1. what an anonymous caller may cost ---------------------------------------------
 
+fn is_early_close(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            )
+        {
+            return true;
+        }
+        current = e.source();
+    }
+    false
+}
+
 #[tokio::test]
 async fn a_login_body_over_the_default_limit_is_refused() {
     let (_env, server) = start();
     // A 5 MB username, as the audit probe sent (scaled down).
     let body = json!({"username": "a".repeat(5 * 1024 * 1024), "password": "x"}).to_string();
-    let response = Client::new()
-        .post(server.url("/api/v1/auth/login"))
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
+    let send_login = |payload: String| {
+        Client::new()
+            .post(server.url("/api/v1/auth/login"))
+            .header("content-type", "application/json")
+            .body(payload)
+            .send()
+    };
+    let response = match send_login(body).await {
+        Ok(resp) => resp,
+        Err(err) if is_early_close(&err) => {
+            // The server may close the socket after sending 413 before the
+            // client finishes writing 5 MB; still verify the 413 JSON body.
+            let smaller = json!({"username": "a".repeat(200 * 1024), "password": "x"}).to_string();
+            send_login(smaller).await.unwrap()
+        }
+        Err(err) => panic!("unexpected login request error: {err}"),
+    };
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let error: Value = response.json().await.unwrap();
     assert_eq!(error["code"], "payload_too_large");
