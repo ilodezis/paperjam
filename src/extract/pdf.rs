@@ -24,6 +24,21 @@ pub const MAX_PAGES: u32 = 300;
 const MAX_EDGE_PIXELS: f32 = 16_000.0;
 const MAX_TOTAL_PIXELS: f32 = 100_000_000.0;
 const POINTS_PER_INCH: f32 = 72.0;
+/// Lower bound when capping OCR render resolution to a scan's native density.
+pub const MIN_OCR_DPI: u32 = 150;
+
+/// DPI to render a scanned page at: capped to the scan's own pixel density
+/// when known, never below [`MIN_OCR_DPI`] (if `ocr_dpi` allows it) and never
+/// above `ocr_dpi`.
+pub fn effective_ocr_dpi(ocr_dpi: u32, density_px_per_pt: Option<f32>) -> u32 {
+    match density_px_per_pt {
+        Some(density) if density.is_finite() && density > 0.0 => {
+            let native = (density * POINTS_PER_INCH).ceil() as u32;
+            native.clamp(MIN_OCR_DPI.min(ocr_dpi), ocr_dpi)
+        }
+        _ => ocr_dpi,
+    }
+}
 
 fn encrypted() -> ServiceError {
     ServiceError::invalid("pdf_encrypted", "the PDF is password protected")
@@ -143,15 +158,17 @@ impl OxideText {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HayroRenderer;
 
-struct HayroPages {
+/// A PDF opened with `hayro` that allows callers to pass their own
+/// thread-local `RenderCache` across pages.
+pub struct HayroPdf {
     pdf: Pdf,
     pages: u32,
 }
 
-impl PageRenderer for HayroRenderer {
-    fn open(&self, pdf: &[u8]) -> Result<Box<dyn PdfPages>> {
+impl HayroPdf {
+    pub fn open(bytes: Arc<Vec<u8>>) -> Result<Self> {
         guarded(|| {
-            let pdf = Pdf::new(Arc::new(pdf.to_vec())).map_err(|e| match e {
+            let pdf = Pdf::new(bytes).map_err(|e| match e {
                 LoadPdfError::Decryption(_) => encrypted(),
                 LoadPdfError::Invalid => corrupt(),
             })?;
@@ -159,55 +176,83 @@ impl PageRenderer for HayroRenderer {
             if pages > MAX_PAGES {
                 return Err(too_many_pages(pages));
             }
-            Ok(Box::new(HayroPages { pdf, pages }) as Box<dyn PdfPages>)
+            Ok(Self { pdf, pages })
         })
+    }
+
+    pub fn page_count(&self) -> u32 {
+        self.pages
+    }
+
+    pub fn render_with_cache<'a>(
+        &'a self,
+        page: u32,
+        dpi: u32,
+        cache: &RenderCache<'a>,
+    ) -> Result<RgbImage> {
+        if page == 0 || page > self.pages {
+            return Err(page_out_of_range(page, self.pages));
+        }
+        render_page(&self.pdf, cache, page, dpi)
+    }
+}
+
+struct HayroPages {
+    pdf: HayroPdf,
+}
+
+impl PageRenderer for HayroRenderer {
+    fn open(&self, pdf: &[u8]) -> Result<Box<dyn PdfPages>> {
+        let pdf = HayroPdf::open(Arc::new(pdf.to_vec()))?;
+        Ok(Box::new(HayroPages { pdf }) as Box<dyn PdfPages>)
     }
 }
 
 impl PdfPages for HayroPages {
     fn page_count(&self) -> u32 {
-        self.pages
+        self.pdf.page_count()
     }
 
     fn render(&self, page: u32, dpi: u32) -> Result<RgbImage> {
-        if page == 0 || page > self.pages {
-            return Err(page_out_of_range(page, self.pages));
-        }
-        guarded(|| {
-            let page = &self.pdf.pages()[page as usize - 1];
-            let (width, height) = page.render_dimensions();
-            let mut scale = dpi.max(1) as f32 / POINTS_PER_INCH;
-            let longest = width.max(height) * scale;
-            if longest > MAX_EDGE_PIXELS {
-                scale *= MAX_EDGE_PIXELS / longest;
-            }
-            let total = width * height * scale * scale;
-            if total > MAX_TOTAL_PIXELS {
-                scale *= (MAX_TOTAL_PIXELS / total).sqrt();
-            }
-            let pixmap = render(
-                page,
-                &RenderCache::new(),
-                &InterpreterSettings::default(),
-                &RenderSettings::default(),
-                &PixmapSettings {
-                    x_scale: scale,
-                    y_scale: scale,
-                    bg_color: WHITE,
-                },
-            );
-            let (w, h) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
-            // Premultiplied RGBA on an opaque white background: drop alpha.
-            let rgb: Vec<u8> = pixmap
-                .data_as_u8_slice()
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|px| [px[0], px[1], px[2]])
-                .collect();
-            RgbImage::from_raw(w, h, rgb).ok_or_else(corrupt)
-        })
+        let cache = RenderCache::new();
+        self.pdf.render_with_cache(page, dpi, &cache)
     }
+}
+
+fn render_page<'a>(pdf: &'a Pdf, cache: &RenderCache<'a>, page: u32, dpi: u32) -> Result<RgbImage> {
+    guarded(|| {
+        let page = &pdf.pages()[page as usize - 1];
+        let (width, height) = page.render_dimensions();
+        let mut scale = dpi.max(1) as f32 / POINTS_PER_INCH;
+        let longest = width.max(height) * scale;
+        if longest > MAX_EDGE_PIXELS {
+            scale *= MAX_EDGE_PIXELS / longest;
+        }
+        let total = width * height * scale * scale;
+        if total > MAX_TOTAL_PIXELS {
+            scale *= (MAX_TOTAL_PIXELS / total).sqrt();
+        }
+        let pixmap = render(
+            page,
+            cache,
+            &InterpreterSettings::default(),
+            &RenderSettings::default(),
+            &PixmapSettings {
+                x_scale: scale,
+                y_scale: scale,
+                bg_color: WHITE,
+            },
+        );
+        let (w, h) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
+        // Premultiplied RGBA on an opaque white background: drop alpha.
+        let src = pixmap.data_as_u8_slice();
+        let pixels = (src.len() / 4) * 3;
+        let mut rgb = Vec::with_capacity(pixels);
+        for px in src.as_chunks::<4>().0 {
+            rgb.extend_from_slice(&[px[0], px[1], px[2]]);
+        }
+        RgbImage::from_raw(w, h, rgb).ok_or_else(corrupt)
+    })
 }
 
 #[cfg(test)]
@@ -416,5 +461,17 @@ mod tests {
             HayroRenderer.open(&over).err().unwrap().code,
             "too_many_pages"
         );
+    }
+
+    #[test]
+    fn effective_ocr_dpi_caps_to_native_density_with_floor() {
+        assert_eq!(effective_ocr_dpi(300, None), 300);
+        assert_eq!(effective_ocr_dpi(300, Some(0.0)), 300);
+        assert_eq!(effective_ocr_dpi(300, Some(f32::NAN)), 300);
+        assert_eq!(effective_ocr_dpi(300, Some(150.0 / 72.0)), 150);
+        assert_eq!(effective_ocr_dpi(300, Some(100.0 / 72.0)), 150);
+        assert_eq!(effective_ocr_dpi(300, Some(220.0 / 72.0)), 220);
+        assert_eq!(effective_ocr_dpi(300, Some(600.0 / 72.0)), 300);
+        assert_eq!(effective_ocr_dpi(110, Some(72.0 / 72.0)), 110);
     }
 }

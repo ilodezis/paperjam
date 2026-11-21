@@ -175,6 +175,27 @@ pub fn rgb_image(width: u32, height: u32, bytes: &[u8]) -> Option<::image::RgbIm
     ::image::RgbImage::from_raw(width, height, bytes.to_vec())
 }
 
+/// Reuses an owned frame payload as an RGB8 image without copying into a
+/// second heap buffer.
+pub fn into_rgb_image(
+    width: u32,
+    height: u32,
+    mut payload: Vec<u8>,
+    offset: usize,
+) -> Option<::image::RgbImage> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(3)?;
+    if width == 0 || height == 0 || payload.len().checked_sub(offset) != Some(expected) {
+        return None;
+    }
+    if offset > 0 {
+        payload.copy_within(offset.., 0);
+        payload.truncate(expected);
+    }
+    ::image::RgbImage::from_raw(width, height, payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +232,12 @@ mod tests {
         assert!(rgb_image(2, 2, &[0; 11]).is_none());
         assert!(rgb_image(0, 2, &[]).is_none());
         assert!(rgb_image(u32::MAX, u32::MAX, &[0; 12]).is_none());
+
+        let mut framed = vec![0xAA; 20];
+        framed.extend_from_slice(&[42; 12]);
+        let img = into_rgb_image(2, 2, framed, 20).unwrap();
+        assert_eq!(img.as_raw(), &[42; 12]);
+        assert!(into_rgb_image(2, 2, vec![0; 10], 20).is_none());
     }
 
     #[test]

@@ -5,11 +5,10 @@
 //! is killed when the timeout expires.
 
 use std::ffi::OsString;
-use std::io::Cursor;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use ::image::{DynamicImage, ImageFormat};
+use ::image::DynamicImage;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -22,11 +21,11 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone)]
 pub struct OcrPage {
     pub text: String,
-    /// Tesseract's TSV output (word boxes and confidences), zstd-compressed.
-    pub tsv: Vec<u8>,
     /// Mean word confidence in `0..=100` (Tesseract's own scale); `0` when no
     /// word was recognised.
     pub mean_conf: f32,
+    pub reading: Reading,
+    pub mrz_region: Option<(u32, u32, u32, u32)>,
 }
 
 /// Words read with at least this confidence count as legible.
@@ -36,15 +35,12 @@ impl OcrPage {
     /// How much of the page was read upright with confidence: see
     /// [`Reading::legible`].
     pub fn legible_chars(&self) -> usize {
-        self.reading().legible
+        self.reading.legible
     }
 
     /// What the page's words say about how it is turned.
-    pub fn reading(&self) -> Reading {
-        let Ok(tsv) = zstd::decode_all(self.tsv.as_slice()) else {
-            return Reading::default();
-        };
-        reading_of(&String::from_utf8_lossy(&tsv))
+    pub fn reading(&self) -> &Reading {
+        &self.reading
     }
 }
 
@@ -67,48 +63,21 @@ pub struct Reading {
     pub flat_text: String,
 }
 
-/// [`Reading`] of a TSV report.
-fn reading_of(tsv: &str) -> Reading {
-    let mut reading = Reading::default();
-    let mut line: Option<(&str, &str, &str)> = None;
-    for row in tsv.lines().skip(1) {
-        let cols: Vec<&str> = row.splitn(12, '\t').collect();
-        if cols.len() < 12 || cols[0] != "5" {
-            continue;
-        }
-        let text = cols[11].trim();
-        let (Ok(width), Ok(height), Ok(confidence)) = (
-            cols[8].parse::<u32>(),
-            cols[9].parse::<u32>(),
-            cols[10].parse::<f64>(),
-        ) else {
-            continue;
-        };
-        let chars = text.chars().count();
-        if chars == 0 {
-            continue;
-        }
-        let flat = chars < 2 || width >= height;
-        if chars >= 2 {
-            reading.words += 1;
-            reading.standing += usize::from(!flat);
-        }
-        if !flat {
-            continue;
-        }
-        if confidence >= LEGIBLE_CONFIDENCE {
-            reading.legible += chars;
-        }
-        let here = (cols[2], cols[3], cols[4]);
-        match line {
-            None => {}
-            Some(previous) if previous == here => reading.flat_text.push(' '),
-            Some(_) => reading.flat_text.push('\n'),
-        }
-        line = Some(here);
-        reading.flat_text.push_str(text);
+/// Parses up to `N` tab-separated fields from a single TSV line into a stack array.
+fn split_tsv_cols(row: &str) -> ([&str; 12], usize) {
+    let mut cols = [""; 12];
+    let mut n = 0;
+    for part in row.splitn(12, '\t') {
+        cols[n] = part;
+        n += 1;
     }
-    reading
+    (cols, n)
+}
+
+/// [`Reading`] of a TSV report.
+#[cfg_attr(not(test), allow(dead_code))]
+fn reading_of(tsv: &str) -> Reading {
+    parse_tsv_page(tsv).reading
 }
 
 #[derive(Debug, Clone)]
@@ -163,14 +132,7 @@ impl Tesseract {
             .run(&["--psm", psm, "-l", &self.langs, "tsv"], img)
             .await?;
         let tsv = String::from_utf8_lossy(&stdout);
-        let (text, mean_conf) = parse_tsv(&tsv);
-        let tsv = zstd::encode_all(tsv.as_bytes(), 6)
-            .map_err(|_| ServiceError::internal("ocr_failed", "could not compress OCR data"))?;
-        Ok(OcrPage {
-            text,
-            tsv,
-            mean_conf,
-        })
+        Ok(parse_tsv_page(&tsv))
     }
 
     /// Orientation of the page in degrees: `0`, `90`, `180` or `270`
@@ -209,12 +171,10 @@ impl Tesseract {
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
-    /// Runs `tesseract stdin stdout <args>` with `img` as PNG on stdin.
+    /// Runs `tesseract stdin stdout <args>` with `img` as raw binary PNM on stdin.
     async fn run(&self, args: &[&str], img: &DynamicImage) -> Result<Vec<u8>> {
         let started = Instant::now();
-        let mut png = Vec::new();
-        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
-            .map_err(|_| ServiceError::internal("ocr_failed", "could not encode the page"))?;
+        let pnm = encode_pnm(img);
         let encoded = started.elapsed();
 
         let mut child = Command::new(&self.binary)
@@ -236,7 +196,7 @@ impl Tesseract {
         let feed = async move {
             // Tesseract may exit before reading everything (e.g. on a bad
             // language); that surfaces through its exit status, not here.
-            let _ = stdin.write_all(&png).await;
+            let _ = stdin.write_all(&pnm).await;
             let _ = stdin.shutdown().await;
         };
 
@@ -321,81 +281,149 @@ const MRZ_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<";
 /// A line with at least this many `<` is taken for MRZ filler.
 const MIN_FILLER: usize = 8;
 
-/// Where a machine-readable zone probably is in the page that produced
-/// `tsv`: `(left, top, width, height)` from just above the first line with a
-/// lot of `<` filler down to the bottom of the page (the zone is the last
-/// thing on a passport page or ID card).
-pub fn mrz_region(tsv: &str) -> Option<(u32, u32, u32, u32)> {
-    let mut page: Option<(u32, u32)> = None;
-    // (top, height, filler count) per line, in reading order.
-    let mut lines: Vec<(u32, u32, usize)> = Vec::new();
-    let mut current: Option<(&str, &str, &str)> = None;
+fn encode_pnm_raw(magic: &str, w: u32, h: u32, pixels: &[u8]) -> Vec<u8> {
+    let header = format!("{magic}\n{w} {h}\n255\n");
+    let mut out = Vec::with_capacity(header.len() + pixels.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(pixels);
+    out
+}
+
+/// Encodes `img` as uncompressed binary PGM (`P5`) for grayscale or PPM (`P6`)
+/// for colour, skipping PNG compression overhead when piping to Tesseract.
+fn encode_pnm(img: &DynamicImage) -> Vec<u8> {
+    match img {
+        DynamicImage::ImageLuma8(gray) => {
+            encode_pnm_raw("P5", gray.width(), gray.height(), gray.as_raw())
+        }
+        DynamicImage::ImageRgb8(rgb) => {
+            encode_pnm_raw("P6", rgb.width(), rgb.height(), rgb.as_raw())
+        }
+        other => {
+            let rgb = other.to_rgb8();
+            encode_pnm_raw("P6", rgb.width(), rgb.height(), rgb.as_raw())
+        }
+    }
+}
+
+/// Parses plain text, mean confidence, reading orientation stats, and any MRZ
+/// region from Tesseract TSV in a single pass.
+pub fn parse_tsv_page(tsv: &str) -> OcrPage {
+    const WORD_LEVEL: &str = "5";
+    let mut text = String::new();
+    let mut text_prev: Option<(&str, &str, &str)> = None;
+    let (mut conf_sum, mut conf_words) = (0.0_f64, 0_u32);
+    let mut reading = Reading::default();
+    let mut reading_line: Option<(&str, &str, &str)> = None;
+    let mut page_size: Option<(u32, u32)> = None;
+    let mut mrz_lines: Vec<(u32, u32, usize)> = Vec::new();
+    let mut current_mrz_line: Option<(&str, &str, &str)> = None;
+
     for row in tsv.lines().skip(1) {
-        let cols: Vec<&str> = row.splitn(12, '\t').collect();
-        if cols.len() < 11 {
+        let (cols, len) = split_tsv_cols(row);
+        if len < 11 {
             continue;
         }
-        let number = |i: usize| cols[i].parse::<u32>().ok();
         match cols[0] {
-            "1" => page = number(8).zip(number(9)),
-            "4" => {
-                current = Some((cols[2], cols[3], cols[4]));
-                if let (Some(top), Some(height)) = (number(7), number(9)) {
-                    lines.push((top, height, 0));
+            "1" => {
+                if let (Ok(w), Ok(h)) = (cols[8].parse::<u32>(), cols[9].parse::<u32>()) {
+                    page_size = Some((w, h));
                 }
             }
-            "5" if cols.len() == 12 && current == Some((cols[2], cols[3], cols[4])) => {
-                if let Some(line) = lines.last_mut() {
+            "4" => {
+                current_mrz_line = Some((cols[2], cols[3], cols[4]));
+                if let (Ok(top), Ok(height)) = (cols[7].parse::<u32>(), cols[9].parse::<u32>()) {
+                    mrz_lines.push((top, height, 0));
+                }
+            }
+            WORD_LEVEL if len == 12 => {
+                if current_mrz_line == Some((cols[2], cols[3], cols[4]))
+                    && let Some(line) = mrz_lines.last_mut()
+                {
                     line.2 += cols[11].matches('<').count();
+                }
+                let word = cols[11].trim();
+                if word.is_empty() {
+                    continue;
+                }
+                let (block, par, line) = (cols[2], cols[3], cols[4]);
+                match text_prev {
+                    None => {}
+                    Some((b, p, _)) if (b, p) != (block, par) => text.push_str("\n\n"),
+                    Some((_, _, l)) if l != line => text.push('\n'),
+                    Some(_) => text.push(' '),
+                }
+                text_prev = Some((block, par, line));
+                text.push_str(word);
+
+                let confidence = cols[10].parse::<f64>().ok();
+                if let Some(conf) = confidence
+                    && conf >= 0.0
+                {
+                    conf_sum += conf;
+                    conf_words += 1;
+                }
+
+                if let (Ok(width), Ok(height), Some(conf)) =
+                    (cols[8].parse::<u32>(), cols[9].parse::<u32>(), confidence)
+                {
+                    let chars = word.chars().count();
+                    let flat = chars < 2 || width >= height;
+                    if chars >= 2 {
+                        reading.words += 1;
+                        reading.standing += usize::from(!flat);
+                    }
+                    if flat {
+                        if conf >= LEGIBLE_CONFIDENCE {
+                            reading.legible += chars;
+                        }
+                        let here = (block, par, line);
+                        match reading_line {
+                            None => {}
+                            Some(previous) if previous == here => reading.flat_text.push(' '),
+                            Some(_) => reading.flat_text.push('\n'),
+                        }
+                        reading_line = Some(here);
+                        reading.flat_text.push_str(word);
+                    }
                 }
             }
             _ => {}
         }
     }
-    let (width, height) = page?;
-    let &(top, line_height, _) = lines.iter().find(|l| l.2 >= MIN_FILLER)?;
-    // The line above the first filler-heavy one belongs to the zone too: the
-    // first line of a three-line ID card zone has hardly any filler.
-    let top = top
-        .saturating_sub(line_height * 3 / 2)
-        .min(height.saturating_sub(1));
-    Some((0, top, width, height - top))
+
+    let mean_conf = if conf_words == 0 {
+        0.0
+    } else {
+        (conf_sum / f64::from(conf_words)) as f32
+    };
+    let mrz_region = page_size.and_then(|(width, height)| {
+        let &(top, line_height, _) = mrz_lines.iter().find(|l| l.2 >= MIN_FILLER)?;
+        let top = top
+            .saturating_sub(line_height * 3 / 2)
+            .min(height.saturating_sub(1));
+        Some((0, top, width, height - top))
+    });
+    OcrPage {
+        text,
+        mean_conf,
+        reading,
+        mrz_region,
+    }
+}
+
+/// Where a machine-readable zone probably is in the page that produced
+/// `tsv`: `(left, top, width, height)` from just above the first line with a
+/// lot of `<` filler down to the bottom of the page (the zone is the last
+/// thing on a passport page or ID card).
+pub fn mrz_region(tsv: &str) -> Option<(u32, u32, u32, u32)> {
+    parse_tsv_page(tsv).mrz_region
 }
 
 /// Extracts plain text and the mean word confidence from Tesseract TSV.
 pub fn parse_tsv(tsv: &str) -> (String, f32) {
-    const WORD_LEVEL: &str = "5";
-    let mut text = String::new();
-    let mut previous: Option<(&str, &str, &str)> = None;
-    let (mut conf_sum, mut words) = (0.0_f64, 0_u32);
-
-    for row in tsv.lines().skip(1) {
-        let cols: Vec<&str> = row.splitn(12, '\t').collect();
-        if cols.len() < 12 || cols[0] != WORD_LEVEL || cols[11].trim().is_empty() {
-            continue;
-        }
-        let (block, par, line) = (cols[2], cols[3], cols[4]);
-        match previous {
-            None => {}
-            Some((b, p, _)) if (b, p) != (block, par) => text.push_str("\n\n"),
-            Some((_, _, l)) if l != line => text.push('\n'),
-            Some(_) => text.push(' '),
-        }
-        previous = Some((block, par, line));
-        text.push_str(cols[11].trim());
-        if let Ok(conf) = cols[10].parse::<f64>()
-            && conf >= 0.0
-        {
-            conf_sum += conf;
-            words += 1;
-        }
-    }
-    let mean = if words == 0 {
-        0.0
-    } else {
-        (conf_sum / f64::from(words)) as f32
-    };
-    (text, mean)
+    let parsed = parse_tsv_page(tsv);
+    (parsed.text, parsed.mean_conf)
 }
 
 #[cfg(test)]
@@ -513,8 +541,7 @@ mod tests {
         let page = Tesseract::new("rus+eng").ocr(&scan()).await.unwrap();
         assert!(page.text.contains("Паспорт"), "got: {}", page.text);
         assert!(page.mean_conf > 60.0, "conf {}", page.mean_conf);
-        let tsv = zstd::decode_all(page.tsv.as_slice()).unwrap();
-        assert!(String::from_utf8(tsv).unwrap().starts_with("level\t"));
+        assert!(page.reading.legible > 0 && page.reading.words > 0);
     }
 
     #[tokio::test]

@@ -116,7 +116,7 @@ pub async fn commit(
     app: &App,
     id: DocumentId,
     info: &DocInfo,
-    output: Option<LocalOutput>,
+    mut output: Option<LocalOutput>,
     opts: &ProcessOptions,
     finish: bool,
     llm_follows: bool,
@@ -124,9 +124,11 @@ pub async fn commit(
     if output.is_none() && !finish {
         return Ok(());
     }
-    if let Some(output) = &output {
-        write_derived_files(app, id, output).await?;
-    }
+    let clean_size = if let Some(output) = &mut output {
+        write_derived_files(app, id, output).await?
+    } else {
+        None
+    };
 
     let mut tx = app.db.write.begin().await?;
     if let Some(output) = &output {
@@ -135,7 +137,7 @@ pub async fn commit(
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        store_local(&mut tx, id, info, output).await?;
+        store_local(&mut tx, id, info, output, clean_size).await?;
     }
     // The holder of an identity document is linked to the person of that
     // name when nobody else is; a new person is created only at the end of
@@ -179,14 +181,18 @@ pub async fn commit(
     Ok(())
 }
 
-async fn write_derived_files(app: &App, id: DocumentId, output: &LocalOutput) -> Result<()> {
+async fn write_derived_files(
+    app: &App,
+    id: DocumentId,
+    output: &mut LocalOutput,
+) -> Result<Option<i64>> {
     let storage = |_: std::io::Error| {
         ServiceError::internal("storage_error", "could not write the page renders")
     };
     app.files.delete_derived(id).await;
     let dir = app.files.derived_path(id, "_");
-    let dir = dir.parent().unwrap_or(Path::new("."));
-    tokio::fs::create_dir_all(dir).await.map_err(storage)?;
+    let dir = dir.parent().unwrap_or(Path::new(".")).to_path_buf();
+    tokio::fs::create_dir_all(&dir).await.map_err(storage)?;
     if let Some(thumbnail) = &output.thumbnail {
         tokio::fs::write(app.files.derived_path(id, "thumbnail.webp"), thumbnail)
             .await
@@ -204,12 +210,29 @@ async fn write_derived_files(app: &App, id: DocumentId, output: &LocalOutput) ->
                 .map_err(storage)?;
         }
     }
-    if let Some(clean) = &output.clean {
-        tokio::fs::write(app.files.derived_path(id, documents::CLEAN_COPY), clean)
+    let clean_size = if let Some(clean_pages) = output.clean.take() {
+        let final_path = app.files.derived_path(id, documents::CLEAN_COPY);
+        let tmp_path = final_path.with_extension("pdf.tmp");
+        let tmp = tmp_path.clone();
+        let written = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
+            use std::io::Write;
+            let file = std::fs::File::create(&tmp)?;
+            let mut buf = std::io::BufWriter::with_capacity(64 * 1024, file);
+            let written = crate::extract::clean::write_pdf(&clean_pages, &mut buf)?;
+            buf.flush()?;
+            Ok(written)
+        })
+        .await
+        .map_err(|e| storage(std::io::Error::other(e)))?
+        .map_err(storage)?;
+        tokio::fs::rename(&tmp_path, &final_path)
             .await
             .map_err(storage)?;
-    }
-    Ok(())
+        Some(i64::try_from(written).unwrap_or(i64::MAX))
+    } else {
+        None
+    };
+    Ok(clean_size)
 }
 
 fn render_key(n: u32) -> String {
@@ -226,11 +249,12 @@ async fn store_local(
     id: DocumentId,
     info: &DocInfo,
     output: &LocalOutput,
+    clean_size: Option<i64>,
 ) -> Result<()> {
     let now = time::now_ts();
     store_pages(tx, id, output, &now).await?;
     sqlx::query("UPDATE files SET clean_size = ? WHERE document_id = ?")
-        .bind(output.clean.as_ref().map(|c| c.len() as i64))
+        .bind(clean_size)
         .bind(id)
         .execute(&mut *tx)
         .await?;
@@ -302,7 +326,7 @@ async fn store_pages(
                 page.n,
                 "tesseract",
                 &ocr.text,
-                Some(&ocr.tsv),
+                None,
                 f64::from(ocr.mean_conf / 100.0),
                 now,
             )
@@ -652,8 +676,9 @@ mod tests {
             mrz_text: None,
             ocr: Some(crate::extract::tesseract::OcrPage {
                 text: "ocr text".into(),
-                tsv: Vec::new(),
                 mean_conf: 90.0,
+                reading: Default::default(),
+                mrz_region: None,
             }),
             render: None,
             clean: None,

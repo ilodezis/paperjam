@@ -313,7 +313,7 @@ async fn the_worker_reads_pdfs_exactly_as_this_process_does() {
             let n = i as u32 + 1;
             let embedded = page.text.clone().map(|text| (text, page.score));
             let dpi = if quality::needs_ocr(&embedded) {
-                OCR_DPI
+                paperjam::extract::pdf::effective_ocr_dpi(OCR_DPI, page.density)
             } else {
                 PREVIEW_DPI
             };

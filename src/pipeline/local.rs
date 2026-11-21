@@ -13,9 +13,10 @@ use tokio::task::JoinError;
 use crate::error::{Result, ServiceError};
 use crate::extract::clean;
 use crate::extract::image::{self as images, Webp, fit};
+use crate::extract::pdf::effective_ocr_dpi;
 use crate::extract::preprocess::{self, Straightening};
 use crate::extract::quality;
-use crate::extract::tesseract::{OcrPage, Reading, Tesseract, mrz_region};
+use crate::extract::tesseract::{OcrPage, Reading, Tesseract};
 use crate::extract::worker::Isolation;
 use crate::service::App;
 
@@ -65,11 +66,12 @@ pub struct PageOut {
     pub mrz_text: Option<String>,
     /// WebP bytes of the cached page render.
     pub render: Option<Vec<u8>>,
-    /// The page as it goes into the clean copy, and whether cleaning changed
-    /// it (turned, cut out or straightened). Only pages that were read have one.
-    pub clean: Option<(clean::Page, bool)>,
-    /// The clean page as a cached render (and thumbnail, for page 1). It
-    /// replaces `render` once the clean copy is bound.
+    /// The page as it goes into the clean copy, whether cleaning changed it,
+    /// and whether straightening altered the visual geometry relative to `render`.
+    /// Only pages of documents building a clean copy have one.
+    pub clean: Option<(clean::Page, bool, bool)>,
+    /// The clean page as a cached render (and thumbnail, for page 1), present
+    /// only when straightening altered the visual geometry relative to `render`.
     pub(crate) clean_render: Option<CleanRender>,
     /// WebP bytes of the page as it was read (upright, not straightened),
     /// kept only when the clean copy took over `render`.
@@ -86,9 +88,9 @@ pub struct LocalOutput {
     pub pages: Vec<PageOut>,
     /// WebP thumbnail of the first page.
     pub thumbnail: Option<Vec<u8>>,
-    /// The clean copy of a scan as a PDF (see [`clean`]): built for images,
-    /// and for PDFs whose pages were all read and at least one changed.
-    pub clean: Option<Vec<u8>>,
+    /// Clean copy pages to stream as `clean.pdf`: built for images, and for
+    /// PDFs whose pages were all read and at least one changed meaningfully.
+    pub clean: Option<Vec<clean::Page>>,
 }
 
 /// Long edge of an A4 sheet in PDF points: an image's page is given this size.
@@ -97,14 +99,14 @@ const A4_LONG_PT: f32 = 842.0;
 /// The clean copy of `pages`, when every page has its clean page and, unless
 /// `always`, cleaning changed at least one of them.
 ///
-/// Once there is a clean copy, the pages are shown the way it shows them: each
-/// page's cached render (and the thumbnail) becomes the clean page, and the
-/// render of the page as read is kept as `original`.
+/// Once there is a clean copy, any page whose straightening changed its geometry
+/// replaces `render` (and `thumbnail` for page 1) with the clean render and
+/// keeps the as-read render as `original`.
 fn bind_clean_copy(pages: &mut [PageOut], always: bool) -> Option<BoundCopy> {
     let complete = !pages.is_empty() && pages.iter().all(|p| p.clean.is_some());
     let changed = pages
         .iter()
-        .any(|p| p.clean.as_ref().is_some_and(|(_, c)| *c));
+        .any(|p| p.clean.as_ref().is_some_and(|(_, c, _)| *c));
     let bound = complete && (always || changed);
     let mut taken = Vec::new();
     let mut thumbnail = None;
@@ -114,8 +116,12 @@ fn bind_clean_copy(pages: &mut [PageOut], always: bool) -> Option<BoundCopy> {
         if !bound {
             continue;
         }
-        taken.extend(clean.map(|(page, _)| page));
-        if let Some(render) = render {
+        let mut visual_changed = false;
+        if let Some((clean_page, _, visual)) = clean {
+            taken.push(clean_page);
+            visual_changed = visual;
+        }
+        if visual_changed && let Some(render) = render {
             page.original = page.render.take();
             page.size = Some((render.webp.width, render.webp.height));
             page.render = Some(render.webp.bytes);
@@ -124,22 +130,22 @@ fn bind_clean_copy(pages: &mut [PageOut], always: bool) -> Option<BoundCopy> {
             }
         }
     }
-    bound.then(|| BoundCopy {
-        pdf: clean::pdf(&taken),
+    bound.then_some(BoundCopy {
+        pages: taken,
         thumbnail,
     })
 }
 
-/// The clean copy as a PDF, and the thumbnail made from its first page.
+/// The clean copy's encoded pages, and the thumbnail made from its first page.
 struct BoundCopy {
-    pdf: Vec<u8>,
+    pages: Vec<clean::Page>,
     pub(crate) thumbnail: Option<Vec<u8>>,
 }
 
-/// Files the clean copy into `out`: its PDF, and the thumbnail it brings.
+/// Files the clean copy into `out`: its pages, and any replacement thumbnail.
 fn take_clean_copy(out: &mut LocalOutput, bound: Option<BoundCopy>) {
     if let Some(bound) = bound {
-        out.clean = Some(bound.pdf);
+        out.clean = Some(bound.pages);
         if bound.thumbnail.is_some() {
             out.thumbnail = bound.thumbnail;
         }
@@ -284,7 +290,7 @@ async fn image(
     // The sheet an image shows is taken to be A4.
     let pt_per_px = A4_LONG_PT / decoded.width().max(decoded.height()).max(1) as f32;
     // An image is its own source: its pixels are already the native ones.
-    let read = ocr_page(tesseract, decoded, true, pt_per_px, None).await?;
+    let read = ocr_page(tesseract, decoded, true, pt_per_px, None, true).await?;
     let mut times = read.times;
     times.render = decoding;
     let encoding = Instant::now();
@@ -299,8 +305,8 @@ async fn image(
         ocr: Some(read.page),
         mrz_text: read.mrz_text,
         render: Some(encoded.render.bytes),
-        clean: Some(encoded.clean),
-        clean_render: Some(encoded.clean_render),
+        clean: encoded.clean,
+        clean_render: encoded.clean_render,
         original: None,
     }];
     // An image always gets its clean copy: a scan is wanted as a PDF.
@@ -334,6 +340,7 @@ async fn pdf(
         .unzip();
     let receiver = run.pages;
     let needs_ocr: Vec<bool> = embedded.iter().map(quality::needs_ocr).collect();
+    let all_need_ocr = !needs_ocr.is_empty() && needs_ocr.iter().all(|&b| b);
 
     // Renders are taken in page order; up to `in_flight` pages are read
     // at once, and the results come back in page order.
@@ -364,15 +371,22 @@ async fn pdf(
             ))
         },
     );
-    let read =
-        inputs
-            .map(|(n, embedded, needs_ocr, native, (rendered, took))| {
-                let tesseract = tesseract.clone();
-                async move {
-                    pdf_page(&tesseract, n, (embedded, needs_ocr, native), rendered, took).await
-                }
-            })
-            .buffered(in_flight);
+    let read = inputs
+        .map(|(n, embedded, needs_ocr, native, (rendered, took))| {
+            let tesseract = tesseract.clone();
+            async move {
+                pdf_page(
+                    &tesseract,
+                    n,
+                    (embedded, needs_ocr, native),
+                    rendered,
+                    took,
+                    all_need_ocr,
+                )
+                .await
+            }
+        })
+        .buffered(in_flight);
     let mut read = std::pin::pin!(read);
 
     let mut out = LocalOutput {
@@ -403,6 +417,7 @@ async fn pdf_page(
     (embedded, needs_ocr, native): (EmbeddedText, bool, Option<f32>),
     rendered: Result<RgbImage>,
     rendering: Duration,
+    build_clean: bool,
 ) -> Result<(PageOut, Option<Vec<u8>>)> {
     let started = Instant::now();
     let mut times = PageTimes {
@@ -426,9 +441,17 @@ async fn pdf_page(
         Ok(rgb) => {
             let image = DynamicImage::ImageRgb8(rgb);
             let (render, thumb) = if needs_ocr {
-                let pt_per_px = 72.0 / OCR_DPI as f32;
-                let read =
-                    ocr_page(tesseract, image, n <= SEARCHED_PAGES, pt_per_px, native).await?;
+                let render_dpi = effective_ocr_dpi(OCR_DPI, native);
+                let pt_per_px = 72.0 / render_dpi as f32;
+                let read = ocr_page(
+                    tesseract,
+                    image,
+                    n <= SEARCHED_PAGES,
+                    pt_per_px,
+                    native,
+                    build_clean,
+                )
+                .await?;
                 times = PageTimes {
                     render: rendering,
                     ..read.times
@@ -446,8 +469,8 @@ async fn pdf_page(
                 let encoding = Instant::now();
                 let encoded = encode_read(read.upright, read.clean, n == 1).await?;
                 times.encode = encoding.elapsed();
-                page.clean = Some(encoded.clean);
-                page.clean_render = Some(encoded.clean_render);
+                page.clean = encoded.clean;
+                page.clean_render = encoded.clean_render;
                 (encoded.render, encoded.thumbnail)
             } else {
                 let encoding = Instant::now();
@@ -581,8 +604,9 @@ struct ReadPage {
     upright: DynamicImage,
     page: OcrPage,
     mrz_text: Option<String>,
-    /// The page as it goes into the clean copy.
-    clean: CleanSource,
+    /// The page as it goes into the clean copy (absent when no clean copy
+    /// will be built, e.g. on a mixed PDF).
+    clean: Option<CleanSource>,
     /// The clockwise turn the page was read at.
     turn: u16,
     times: PageTimes,
@@ -594,8 +618,10 @@ struct CleanSource {
     image: RgbImage,
     /// PDF points per pixel of `image`.
     pt_per_px: f32,
-    /// Whether any of that changed the page.
+    /// Whether cleaning changed the page meaningfully (cut, turn, or visual).
     changed: bool,
+    /// Whether straightening altered the geometry relative to `upright`.
+    visual_changed: bool,
     /// Pixels per point the source itself has, when it is known (a scanned
     /// PDF page: its one image). The clean page is not kept denser than that.
     native_px_per_pt: Option<f32>,
@@ -623,6 +649,7 @@ async fn ocr_page(
     search: bool,
     pt_per_px: f32,
     native_px_per_pt: Option<f32>,
+    build_clean: bool,
 ) -> Result<ReadPage> {
     let mut times = PageTimes::default();
     let started = Instant::now();
@@ -691,6 +718,9 @@ async fn ocr_page(
                 270 => image.rotate270(),
                 _ => image,
             };
+            if !build_clean {
+                return Ok((upright, None));
+            }
             let converted;
             let rgb = match upright.as_rgb8() {
                 Some(rgb) => rgb,
@@ -699,16 +729,22 @@ async fn ocr_page(
                     &converted
                 }
             };
-            let changed = cut || turn != 0 || straightening.changes(rgb.width(), rgb.height());
-            let clean = clean::straighten(rgb, straightening.degrees, straightening.crop);
+            let visual_changed = straightening.meaningful_change(rgb.width(), rgb.height());
+            let changed = cut || turn != 0 || visual_changed;
+            let clean = if visual_changed {
+                clean::straighten(rgb, straightening.degrees, straightening.crop)
+            } else {
+                rgb.clone()
+            };
             Ok((
                 upright,
-                CleanSource {
+                Some(CleanSource {
                     image: clean,
                     pt_per_px,
                     changed,
+                    visual_changed,
                     native_px_per_pt,
-                },
+                }),
             ))
         })
         .await,
@@ -729,42 +765,62 @@ struct EncodedRead {
     /// The cached render of the page as read, and its thumbnail if asked.
     render: Webp,
     thumbnail: Option<Vec<u8>>,
-    /// The clean page and whether cleaning changed it.
-    clean: (clean::Page, bool),
-    /// The render the viewer shows once the clean copy exists.
-    clean_render: CleanRender,
+    /// The clean page, whether cleaning changed it, and whether it changed visually.
+    clean: Option<(clean::Page, bool, bool)>,
+    /// The render the viewer shows once the clean copy exists (only when
+    /// `visual_changed` is true).
+    clean_render: Option<CleanRender>,
 }
 
-/// Encodes a page that was read: its render, and its clean page with the
-/// render shown once the clean copy exists, side by side. A page cleaning
-/// left as it was is the same picture both ways and is encoded once.
+/// Encodes a page that was read: its render, and (when requested) its clean
+/// page with a replacement viewer render only if straightening visually
+/// changed the geometry. Page 1 never encodes two thumbnails.
 async fn encode_read(
     upright: DynamicImage,
-    clean: CleanSource,
+    clean: Option<CleanSource>,
     thumbnail: bool,
 ) -> Result<EncodedRead> {
-    if !clean.changed {
-        drop(upright);
-        let (clean, clean_render) = encode_clean(clean, thumbnail).await?;
-        let render = Webp {
-            bytes: clean_render.webp.bytes.clone(),
-            width: clean_render.webp.width,
-            height: clean_render.webp.height,
-        };
+    let Some(clean) = clean else {
+        let (render, thumb) = encode(upright, thumbnail).await?;
         return Ok(EncodedRead {
             render,
-            thumbnail: clean_render.thumbnail.clone(),
-            clean,
-            clean_render,
+            thumbnail: thumb,
+            clean: None,
+            clean_render: None,
+        });
+    };
+    if !clean.visual_changed {
+        let changed = clean.changed;
+        let encode_page = async {
+            joined(
+                tokio::task::spawn_blocking(move || {
+                    let (rgb, pt_per_px) = match clean.native_px_per_pt {
+                        Some(native) => {
+                            clean::at_native_density(clean.image, clean.pt_per_px, native)
+                        }
+                        None => (clean.image, clean.pt_per_px),
+                    };
+                    clean::page(rgb, pt_per_px)
+                })
+                .await,
+            )
+        };
+        let ((render, thumb), clean_page) =
+            tokio::try_join!(encode(upright, thumbnail), encode_page)?;
+        return Ok(EncodedRead {
+            render,
+            thumbnail: thumb,
+            clean: Some((clean_page, changed, false)),
+            clean_render: None,
         });
     }
-    let ((render, thumbnail), (clean, clean_render)) =
-        tokio::try_join!(encode(upright, thumbnail), encode_clean(clean, thumbnail))?;
+    let ((render, _), (clean, clean_render)) =
+        tokio::try_join!(encode(upright, false), encode_clean(clean, thumbnail))?;
     Ok(EncodedRead {
         render,
-        thumbnail,
-        clean,
-        clean_render,
+        thumbnail: clean_render.thumbnail.clone(),
+        clean: Some((clean.0, clean.1, true)),
+        clean_render: Some(clean_render),
     })
 }
 
@@ -780,6 +836,7 @@ async fn encode_clean(
         image,
         pt_per_px,
         changed,
+        visual_changed: _,
         native_px_per_pt,
     } = source;
     let (image, preview) = joined(
@@ -855,8 +912,8 @@ async fn ocr_with_sparse_fallback(tesseract: &Tesseract, img: &DynamicImage) -> 
     }
     let sparse = tesseract.ocr_sparse(img).await?;
     let sparse_reading = sparse.reading();
-    if (reading_score(&sparse_reading), sparse_reading.words)
-        > (reading_score(&reading), reading.words)
+    if (reading_score(sparse_reading), sparse_reading.words)
+        > (reading_score(reading), reading.words)
     {
         Ok(sparse)
     } else {
@@ -870,10 +927,9 @@ async fn turn_score(
     degrees: u16,
 ) -> Result<(usize, Option<bool>)> {
     let (prepared, _) = prepare(gray, degrees).await?;
-    let reading = ocr_with_sparse_fallback(tesseract, &prepared)
-        .await?
-        .reading();
-    let score = reading_score(&reading);
+    let ocr = ocr_with_sparse_fallback(tesseract, &prepared).await?;
+    let reading = ocr.reading();
+    let score = reading_score(reading);
     let sideways =
         (reading.words >= MIN_WORDS_FOR_AXIS).then_some(reading.standing * 2 >= reading.words);
     Ok((score, sideways))
@@ -1014,8 +1070,7 @@ async fn read_mrz(
     prepared: &DynamicImage,
     page: &OcrPage,
 ) -> Option<String> {
-    let tsv = zstd::decode_all(page.tsv.as_slice()).ok()?;
-    let (x, y, w, h) = mrz_region(&String::from_utf8_lossy(&tsv))?;
+    let (x, y, w, h) = page.mrz_region?;
     let region = prepared.crop_imm(x, y, w, h);
     match tesseract.ocr_mrz(&region).await {
         Ok(text) => Some(text),
@@ -1088,16 +1143,17 @@ mod tests {
         // The page was left as scanned: a quarter turn clockwise.
         let tesseract = Tesseract::new("rus+ron+eng");
         let sheet = image("passport_td3_sideways_a4.png");
-        let read = ocr_page(&tesseract, sheet.clone(), true, 72.0 / 300.0, None)
+        let read = ocr_page(&tesseract, sheet.clone(), true, 72.0 / 300.0, None, true)
             .await
             .unwrap();
         let (upright, page, mrz_text) = (read.upright, read.page, read.mrz_text);
         assert!(verified_zone(&page, &mrz_text), "{mrz_text:?}");
+        let clean_source = read.clean.expect("clean source built");
         assert!(
-            read.clean.changed,
+            clean_source.changed,
             "turning and cutting out change the page"
         );
-        let clean = read.clean.image;
+        let clean = clean_source.image;
         assert!(
             clean.height() < clean.width(),
             "the clean passport page lies landscape like the upright one: {:?}",
@@ -1179,9 +1235,16 @@ mod tests {
             return;
         }
         let tesseract = Tesseract::new("rus+ron+eng");
-        let read = ocr_page(&tesseract, image("scan_ru.png"), true, 72.0 / 300.0, None)
-            .await
-            .unwrap();
+        let read = ocr_page(
+            &tesseract,
+            image("scan_ru.png"),
+            true,
+            72.0 / 300.0,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(read.turn, 0);
         assert_eq!((read.times.reads, read.times.turns_tried), (1, 0));
         assert!(read.page.text.contains("Паспорт"), "{}", read.page.text);
@@ -1199,6 +1262,7 @@ mod tests {
             true,
             72.0 / 300.0,
             None,
+            true,
         )
         .await
         .unwrap();
@@ -1327,10 +1391,13 @@ mod tests {
                     page.size,
                 );
             }
+            let clean_bytes = out.clean.as_deref().map_or(0, |pages| {
+                clean::write_pdf(pages, &mut std::io::sink()).unwrap_or(0)
+            });
             eprintln!(
                 "BENCH {name}: {} ms, clean copy {} bytes",
                 took.as_millis(),
-                out.clean.as_ref().map_or(0, Vec::len)
+                clean_bytes
             );
         }
     }
@@ -1377,8 +1444,9 @@ mod tests {
     fn only_sparse_pages_are_searched() {
         let page = |words: usize| OcrPage {
             text: vec!["word"; words].join(" "),
-            tsv: Vec::new(),
             mean_conf: 80.0,
+            reading: Reading::default(),
+            mrz_region: None,
         };
         assert!(is_sparse(&page(40)));
         assert!(!is_sparse(&page(600)));
@@ -1419,6 +1487,7 @@ mod tests {
             image: render,
             pt_per_px: 72.0 / OCR_DPI as f32,
             changed: false,
+            visual_changed: false,
             native_px_per_pt: native,
         };
         encode_clean(source, false).await.unwrap().0.0
