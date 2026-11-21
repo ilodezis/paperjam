@@ -103,6 +103,8 @@ CREATE TABLE events (
     diff          TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE INDEX events_action ON events (action);
+
 CREATE INDEX events_document ON events (document_id);
 
 CREATE TABLE facts (

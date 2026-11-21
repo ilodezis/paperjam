@@ -258,23 +258,59 @@ pub async fn field_issues(
     conn: &mut SqliteConnection,
     id: DocumentId,
 ) -> Result<Vec<(String, &'static str)>> {
-    let mut issues: Vec<(String, &'static str)> = mrz_mismatch_fields(conn, id)
-        .await?
-        .into_iter()
-        .map(|key| (key, MRZ_MISMATCH))
-        .collect();
-    issues.extend(
-        failed_checksum_fields(conn, id)
-            .await?
-            .into_iter()
-            .map(|key| (key, CHECKSUM_FAILED)),
-    );
-    issues.extend(
-        fields_disagreeing_with_ocr(conn, id)
-            .await?
-            .into_iter()
-            .map(|key| (key, OCR_LLM_DISAGREE)),
-    );
+    collect_field_issues(conn, id, true, true, true).await
+}
+
+/// Variant of [`field_issues`] that uses the already-stored `attention` flags
+/// on `ready` documents so clean reads skip OCR disagreement and checksum scans.
+pub async fn field_issues_for_attention(
+    conn: &mut SqliteConnection,
+    id: DocumentId,
+    attention: &[String],
+) -> Result<Vec<(String, &'static str)>> {
+    let has = |flag: &str| attention.iter().any(|f| f == flag);
+    collect_field_issues(
+        conn,
+        id,
+        has(MRZ_MISMATCH),
+        has(CHECKSUM_FAILED),
+        has(OCR_LLM_DISAGREE),
+    )
+    .await
+}
+
+async fn collect_field_issues(
+    conn: &mut SqliteConnection,
+    id: DocumentId,
+    check_mrz: bool,
+    check_checksum: bool,
+    check_ocr: bool,
+) -> Result<Vec<(String, &'static str)>> {
+    let mut issues: Vec<(String, &'static str)> = Vec::new();
+    if check_mrz {
+        issues.extend(
+            mrz_mismatch_fields(conn, id)
+                .await?
+                .into_iter()
+                .map(|key| (key, MRZ_MISMATCH)),
+        );
+    }
+    if check_checksum {
+        issues.extend(
+            failed_checksum_fields(conn, id)
+                .await?
+                .into_iter()
+                .map(|key| (key, CHECKSUM_FAILED)),
+        );
+    }
+    if check_ocr {
+        issues.extend(
+            fields_disagreeing_with_ocr(conn, id)
+                .await?
+                .into_iter()
+                .map(|key| (key, OCR_LLM_DISAGREE)),
+        );
+    }
     Ok(issues)
 }
 
@@ -353,6 +389,17 @@ async fn fields_disagreeing_with_ocr(
     .bind(id)
     .fetch_all(conn)
     .await?;
+    if layers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let precomputed: Vec<(i64, String, Vec<String>)> = layers
+        .into_iter()
+        .map(|(page, text)| {
+            let all = digits(&text);
+            let runs = digit_runs(&text);
+            (page, all, runs)
+        })
+        .collect();
     let mut disagreeing = Vec::new();
     for (key, value, page) in values {
         let Ok(value) = serde_json::from_str::<FieldValue>(&value) else {
@@ -362,23 +409,21 @@ async fn fields_disagreeing_with_ocr(
         if forms.is_empty() {
             continue;
         }
-        let texts: Vec<&str> = layers
+        let matching: Vec<_> = precomputed
             .iter()
-            .filter(|(p, _)| page.is_none_or(|wanted| wanted == *p))
-            .map(|(_, text)| text.as_str())
+            .filter(|(p, _, _)| page.is_none_or(|wanted| wanted == *p))
             .collect();
-        if texts.is_empty() {
+        if matching.is_empty() {
             continue;
         }
-        let found = texts.iter().any(|text| {
-            let all = digits(text);
-            forms.iter().any(|form| all.contains(form.as_str()))
-        });
+        let found = matching
+            .iter()
+            .any(|(_, all, _)| forms.iter().any(|form| all.contains(form.as_str())));
         let misread = || {
-            texts
+            matching
                 .iter()
-                .flat_map(|text| digit_runs(text))
-                .any(|run| forms.iter().any(|form| near_miss(form, &run)))
+                .flat_map(|(_, _, runs)| runs.iter())
+                .any(|run| forms.iter().any(|form| near_miss(form, run)))
         };
         if !found && misread() {
             disagreeing.push(key);
