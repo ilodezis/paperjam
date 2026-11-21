@@ -478,3 +478,83 @@ async fn insert_document(app: &paperjam::service::App) -> DocumentId {
         .unwrap();
     id
 }
+
+#[tokio::test]
+async fn openrouter_none_effort_rejection_is_cached_per_model() {
+    let mock = MockOpenRouter::start().await;
+    mock.enqueue(MockReply::status(400));
+    mock.enqueue(MockReply::ok(&good()));
+    mock.enqueue(MockReply::ok(&good()));
+    mock.enqueue(MockReply::ok(&good()));
+
+    let llm = client(&mock);
+
+    let mut req1 = request();
+    req1.reasoning_effort = Some("none".to_string());
+    llm.chat_json::<Answer>(req1).await.unwrap();
+
+    // Second request on the same model goes straight to `low` without another 400.
+    let mut req2 = request();
+    req2.reasoning_effort = Some("none".to_string());
+    llm.chat_json::<Answer>(req2).await.unwrap();
+
+    // Another model still probes `none` on its own first call.
+    let mut req3 = request();
+    req3.model = "openai/gpt-5-mini".to_string();
+    req3.reasoning_effort = Some("none".to_string());
+    llm.chat_json::<Answer>(req3).await.unwrap();
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].body["reasoning"]["effort"], "none");
+    assert_eq!(requests[1].body["reasoning"]["effort"], "low");
+    assert_eq!(requests[2].body["reasoning"]["effort"], "low");
+    assert_eq!(requests[3].body["reasoning"]["effort"], "none");
+}
+
+#[tokio::test]
+async fn openrouter_anthropic_prompt_cache_marks_large_system_messages() {
+    let mock = MockOpenRouter::start().await;
+    for _ in 0..4 {
+        mock.enqueue(MockReply::ok(&good()));
+    }
+
+    let large_system = "x".repeat(1024);
+
+    // 1. OpenRouter + anthropic/* + >= 1024 bytes => ephemeral cache block.
+    let mut cached_req = request();
+    cached_req.system = large_system.clone();
+    client(&mock).chat_json::<Answer>(cached_req).await.unwrap();
+
+    // 2. Short system prompt => plain string.
+    client(&mock).chat_json::<Answer>(request()).await.unwrap();
+
+    // 3. Non-anthropic model on OpenRouter => plain string.
+    let mut other_model = request();
+    other_model.model = "google/gemini-2.5-flash".to_string();
+    other_model.system = large_system.clone();
+    client(&mock)
+        .chat_json::<Answer>(other_model)
+        .await
+        .unwrap();
+
+    // 4. Generic provider with anthropic model => plain string.
+    let mut generic_req = request();
+    generic_req.system = large_system;
+    generic_client(&mock)
+        .chat_json::<Answer>(generic_req)
+        .await
+        .unwrap();
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 4);
+    let cached_content = &requests[0].body["messages"][0]["content"];
+    assert!(cached_content.is_array(), "{cached_content}");
+    assert_eq!(
+        cached_content[0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert!(requests[1].body["messages"][0]["content"].is_string());
+    assert!(requests[2].body["messages"][0]["content"].is_string());
+    assert!(requests[3].body["messages"][0]["content"].is_string());
+}

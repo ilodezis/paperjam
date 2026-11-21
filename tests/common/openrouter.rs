@@ -4,6 +4,7 @@
 //! and no network access outside loopback is involved.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -157,8 +158,11 @@ impl RecordedRequest {
 struct MockState {
     queue: Mutex<VecDeque<MockReply>>,
     routes: Mutex<HashMap<String, MockReply>>,
+    model_routes: Mutex<HashMap<String, MockReply>>,
     fallback: Mutex<Option<MockReply>>,
     requests: Mutex<Vec<RecordedRequest>>,
+    active_requests: AtomicUsize,
+    max_concurrent_requests: AtomicUsize,
 }
 
 /// Answers come from, in order: a per-`json_schema.name` route, the queue
@@ -189,6 +193,7 @@ impl MockOpenRouter {
                             .get("authorization")
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_string);
+                        let model = body["model"].as_str().map(str::to_string);
                         let name = body["response_format"]["json_schema"]["name"]
                             .as_str()
                             .map(str::to_string);
@@ -196,14 +201,28 @@ impl MockOpenRouter {
                             body,
                             authorization,
                         });
-                        let routed =
-                            name.and_then(|n| state.routes.lock().unwrap().get(&n).cloned());
+                        let by_model =
+                            model.and_then(|m| state.model_routes.lock().unwrap().get(&m).cloned());
+                        let routed = by_model.or_else(|| {
+                            name.and_then(|n| state.routes.lock().unwrap().get(&n).cloned())
+                        });
                         let queued = state.queue.lock().unwrap().pop_front();
                         let fallback = state.fallback.lock().unwrap().clone();
                         let reply = routed
                             .or(queued)
                             .or(fallback)
                             .unwrap_or_else(|| MockReply::status(500));
+                        struct InFlight<'a>(&'a AtomicUsize);
+                        impl Drop for InFlight<'_> {
+                            fn drop(&mut self) {
+                                self.0.fetch_sub(1, Ordering::AcqRel);
+                            }
+                        }
+                        let cur = state.active_requests.fetch_add(1, Ordering::AcqRel) + 1;
+                        state
+                            .max_concurrent_requests
+                            .fetch_max(cur, Ordering::AcqRel);
+                        let _guard = InFlight(&state.active_requests);
                         if !reply.delay.is_zero() {
                             tokio::time::sleep(reply.delay).await;
                         }
@@ -243,6 +262,19 @@ impl MockOpenRouter {
             .lock()
             .unwrap()
             .insert(schema_name.to_string(), reply);
+    }
+
+    /// Answers every request targeting this model name (takes precedence over schema routes).
+    pub fn route_model(&self, model: &str, reply: MockReply) {
+        self.state
+            .model_routes
+            .lock()
+            .unwrap()
+            .insert(model.to_string(), reply);
+    }
+
+    pub fn max_concurrent_requests(&self) -> usize {
+        self.state.max_concurrent_requests.load(Ordering::Acquire)
     }
 
     /// Answers whatever nothing else claims, without being consumed.

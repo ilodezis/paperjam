@@ -31,20 +31,21 @@ use crate::llm::schemas::{
     TRANSCRIPTION, Transcription,
 };
 use crate::llm::{Content, JsonRequest, LlmClient, Usage, budget, write};
+use crate::model::document::Provenance;
 use crate::model::fields::FieldDef;
 use crate::model::taxonomy::Taxonomy;
 use crate::pipeline::checks;
 use crate::random;
 use crate::service::documents::{Layer, best_layer};
-use crate::service::{Actor, App, taxonomy};
+use crate::service::{App, taxonomy};
 
-/// Pages per transcription request: small enough to run multiple batches in
-/// parallel on multi-page scans while keeping overhead modest on short files.
-pub const TRANSCRIBE_BATCH_PAGES: usize = 3;
+/// Pages per transcription request: one page per request allows full page-level
+/// concurrency without hitting output token limits.
+pub const TRANSCRIBE_BATCH_PAGES: usize = 1;
 /// Longest edge of the page images sent to the model.
 const PAGE_IMAGE_MAX_EDGE: u32 = 1600;
-/// Transcription batches sent to the model at the same time.
-const TRANSCRIBE_CONCURRENCY: usize = 4;
+/// Page transcriptions sent to the model at the same time.
+const TRANSCRIBE_CONCURRENCY: usize = 6;
 /// Characters of document text sent to steps B and C.
 const TEXT_CAP_CHARS: usize = 60_000;
 /// Pages taken first when the text must be cut: the start and the end of a
@@ -124,6 +125,13 @@ pub async fn run(app: &App, id: DocumentId, opts: &ProcessOptions) -> Result<()>
 }
 
 /// One document's trip through the LLM steps.
+struct KnownType {
+    key: String,
+    label: String,
+    defs: Vec<FieldDef>,
+    provenance: Option<Provenance>,
+}
+
 pub struct Steps<'a> {
     app: &'a App,
     client: &'a LlmClient,
@@ -172,6 +180,7 @@ impl<'a> Steps<'a> {
 
     pub async fn run_all(&self) -> Result<()> {
         let pages = self.pages_needing_transcription().await?;
+        let first_page_transcribed = pages.contains(&1);
         if !pages.is_empty() {
             self.ensure_budget().await?;
             let illegible = self.step_transcribe(&pages).await?;
@@ -188,11 +197,74 @@ impl<'a> Steps<'a> {
         if text.trim().is_empty() {
             return Ok(());
         }
-        self.ensure_budget().await?;
-        self.step_classify(&text).await?;
-        if let Some((type_key, labels, defs)) = self.document_type().await? {
-            self.ensure_budget().await?;
-            self.step_fields(&type_key, &labels, &defs, &text).await?;
+        let locale = self.uploader_locale().await?;
+        let doc_fence = fence();
+        match self.document_type().await? {
+            Some(known)
+                if matches!(known.provenance, Some(Provenance::Manual | Provenance::Mrz)) =>
+            {
+                // Classification cannot alter a manual or MRZ-verified type, so
+                // steps B and C fire together and classification commits first.
+                let verified_key =
+                    (known.provenance == Some(Provenance::Mrz)).then_some(known.key.as_str());
+                self.ensure_budget().await?;
+                let (classify_res, fields_res) = tokio::join!(
+                    self.ask_classify(
+                        &text,
+                        first_page_transcribed,
+                        verified_key,
+                        &locale,
+                        &doc_fence,
+                    ),
+                    self.ask_fields(
+                        &known.key,
+                        &known.label,
+                        &known.defs,
+                        &text,
+                        &locale,
+                        &doc_fence,
+                    ),
+                );
+                let classification = classify_res?;
+                write::classification(
+                    self.app,
+                    self.doc,
+                    &classification,
+                    self.app.config.llm_create_tags,
+                    &text,
+                )
+                .await?;
+                let answer = fields_res?;
+                self.save_fields(&known.defs, &answer).await?;
+            }
+            _ => {
+                self.ensure_budget().await?;
+                let classification = self
+                    .ask_classify(&text, first_page_transcribed, None, &locale, &doc_fence)
+                    .await?;
+                write::classification(
+                    self.app,
+                    self.doc,
+                    &classification,
+                    self.app.config.llm_create_tags,
+                    &text,
+                )
+                .await?;
+                if let Some(known) = self.document_type().await? {
+                    self.ensure_budget().await?;
+                    let answer = self
+                        .ask_fields(
+                            &known.key,
+                            &known.label,
+                            &known.defs,
+                            &text,
+                            &locale,
+                            &doc_fence,
+                        )
+                        .await?;
+                    self.save_fields(&known.defs, &answer).await?;
+                }
+            }
         }
         write::settle_title_year(self.app, self.doc).await?;
         write::ground_summary(self.app, self.doc, &text).await
@@ -222,109 +294,87 @@ impl<'a> Steps<'a> {
             .collect())
     }
 
-    /// Transcribes `pages` with the vision model, then reads the pages it
-    /// reports as handwritten again with the handwriting model, whose reading
-    /// replaces the first one. Returns the pages whose transcription could
-    /// not read every word.
+    /// Transcribes `pages` concurrently with the vision model; each handwritten
+    /// page triggers its handwriting re-read immediately without waiting on
+    /// other pages. Returns the pages whose final reading still marks
+    /// unreadable words.
     pub async fn step_transcribe(&self, pages: &[u32]) -> Result<Vec<u32>> {
-        let (mut transcribed, handwritten, mut illegible) = self
-            .transcribe_pages(pages, &self.vision_model, "transcribe")
-            .await?;
-        if let Some(model) = &self.handwriting_model
-            && !handwritten.is_empty()
-        {
-            self.ensure_budget().await?;
-            let (reread, _, reread_illegible) = self
-                .transcribe_pages(&handwritten, model, "transcribe_handwriting")
-                .await?;
-            // The second, stronger reading replaces the first on every page
-            // it answered, so its verdict on what is readable wins too.
-            illegible.retain(|page| reread_illegible.contains(page));
-            transcribed.extend(reread);
+        let mut transcribed: BTreeMap<u32, String> = BTreeMap::new();
+        let mut illegible: Vec<u32> = Vec::new();
+        let mut results = futures_util::stream::iter(pages.iter().copied())
+            .map(|page| async move { self.transcribe_one_page(page).await })
+            .buffered(TRANSCRIBE_CONCURRENCY);
+        // The first error returns; dropping the stream cancels pages in flight.
+        while let Some(item) = results.next().await {
+            if let Some((page, markdown, is_illegible)) = item? {
+                if is_illegible && !illegible.contains(&page) {
+                    illegible.push(page);
+                }
+                transcribed.entry(page).or_insert(markdown);
+            }
         }
         write::transcription(self.app, self.doc, &transcribed).await?;
         illegible.sort_unstable();
         Ok(illegible)
     }
 
-    /// The non-empty transcription of each page, the pages reported as
-    /// handwritten and the pages with unreadable words.
-    async fn transcribe_pages(
-        &self,
-        pages: &[u32],
-        model: &str,
-        step: &str,
-    ) -> Result<(BTreeMap<u32, String>, Vec<u32>, Vec<u32>)> {
-        let mut transcribed: BTreeMap<u32, String> = BTreeMap::new();
-        let mut handwritten: Vec<u32> = Vec::new();
-        let mut illegible: Vec<u32> = Vec::new();
-        // `buffered` yields the batches in their original order, so the merge
-        // below keeps the first answer for each page, as the sequential loop did.
-        let batch_pages: Vec<Vec<u32>> = pages
-            .chunks(TRANSCRIBE_BATCH_PAGES)
-            .map(<[u32]>::to_vec)
-            .collect();
-        let mut batches = futures_util::stream::iter(batch_pages)
-            .map(|batch| async move { self.transcribe_batch(&batch, model, step).await })
-            .buffered(TRANSCRIBE_CONCURRENCY);
-        // The first error returns; dropping the stream cancels batches in flight.
-        while let Some(batch) = batches.next().await {
-            let Some((sent, answer)) = batch? else {
-                continue;
-            };
-            for page in answer.pages {
-                if sent.contains(&page.page) && !page.markdown.trim().is_empty() {
-                    if page.handwritten && !handwritten.contains(&page.page) {
-                        handwritten.push(page.page);
-                    }
-                    if page.illegible && !illegible.contains(&page.page) {
-                        illegible.push(page.page);
-                    }
-                    transcribed.entry(page.page).or_insert(page.markdown);
-                }
+    async fn transcribe_one_page(&self, page: u32) -> Result<Option<(u32, String, bool)>> {
+        let Some((mime, bytes)) = self.page_image(page).await? else {
+            return Ok(None);
+        };
+        let reread_bytes = self.handwriting_model.is_some().then(|| bytes.clone());
+        let first_answer = self
+            .ask_transcription(page, mime, bytes, &self.vision_model, "transcribe")
+            .await?;
+        let Some(mut entry) = first_answer
+            .pages
+            .into_iter()
+            .find(|p| p.page == page && !p.markdown.trim().is_empty())
+        else {
+            return Ok(None);
+        };
+        if entry.handwritten
+            && let (Some(model), Some(hw_bytes)) = (&self.handwriting_model, reread_bytes)
+        {
+            self.ensure_budget().await?;
+            let hw_answer = self
+                .ask_transcription(page, mime, hw_bytes, model, "transcribe_handwriting")
+                .await?;
+            if let Some(better) = hw_answer
+                .pages
+                .into_iter()
+                .find(|p| p.page == page && !p.markdown.trim().is_empty())
+            {
+                // The handwriting model's reading and readability verdict replace the first.
+                entry = better;
             }
         }
-        handwritten.sort_unstable();
-        illegible.sort_unstable();
-        Ok((transcribed, handwritten, illegible))
+        Ok(Some((page, entry.markdown, entry.illegible)))
     }
 
-    /// One transcription request: the batch's page images and its answer. `None`
-    /// when none of the pages has a render.
-    async fn transcribe_batch(
+    async fn ask_transcription(
         &self,
-        batch: &[u32],
+        page: u32,
+        mime: &'static str,
+        bytes: Vec<u8>,
         model: &str,
         step: &str,
-    ) -> Result<Option<(Vec<u32>, Transcription)>> {
-        let mut content = vec![Content::Text(format!(
-            "Transcribe the following {} page image(s).",
-            batch.len()
-        ))];
-        let mut sent: Vec<u32> = Vec::new();
-        for &page in batch {
-            let Some((mime, bytes)) = self.page_image(page).await? else {
-                continue;
-            };
-            content.push(Content::Text(format!("Page {page}:")));
-            content.push(Content::Image { mime, bytes });
-            sent.push(page);
-        }
-        if sent.is_empty() {
-            return Ok(None);
-        }
-        let answer: Transcription = self
-            .ask(
-                step,
-                model,
-                TRANSCRIBE_PROMPT,
-                content,
-                TRANSCRIPTION,
-                schemas::transcription_schema(),
-                TRANSCRIBE_MAX_TOKENS,
-            )
-            .await?;
-        Ok(Some((sent, answer)))
+    ) -> Result<Transcription> {
+        let content = vec![
+            Content::Text("Transcribe the following 1 page image(s).".to_string()),
+            Content::Text(format!("Page {page}:")),
+            Content::Image { mime, bytes },
+        ];
+        self.ask(
+            step,
+            model,
+            TRANSCRIBE_PROMPT,
+            content,
+            TRANSCRIPTION,
+            schemas::transcription_schema(),
+            TRANSCRIBE_MAX_TOKENS,
+        )
+        .await
     }
 
     /// The cached render of a page for the model. The stored WebP goes out as it
@@ -364,51 +414,16 @@ impl<'a> Steps<'a> {
     // --- step B -----------------------------------------------------------
 
     pub async fn step_classify(&self, text: &str) -> Result<Classification> {
-        let taxonomy = taxonomy::list_taxonomy(&self.app.ctx(Actor::system())).await?;
-        let candidates = ClassifyCandidates {
-            type_keys: taxonomy.types.iter().map(|t| t.key.clone()).collect(),
-            correspondent_ids: taxonomy
-                .correspondents
-                .iter()
-                .map(|c| c.id.to_string())
-                .collect(),
-            person_ids: taxonomy.people.iter().map(|p| p.id.to_string()).collect(),
-            tag_names: taxonomy.tags.iter().map(|t| t.name.clone()).collect(),
-            allow_new_tags: self.app.config.llm_create_tags,
-        };
-        let schema = schemas::classification_schema(&candidates);
+        let first_page_transcribed = self.pages_needing_transcription().await?.contains(&1);
+        let verified = self.verified_type().await?;
         let locale = self.uploader_locale().await?;
-        let mut message = classify_message(&taxonomy, text, &locale);
-        if let Some(key) = self.verified_type().await? {
-            message.insert_str(
-                0,
-                &format!(
-                    "The document type is already verified from its machine-readable zone: \
-                     {key}. Use this type_key and its label.\n\n"
-                ),
-            );
-        }
-        let mut content = Vec::new();
-        // A born-digital document is sent as text, which hides what the text
-        // layer lacks: a logo or a stamp that is the only place the issuer is
-        // named. A small render of the first page shows them.
-        let letterhead = self.letterhead_image().await?;
-        if letterhead.is_some() {
-            message.insert_str(0, LETTERHEAD_NOTE);
-        }
-        content.push(Content::Text(message));
-        if let Some((mime, bytes)) = letterhead {
-            content.push(Content::Image { mime, bytes });
-        }
-        let answer: Classification = self
-            .ask(
-                "classify",
-                &self.text_model,
-                CLASSIFY_PROMPT,
-                content,
-                CLASSIFICATION,
-                schema,
-                CLASSIFY_MAX_TOKENS,
+        let answer = self
+            .ask_classify(
+                text,
+                first_page_transcribed,
+                verified.as_deref(),
+                &locale,
+                &fence(),
             )
             .await?;
         write::classification(
@@ -422,14 +437,72 @@ impl<'a> Steps<'a> {
         Ok(answer)
     }
 
+    async fn ask_classify(
+        &self,
+        text: &str,
+        first_page_transcribed: bool,
+        verified_type_key: Option<&str>,
+        locale: &str,
+        doc_fence: &str,
+    ) -> Result<Classification> {
+        let taxonomy = taxonomy::list_taxonomy_for_llm(self.app).await?;
+        let candidates = ClassifyCandidates {
+            type_keys: taxonomy.types.iter().map(|t| t.key.clone()).collect(),
+            correspondent_ids: taxonomy
+                .correspondents
+                .iter()
+                .map(|c| c.id.to_string())
+                .collect(),
+            person_ids: taxonomy.people.iter().map(|p| p.id.to_string()).collect(),
+            tag_names: taxonomy.tags.iter().map(|t| t.name.clone()).collect(),
+            allow_new_tags: self.app.config.llm_create_tags,
+        };
+        let schema = schemas::classification_schema(&candidates);
+        let mut message = classify_message_with_fence(&taxonomy, text, locale, doc_fence);
+        if let Some(key) = verified_type_key {
+            message.insert_str(
+                0,
+                &format!(
+                    "The document type is already verified from its machine-readable zone: \
+                     {key}. Use this type_key and its label.\n\n"
+                ),
+            );
+        }
+        let mut content = Vec::new();
+        // A born-digital document is sent as text, which hides what the text
+        // layer lacks: a logo or a stamp that is the only place the issuer is
+        // named. A small render of the first page shows them.
+        let letterhead = self.letterhead_image(first_page_transcribed).await?;
+        if letterhead.is_some() {
+            message.insert_str(0, LETTERHEAD_NOTE);
+        }
+        content.push(Content::Text(message));
+        if let Some((mime, bytes)) = letterhead {
+            content.push(Content::Image { mime, bytes });
+        }
+        self.ask(
+            "classify",
+            &self.text_model,
+            CLASSIFY_PROMPT,
+            content,
+            CLASSIFICATION,
+            schema,
+            CLASSIFY_MAX_TOKENS,
+        )
+        .await
+    }
+
     /// The cached render of page 1 for step B, when the document is
     /// born-digital: its first page has good embedded text, so step A did not
     /// show the model any image. Scanned documents (some page needed
     /// transcription) keep the text-only request: their first page was seen
     /// by the transcriber. The preview is rendered at low resolution (see
     /// `PREVIEW_DPI`), a thousand tokens or so, enough for a logo.
-    async fn letterhead_image(&self) -> Result<Option<(&'static str, Vec<u8>)>> {
-        if self.pages_needing_transcription().await?.contains(&1) {
+    async fn letterhead_image(
+        &self,
+        first_page_transcribed: bool,
+    ) -> Result<Option<(&'static str, Vec<u8>)>> {
+        if first_page_transcribed {
             return Ok(None);
         }
         self.page_image(1).await
@@ -461,24 +534,25 @@ impl<'a> Steps<'a> {
 
     // --- step C -----------------------------------------------------------
 
-    /// The document's current type: key, labels and field definitions.
-    async fn document_type(&self) -> Result<Option<(String, String, Vec<FieldDef>)>> {
-        let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT t.key, t.labels, t.fields FROM documents d \
+    /// The document's current type: key, label, field definitions and provenance.
+    async fn document_type(&self) -> Result<Option<KnownType>> {
+        let row: Option<(String, String, String, Option<Provenance>)> = sqlx::query_as(
+            "SELECT t.key, t.labels, t.fields, d.type_provenance FROM documents d \
              JOIN document_types t ON t.id = d.type_id WHERE d.id = ?",
         )
         .bind(self.doc)
         .fetch_optional(&self.app.db.read)
         .await?;
-        Ok(row.map(|(key, labels, fields)| {
+        Ok(row.map(|(key, labels, fields, provenance)| {
             let labels: BTreeMap<String, String> =
                 serde_json::from_str(&labels).unwrap_or_default();
             let label = labels.get("en").cloned().unwrap_or_else(|| key.clone());
-            (
+            KnownType {
                 key,
                 label,
-                serde_json::from_str(&fields).unwrap_or_default(),
-            )
+                defs: serde_json::from_str(&fields).unwrap_or_default(),
+                provenance,
+            }
         }))
     }
 
@@ -490,20 +564,37 @@ impl<'a> Steps<'a> {
         text: &str,
     ) -> Result<()> {
         let locale = self.uploader_locale().await?;
-        let content = vec![Content::Text(fields_message(
-            type_key, type_label, defs, text, &locale,
-        ))];
-        let answer: FieldsAnswer = self
-            .ask(
-                "fields",
-                &self.text_model,
-                FIELDS_PROMPT,
-                content,
-                FIELD_EXTRACTION,
-                schemas::fields_schema(defs),
-                FIELDS_MAX_TOKENS,
-            )
+        let answer = self
+            .ask_fields(type_key, type_label, defs, text, &locale, &fence())
             .await?;
+        self.save_fields(defs, &answer).await
+    }
+
+    async fn ask_fields(
+        &self,
+        type_key: &str,
+        type_label: &str,
+        defs: &[FieldDef],
+        text: &str,
+        locale: &str,
+        doc_fence: &str,
+    ) -> Result<FieldsAnswer> {
+        let content = vec![Content::Text(fields_message_with_fence(
+            type_key, type_label, defs, text, locale, doc_fence,
+        ))];
+        self.ask(
+            "fields",
+            &self.text_model,
+            FIELDS_PROMPT,
+            content,
+            FIELD_EXTRACTION,
+            schemas::fields_schema(defs),
+            FIELDS_MAX_TOKENS,
+        )
+        .await
+    }
+
+    async fn save_fields(&self, defs: &[FieldDef], answer: &FieldsAnswer) -> Result<()> {
         let pages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pages WHERE document_id = ?")
             .bind(self.doc)
             .fetch_one(&self.app.db.read)
@@ -512,7 +603,7 @@ impl<'a> Steps<'a> {
             self.app,
             self.doc,
             defs,
-            &answer,
+            answer,
             u32::try_from(pages).unwrap_or(u32::MAX),
         )
         .await
@@ -569,7 +660,7 @@ impl<'a> Steps<'a> {
             // transcription and field extraction stay fast and cheap; `LlmClient`
             // falls back to `low` if a configured model rejects `none`.
             (self.client.provider() == LlmProvider::OpenRouter
-                && matches!(step, "transcribe" | "fields"))
+                && matches!(step, "transcribe" | "transcribe_handwriting" | "fields"))
             .then(|| "none".to_string())
         });
         let result = self
@@ -642,9 +733,13 @@ fn fence() -> String {
     random::hex(6)
 }
 
-fn document_block(text: &str) -> String {
-    let id = fence();
+fn document_block_with_fence(text: &str, id: &str) -> String {
     format!("BEGIN DOCUMENT {id}\n{text}\nEND DOCUMENT {id}\n")
+}
+
+#[cfg(test)]
+fn document_block(text: &str) -> String {
+    document_block_with_fence(text, &fence())
 }
 
 fn aliases_note(aliases: &[String]) -> String {
@@ -679,7 +774,17 @@ fn type_labels_line(t: &crate::model::taxonomy::TypeView, locale: &str) -> Strin
     }
 }
 
+#[cfg(test)]
 fn classify_message(taxonomy: &Taxonomy, text: &str, locale: &str) -> String {
+    classify_message_with_fence(taxonomy, text, locale, &fence())
+}
+
+fn classify_message_with_fence(
+    taxonomy: &Taxonomy,
+    text: &str,
+    locale: &str,
+    doc_fence: &str,
+) -> String {
     let mut out = format!(
         "Output language: {}. Write the title and the summary in this language, whatever \
          language the document is in.\n\n",
@@ -712,16 +817,28 @@ fn classify_message(taxonomy: &Taxonomy, text: &str, locale: &str) -> String {
         out.push_str(&format!("- {}\n", t.name));
     }
     out.push('\n');
-    out.push_str(&document_block(text));
+    out.push_str(&document_block_with_fence(text, doc_fence));
     out
 }
 
+#[cfg(test)]
 fn fields_message(
     type_key: &str,
     type_label: &str,
     defs: &[FieldDef],
     text: &str,
     locale: &str,
+) -> String {
+    fields_message_with_fence(type_key, type_label, defs, text, locale, &fence())
+}
+
+fn fields_message_with_fence(
+    type_key: &str,
+    type_label: &str,
+    defs: &[FieldDef],
+    text: &str,
+    locale: &str,
+    doc_fence: &str,
 ) -> String {
     let mut out = format!(
         "Output language: {}. Write the fact labels in this language.\n\n\
@@ -742,7 +859,7 @@ fn fields_message(
         ));
     }
     out.push('\n');
-    out.push_str(&document_block(text));
+    out.push_str(&document_block_with_fence(text, doc_fence));
     out
 }
 

@@ -2827,3 +2827,143 @@ async fn mismatched_llm_person_and_title_are_reconciled_with_extracted_holder() 
     );
     assert_eq!(doc.title.as_deref(), Some("Тестов Пётр Николаевич, 2020"));
 }
+
+#[tokio::test]
+async fn transcribe_handwriting_uses_none_effort_and_keeps_per_page_illegible() {
+    if !have_tesseract(&["eng", "rus", "ron", "osd"]) {
+        return;
+    }
+    let img1 = image::open(fixture("scan_ru.png")).unwrap().to_rgb8();
+    let img2 = image::open(fixture("receipt_photo_skewed.jpg"))
+        .unwrap()
+        .to_rgb8();
+    let pdf_bytes = paperjam::extract::clean::pdf(&[
+        paperjam::extract::clean::page(img1, 72.0 / 150.0).unwrap(),
+        paperjam::extract::clean::page(img2, 72.0 / 150.0).unwrap(),
+    ]);
+
+    let r = rig(&[
+        ("PAPERJAM_LLM_PROVIDER", "openrouter"),
+        ("PAPERJAM_LLM_VISION_MODEL", "vision-test"),
+        ("PAPERJAM_LLM_HANDWRITING_MODEL", "hw-test"),
+    ])
+    .await;
+    r.mock.route_model(
+        "vision-test",
+        MockReply::ok(&json!({"pages": [
+            {"page": 1, "markdown": "Printed [illegible]", "illegible": true, "handwritten": false},
+            {"page": 2, "markdown": "Rough note", "illegible": true, "handwritten": true},
+        ]})),
+    );
+    r.mock.route_model(
+        "hw-test",
+        MockReply::ok(&json!({"pages": [
+            {"page": 2, "markdown": "Clean note", "illegible": false, "handwritten": true},
+        ]})),
+    );
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "other", "organizations": []})),
+    );
+    r.mock
+        .route("field_extraction", fields_reply(&r.app, "other", &[]).await);
+
+    let id = upload(
+        &r.app.ctx(Actor::system()),
+        UploadInput {
+            original_name: "mixed.pdf".to_string(),
+            ..Default::default()
+        },
+        pdf_bytes.as_slice(),
+    )
+    .await
+    .unwrap()
+    .document_id();
+    process_all(&r.app, id).await;
+
+    let doc = view(&r.app, id).await;
+    assert!(
+        doc.attention.contains(&"illegible".to_string()),
+        "non-handwritten page 1 stayed illegible: {:?}",
+        doc.attention
+    );
+    let page_texts: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT page, text FROM text_layers WHERE document_id = ? AND source = 'llm' ORDER BY page",
+    )
+    .bind(id)
+    .fetch_all(&r.app.db.read)
+    .await
+    .unwrap();
+    assert_eq!(
+        page_texts,
+        vec![
+            (1, "Printed [illegible]".to_string()),
+            (2, "Clean note".to_string()),
+        ]
+    );
+
+    let transcription_reqs: Vec<_> = r
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|req| req.schema_name() == Some("transcription"))
+        .collect();
+    // 2 vision requests (1 page each) + 1 handwriting re-read for page 2.
+    assert_eq!(transcription_reqs.len(), 3);
+    for req in transcription_reqs {
+        assert_eq!(req.image_count(), 1);
+        assert_eq!(req.body["reasoning"]["effort"], "none");
+    }
+}
+
+#[tokio::test]
+async fn locked_manual_type_runs_classification_and_fields_in_parallel() {
+    let r = rig(&[]).await;
+    let ctx = r.app.ctx(Actor::system());
+    let contract = taxonomy::list_taxonomy(&ctx)
+        .await
+        .unwrap()
+        .types
+        .into_iter()
+        .find(|t| t.key == "contract")
+        .unwrap();
+    let id = upload_fixture(&r.app, "contract_ru_digital.pdf", false).await;
+    documents::update_document(
+        &ctx,
+        id,
+        DocumentPatch {
+            type_id: Some(Some(contract.id)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "invoice", "title": "Updated Lease"}))
+            .delayed(Duration::from_millis(200)),
+    );
+    r.mock.route(
+        "field_extraction",
+        fields_reply(&r.app, "contract", &[("subject", json!("Flat 12"))])
+            .await
+            .delayed(Duration::from_millis(200)),
+    );
+
+    process_all(&r.app, id).await;
+
+    assert!(
+        r.mock.max_concurrent_requests() >= 2,
+        "expected concurrent B+C, peak concurrency was {}",
+        r.mock.max_concurrent_requests()
+    );
+    let doc = view(&r.app, id).await;
+    assert_eq!(doc.type_key.as_deref(), Some("contract"));
+    assert_eq!(doc.type_provenance, Some(Provenance::Manual));
+    assert_eq!(doc.title.as_deref(), Some("Updated Lease"));
+    assert_eq!(
+        field(&doc, "subject").map(|f| &f.value),
+        Some(&FieldValue::Text("Flat 12".into()))
+    );
+}

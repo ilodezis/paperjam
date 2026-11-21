@@ -43,11 +43,21 @@ pub(crate) const MAX_TAG_CHARS: usize = 100;
 
 macro_rules! person_select {
     ($rest:literal) => {
+        person_select!(
+            @cols
+            "(SELECT COUNT(*) FROM document_people dp JOIN documents d ON d.id = dp.document_id \
+              WHERE dp.person_id = p.id AND d.trashed_at IS NULL)",
+            $rest
+        )
+    };
+    (@bare $rest:literal) => {
+        person_select!(@cols "0", $rest)
+    };
+    (@cols $count:literal, $rest:literal) => {
         concat!(
-            "SELECT p.id, p.name, p.aliases, p.notes, p.created_at, \
-             (SELECT COUNT(*) FROM document_people dp JOIN documents d ON d.id = dp.document_id \
-              WHERE dp.person_id = p.id AND d.trashed_at IS NULL) AS document_count \
-             FROM people p",
+            "SELECT p.id, p.name, p.aliases, p.notes, p.created_at, ",
+            $count,
+            " AS document_count FROM people p",
             $rest
         )
     };
@@ -55,11 +65,21 @@ macro_rules! person_select {
 
 macro_rules! correspondent_select {
     ($rest:literal) => {
+        correspondent_select!(
+            @cols
+            "(SELECT COUNT(DISTINCT d.id) FROM document_organizations do_org JOIN documents d ON d.id = do_org.document_id \
+              WHERE do_org.correspondent_id = c.id AND d.trashed_at IS NULL)",
+            $rest
+        )
+    };
+    (@bare $rest:literal) => {
+        correspondent_select!(@cols "0", $rest)
+    };
+    (@cols $count:literal, $rest:literal) => {
         concat!(
-            "SELECT c.id, c.name, c.aliases, c.created_at, \
-             (SELECT COUNT(DISTINCT d.id) FROM document_organizations do_org JOIN documents d ON d.id = do_org.document_id \
-              WHERE do_org.correspondent_id = c.id AND d.trashed_at IS NULL) AS document_count \
-             FROM correspondents c",
+            "SELECT c.id, c.name, c.aliases, c.created_at, ",
+            $count,
+            " AS document_count FROM correspondents c",
             $rest
         )
     };
@@ -67,11 +87,21 @@ macro_rules! correspondent_select {
 
 macro_rules! tag_select {
     ($rest:literal) => {
+        tag_select!(
+            @cols
+            "(SELECT COUNT(*) FROM document_tags dt JOIN documents d ON d.id = dt.document_id \
+              WHERE dt.tag_id = t.id AND d.trashed_at IS NULL)",
+            $rest
+        )
+    };
+    (@bare $rest:literal) => {
+        tag_select!(@cols "0", $rest)
+    };
+    (@cols $count:literal, $rest:literal) => {
         concat!(
-            "SELECT t.id, t.name, t.color, \
-             (SELECT COUNT(*) FROM document_tags dt JOIN documents d ON d.id = dt.document_id \
-              WHERE dt.tag_id = t.id AND d.trashed_at IS NULL) AS document_count \
-             FROM tags t",
+            "SELECT t.id, t.name, t.color, ",
+            $count,
+            " AS document_count FROM tags t",
             $rest
         )
     };
@@ -79,11 +109,21 @@ macro_rules! tag_select {
 
 macro_rules! type_select {
     ($rest:literal) => {
+        type_select!(
+            @cols
+            "(SELECT COUNT(*) FROM documents d \
+              WHERE d.type_id = t.id AND d.trashed_at IS NULL)",
+            $rest
+        )
+    };
+    (@bare $rest:literal) => {
+        type_select!(@cols "0", $rest)
+    };
+    (@cols $count:literal, $rest:literal) => {
         concat!(
-            "SELECT t.id, t.key, t.labels, t.fields, t.summary_fields, t.builtin, t.created_at, \
-             (SELECT COUNT(*) FROM documents d \
-              WHERE d.type_id = t.id AND d.trashed_at IS NULL) AS document_count \
-             FROM document_types t",
+            "SELECT t.id, t.key, t.labels, t.fields, t.summary_fields, t.builtin, t.created_at, ",
+            $count,
+            " AS document_count FROM document_types t",
             $rest
         )
     };
@@ -275,29 +315,48 @@ fn validate_fields(fields: &[FieldDef]) -> Result<()> {
 
 // --- listing ------------------------------------------------------------
 
-pub async fn list_taxonomy(ctx: &Ctx<'_>) -> Result<Taxonomy> {
-    let pool = &ctx.app.db.read;
-    let types: Vec<TypeRow> = sqlx::query_as(type_select!(" ORDER BY t.id"))
-        .fetch_all(pool)
-        .await?;
-    let people: Vec<PersonRow> =
-        sqlx::query_as(person_select!(" ORDER BY p.name COLLATE NOCASE, p.id"))
-            .fetch_all(pool)
-            .await?;
-    let correspondents: Vec<CorrespondentRow> = sqlx::query_as(correspondent_select!(
-        " ORDER BY c.name COLLATE NOCASE, c.id"
-    ))
-    .fetch_all(pool)
-    .await?;
-    let tags: Vec<TagRow> = sqlx::query_as(tag_select!(" ORDER BY t.name COLLATE NOCASE, t.id"))
-        .fetch_all(pool)
-        .await?;
+async fn fetch_taxonomy(
+    pool: &SqlitePool,
+    types_sql: &'static str,
+    people_sql: &'static str,
+    correspondents_sql: &'static str,
+    tags_sql: &'static str,
+) -> Result<Taxonomy> {
+    let types: Vec<TypeRow> = sqlx::query_as(types_sql).fetch_all(pool).await?;
+    let people: Vec<PersonRow> = sqlx::query_as(people_sql).fetch_all(pool).await?;
+    let correspondents: Vec<CorrespondentRow> =
+        sqlx::query_as(correspondents_sql).fetch_all(pool).await?;
+    let tags: Vec<TagRow> = sqlx::query_as(tags_sql).fetch_all(pool).await?;
     Ok(Taxonomy {
         types: types.into_iter().map(Into::into).collect(),
         people: people.into_iter().map(Into::into).collect(),
         correspondents: correspondents.into_iter().map(Into::into).collect(),
         tags: tags.into_iter().map(Into::into).collect(),
     })
+}
+
+pub async fn list_taxonomy(ctx: &Ctx<'_>) -> Result<Taxonomy> {
+    fetch_taxonomy(
+        &ctx.app.db.read,
+        type_select!(" ORDER BY t.id"),
+        person_select!(" ORDER BY p.name COLLATE NOCASE, p.id"),
+        correspondent_select!(" ORDER BY c.name COLLATE NOCASE, c.id"),
+        tag_select!(" ORDER BY t.name COLLATE NOCASE, t.id"),
+    )
+    .await
+}
+
+/// Same taxonomy vocabulary as [`list_taxonomy`] without document count
+/// subqueries, for LLM prompts that ignore counts.
+pub async fn list_taxonomy_for_llm(app: &App) -> Result<Taxonomy> {
+    fetch_taxonomy(
+        &app.db.read,
+        type_select!(@bare " ORDER BY t.id"),
+        person_select!(@bare " ORDER BY p.name COLLATE NOCASE, p.id"),
+        correspondent_select!(@bare " ORDER BY c.name COLLATE NOCASE, c.id"),
+        tag_select!(@bare " ORDER BY t.name COLLATE NOCASE, t.id"),
+    )
+    .await
 }
 
 async fn fetch_person(pool: &SqlitePool, id: PersonId) -> Result<PersonView> {

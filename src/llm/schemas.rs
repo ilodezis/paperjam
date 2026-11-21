@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -36,7 +37,7 @@ fn closed_object(properties: Map<String, Value>) -> Value {
 
 // --- step A: transcription -----------------------------------------------
 
-pub fn transcription_schema() -> Value {
+static TRANSCRIPTION_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     let page = closed_object(Map::from_iter([
         ("page".to_string(), json!({"type": "integer"})),
         ("markdown".to_string(), json!({"type": "string"})),
@@ -47,6 +48,14 @@ pub fn transcription_schema() -> Value {
         "pages".to_string(),
         json!({"type": "array", "items": page}),
     )]))
+});
+
+pub fn transcription_schema() -> Value {
+    TRANSCRIPTION_SCHEMA.clone()
+}
+
+pub fn transcription_schema_ref() -> &'static Value {
+    &TRANSCRIPTION_SCHEMA
 }
 
 #[derive(Debug, Deserialize)]
