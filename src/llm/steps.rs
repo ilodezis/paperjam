@@ -109,6 +109,9 @@ pub async fn run(app: &App, id: DocumentId, opts: &ProcessOptions) -> Result<()>
         Ok(steps) => steps.run_all().await,
         Err(e) => Err(e),
     };
+    if outcome.is_err() {
+        app.ocr_trackers.wait(id).await;
+    }
     let flag = match outcome {
         Ok(()) => return Ok(()),
         // The user switched the document to "never send to the cloud" while a
@@ -189,6 +192,16 @@ impl<'a> Steps<'a> {
             if !illegible.is_empty() {
                 let mut conn = self.app.db.write.acquire().await?;
                 checks::add_flag(&mut conn, self.doc, checks::ILLEGIBLE).await?;
+            }
+            // For short documents (e.g. 1-2 page passports/IDs), wait for
+            // background OCR to settle local MRZ before Steps B and C run.
+            let page_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM pages WHERE document_id = ?")
+                    .bind(self.doc)
+                    .fetch_one(&self.app.db.read)
+                    .await?;
+            if page_count <= 2 {
+                self.app.ocr_trackers.wait(self.doc).await;
             }
             // Before classification, so a verified zone fixes the type.
             crate::pipeline::store::mrz_from_transcription(self.app, self.doc).await?;

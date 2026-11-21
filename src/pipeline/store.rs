@@ -1,6 +1,6 @@
 //! Writing the pipeline's results to the database, in one transaction.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use serde_json::json;
@@ -181,53 +181,333 @@ pub async fn commit(
     Ok(())
 }
 
+/// Persists fast prepared local artifacts (renders, thumbnail, embedded text,
+/// local title, and for OCR-free documents local matches) while leaving the
+/// document in `processing` until LLM and/or background OCR complete.
+pub async fn commit_prepared(
+    app: &App,
+    id: DocumentId,
+    info: &DocInfo,
+    output: &LocalOutput,
+    has_pending_ocr: bool,
+) -> Result<()> {
+    app.files.delete_derived(id).await;
+    let dir = app
+        .files
+        .derived_path(id, "_")
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let mut writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    if let Some(thumbnail) = &output.thumbnail {
+        writes.push((
+            app.files.derived_path(id, "thumbnail.webp"),
+            thumbnail.clone(),
+        ));
+    }
+    for page in &output.pages {
+        if let Some(render) = &page.render {
+            writes.push((
+                app.files.derived_path(id, &render_key(page.n)),
+                render.clone(),
+            ));
+        }
+    }
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        for (path, bytes) in writes {
+            write_atomic(&path, &bytes)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| storage_error(std::io::Error::other(e)))?
+    .map_err(storage_error)?;
+
+    let mut tx = app.db.write.begin().await?;
+    sqlx::query("UPDATE documents SET attention = '[]' WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let now = time::now_ts();
+    store_pages(&mut tx, id, output, &now).await?;
+    sqlx::query("UPDATE files SET clean_size = NULL WHERE document_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM field_values WHERE document_id = ? AND provenance IN ('mrz', 'local')",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM facts WHERE document_id = ? AND provenance IN ('mrz', 'local')")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    store_title(&mut tx, id, info).await?;
+    if !has_pending_ocr {
+        store_matches(&mut tx, id, output).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Applies background OCR results, straightened renders and clean PDF without
+/// clobbering concurrent or already-completed LLM work.
+pub async fn commit_ocr_backfill(
+    app: &App,
+    id: DocumentId,
+    info: &DocInfo,
+    mut output: LocalOutput,
+) -> Result<()> {
+    let clean_path = app.files.derived_path(id, documents::CLEAN_COPY);
+    let dir = clean_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    if let Some(thumbnail) = output.thumbnail.take() {
+        writes.push((app.files.derived_path(id, "thumbnail.webp"), thumbnail));
+    }
+    for page in &mut output.pages {
+        if page.ocr.is_none() {
+            continue;
+        }
+        if let Some(render) = page.render.take() {
+            writes.push((app.files.derived_path(id, &render_key(page.n)), render));
+        }
+        if let Some(original) = page.original.take() {
+            writes.push((app.files.derived_path(id, &original_key(page.n)), original));
+        }
+    }
+    let clean_pages = output.clean.take();
+    let clean_size = tokio::task::spawn_blocking(move || -> std::io::Result<Option<i64>> {
+        std::fs::create_dir_all(&dir)?;
+        for (path, bytes) in writes {
+            write_atomic(&path, &bytes)?;
+        }
+        if let Some(pages) = clean_pages {
+            let written = write_pdf_atomic(&clean_path, &pages)?;
+            Ok(Some(i64::try_from(written).unwrap_or(i64::MAX)))
+        } else {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| storage_error(std::io::Error::other(e)))?
+    .map_err(storage_error)?;
+
+    let mut tx = app.db.write.begin().await?;
+    let doc_state: Option<(String, Option<Provenance>)> =
+        sqlx::query_as("SELECT status, type_provenance FROM documents WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((status, current_type_provenance)) = doc_state else {
+        return Ok(());
+    };
+    let now = time::now_ts();
+    for page in &output.pages {
+        if page.ocr.is_none() {
+            continue;
+        }
+        if let Some((w, h)) = page.size {
+            sqlx::query("UPDATE pages SET width = ?, height = ? WHERE document_id = ? AND n = ?")
+                .bind(i64::from(w))
+                .bind(i64::from(h))
+                .bind(id)
+                .bind(i64::from(page.n))
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some((_, score)) = &page.embedded {
+            sqlx::query(
+                "UPDATE text_layers SET quality_score = ? \
+                 WHERE document_id = ? AND page = ? AND source = 'embedded'",
+            )
+            .bind(f64::from(*score))
+            .bind(id)
+            .bind(i64::from(page.n))
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "DELETE FROM text_layers WHERE document_id = ? AND page = ? AND source = 'tesseract'",
+        )
+        .bind(id)
+        .bind(i64::from(page.n))
+        .execute(&mut *tx)
+        .await?;
+        if let Some(ocr) = &page.ocr
+            && !ocr.text.trim().is_empty()
+        {
+            insert_layer(
+                &mut tx,
+                id,
+                page.n,
+                "tesseract",
+                &ocr.text,
+                None,
+                f64::from(ocr.mean_conf / 100.0),
+                &now,
+            )
+            .await?;
+        }
+    }
+    if let Some(cs) = clean_size {
+        sqlx::query("UPDATE files SET clean_size = ? WHERE document_id = ?")
+            .bind(cs)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let has_llm_fields: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM field_values WHERE document_id = ? AND provenance = 'llm')",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if status != "ready" && !has_llm_fields && current_type_provenance != Some(Provenance::Mrz) {
+        let fresh_info = DocInfo {
+            title_provenance: info.title_provenance,
+            type_provenance: current_type_provenance,
+            mime: info.mime.clone(),
+            storage_key: info.storage_key.clone(),
+            original_name: info.original_name.clone(),
+        };
+        store_mrz(&mut tx, id, &fresh_info, &output, &now).await?;
+    }
+    let has_llm_links: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM document_people WHERE document_id = ? AND provenance = 'llm') \
+            OR EXISTS(SELECT 1 FROM document_organizations WHERE document_id = ? AND provenance = 'llm')",
+    )
+    .bind(id)
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if status != "ready" && !has_llm_links {
+        store_matches(&mut tx, id, &output).await?;
+    }
+    let renamed = if status == "ready" {
+        people::link_holder_in(&mut tx, id, true).await?;
+        let renamed = people::prefer_holder_script(&mut tx, id).await?;
+        checks::recompute_in(&mut tx, id, &[]).await?;
+        renamed
+    } else {
+        None
+    };
+    tx.commit().await?;
+    if status == "ready" {
+        sync::refresh(app, id).await;
+    }
+    if let Some(person) = renamed {
+        sync::refresh_related(app, Related::Person(person)).await;
+    }
+    Ok(())
+}
+
+fn storage_error(_: std::io::Error) -> ServiceError {
+    ServiceError::internal("storage_error", "could not write the page renders")
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("derived");
+    let tmp = path.with_file_name(format!("{name}.tmp.{}", crate::random::hex(4)));
+    let write_res = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    rename_with_retry(&tmp, path)
+}
+
+fn write_pdf_atomic(
+    final_path: &Path,
+    clean_pages: &[crate::extract::clean::Page],
+) -> std::io::Result<u64> {
+    use std::io::Write;
+    let tmp = final_path.with_file_name(format!("clean.pdf.tmp.{}", crate::random::hex(4)));
+    let write_res = (|| -> std::io::Result<u64> {
+        let file = std::fs::File::create(&tmp)?;
+        let mut buf = std::io::BufWriter::with_capacity(64 * 1024, file);
+        let written = crate::extract::clean::write_pdf(clean_pages, &mut buf)?;
+        buf.flush()?;
+        Ok(written)
+    })();
+    let written = match write_res {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    rename_with_retry(&tmp, final_path)?;
+    Ok(written)
+}
+
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    for attempt in 0..5 {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if attempt < 4
+                    && (e.kind() == std::io::ErrorKind::PermissionDenied
+                        || e.kind() == std::io::ErrorKind::AlreadyExists
+                        || e.raw_os_error() == Some(32)) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(from);
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn write_derived_files(
     app: &App,
     id: DocumentId,
     output: &mut LocalOutput,
 ) -> Result<Option<i64>> {
-    let storage = |_: std::io::Error| {
-        ServiceError::internal("storage_error", "could not write the page renders")
-    };
     app.files.delete_derived(id).await;
     let dir = app.files.derived_path(id, "_");
     let dir = dir.parent().unwrap_or(Path::new(".")).to_path_buf();
-    tokio::fs::create_dir_all(&dir).await.map_err(storage)?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(storage_error)?;
     if let Some(thumbnail) = &output.thumbnail {
         tokio::fs::write(app.files.derived_path(id, "thumbnail.webp"), thumbnail)
             .await
-            .map_err(storage)?;
+            .map_err(storage_error)?;
     }
     for page in &output.pages {
         if let Some(render) = &page.render {
             tokio::fs::write(app.files.derived_path(id, &render_key(page.n)), render)
                 .await
-                .map_err(storage)?;
+                .map_err(storage_error)?;
         }
         if let Some(original) = &page.original {
             tokio::fs::write(app.files.derived_path(id, &original_key(page.n)), original)
                 .await
-                .map_err(storage)?;
+                .map_err(storage_error)?;
         }
     }
     let clean_size = if let Some(clean_pages) = output.clean.take() {
         let final_path = app.files.derived_path(id, documents::CLEAN_COPY);
-        let tmp_path = final_path.with_extension("pdf.tmp");
-        let tmp = tmp_path.clone();
-        let written = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
-            use std::io::Write;
-            let file = std::fs::File::create(&tmp)?;
-            let mut buf = std::io::BufWriter::with_capacity(64 * 1024, file);
-            let written = crate::extract::clean::write_pdf(&clean_pages, &mut buf)?;
-            buf.flush()?;
-            Ok(written)
-        })
-        .await
-        .map_err(|e| storage(std::io::Error::other(e)))?
-        .map_err(storage)?;
-        tokio::fs::rename(&tmp_path, &final_path)
-            .await
-            .map_err(storage)?;
+        let written =
+            tokio::task::spawn_blocking(move || write_pdf_atomic(&final_path, &clean_pages))
+                .await
+                .map_err(|e| storage_error(std::io::Error::other(e)))?
+                .map_err(storage_error)?;
         Some(i64::try_from(written).unwrap_or(i64::MAX))
     } else {
         None

@@ -1259,8 +1259,10 @@ async fn llm_follow_up_runs_in_the_llm_pool() {
         pipeline::handler(),
     );
     wait_for("the local phase", || async {
-        view(&r.app, id).await.status == DocumentStatus::Ready
-            && r.app.jobs.counts().await.unwrap().queued == 1
+        let counts = r.app.jobs.counts().await.unwrap();
+        view(&r.app, id).await.status == DocumentStatus::Processing
+            && counts.running == 0
+            && counts.queued == 1
     })
     .await;
     assert_eq!(
@@ -1334,8 +1336,10 @@ async fn a_holder_waits_for_the_llm_follow_up_before_becoming_a_person() {
         pipeline::handler(),
     );
     wait_for("the local phase", || async {
-        view(&r.app, id).await.status == DocumentStatus::Ready
-            && r.app.jobs.counts().await.unwrap().queued == 1
+        let counts = r.app.jobs.counts().await.unwrap();
+        view(&r.app, id).await.status == DocumentStatus::Processing
+            && counts.running == 0
+            && counts.queued == 1
     })
     .await;
     assert!(
@@ -2826,6 +2830,96 @@ async fn mismatched_llm_person_and_title_are_reconciled_with_extracted_holder() 
         doc.people[0].name
     );
     assert_eq!(doc.title.as_deref(), Some("Тестов Пётр Николаевич, 2020"));
+}
+
+#[tokio::test]
+async fn overlapped_two_pool_run_completes_llm_and_ocr_without_ready_flicker() {
+    if !have_tesseract(&["eng", "rus", "ron", "osd"]) {
+        return;
+    }
+    let img = image::open(fixture("receipt_photo_skewed.jpg"))
+        .unwrap()
+        .to_rgb8();
+    let p = paperjam::extract::clean::page(img.clone(), 72.0 / 150.0).unwrap();
+    let pdf_bytes = paperjam::extract::clean::pdf(&[
+        p,
+        paperjam::extract::clean::page(img.clone(), 72.0 / 150.0).unwrap(),
+        paperjam::extract::clean::page(img, 72.0 / 150.0).unwrap(),
+    ]);
+
+    let r = rig(&[]).await;
+    r.mock.route(
+        "transcription",
+        MockReply::ok(&json!({"pages": [
+            {"page": 1, "markdown": "Page 1", "illegible": false, "handwritten": false},
+            {"page": 2, "markdown": "Page 2", "illegible": false, "handwritten": false},
+            {"page": 3, "markdown": "Page 3", "illegible": false, "handwritten": false},
+        ]})),
+    );
+    r.mock.route(
+        "classification",
+        classify_reply(json!({"type_key": "other", "title": "Three Page Scan"})),
+    );
+    r.mock
+        .route("field_extraction", fields_reply(&r.app, "other", &[]).await);
+
+    let id = upload(
+        &r.app.ctx(Actor::system()),
+        UploadInput {
+            original_name: "three-pages.pdf".to_string(),
+            ..Default::default()
+        },
+        pdf_bytes.as_slice(),
+    )
+    .await
+    .unwrap()
+    .document_id();
+
+    let cancel = CancellationToken::new();
+    let ocr = Worker::spawn(
+        Arc::clone(&r.app),
+        WorkerPool::Ocr,
+        1,
+        cancel.clone(),
+        pipeline::handler(),
+    );
+    let llm = Worker::spawn(
+        Arc::clone(&r.app),
+        WorkerPool::Llm,
+        1,
+        cancel.clone(),
+        pipeline::handler(),
+    );
+
+    wait_for("overlapped LLM and background OCR", || async {
+        let doc = view(&r.app, id).await;
+        let srcs = sources(&r.app, id).await;
+        let counts = r.app.jobs.counts().await.unwrap();
+        doc.status == DocumentStatus::Ready
+            && counts.running == 0
+            && counts.queued == 0
+            && srcs == vec!["llm", "tesseract"]
+            && doc.file.clean_size.is_some()
+            && r.app.files.derived_path(id, "clean.pdf").is_file()
+    })
+    .await;
+
+    let doc = view(&r.app, id).await;
+    assert_eq!(doc.title.as_deref(), Some("Three Page Scan"));
+    assert_eq!(doc.title_provenance, Some(Provenance::Llm));
+    assert!(doc.file.clean_size.is_some());
+    let process_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE document_id = ? AND action = 'document.process'",
+    )
+    .bind(id)
+    .fetch_one(&r.app.db.read)
+    .await
+    .unwrap();
+    assert_eq!(process_events, 1);
+
+    cancel.cancel();
+    let _ = ocr.await;
+    let _ = llm.await;
 }
 
 #[tokio::test]

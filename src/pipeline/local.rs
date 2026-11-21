@@ -40,6 +40,9 @@ const SMALL_EDGE: u32 = 2000;
 const SEARCH_EDGE: u32 = 1200;
 /// Maximum PDF pages processed concurrently per document.
 const MAX_PAGES_IN_FLIGHT: usize = 4;
+/// Maximum OCR pages kept as in-memory bitmaps when overlapping prepare with
+/// background OCR; larger PDFs drop bitmaps and re-stream in bounded memory.
+const FAST_SPLIT_MAX_PAGES: usize = 16;
 
 fn pages_in_flight(ocr_workers: usize) -> usize {
     let cores = std::thread::available_parallelism()
@@ -49,9 +52,50 @@ fn pages_in_flight(ocr_workers: usize) -> usize {
 }
 
 /// What the pipeline needs to know about the original.
+#[derive(Clone)]
 pub struct SourceFile {
     pub mime: String,
     pub storage_key: String,
+}
+
+/// Fast initial extraction for overlapped runs: page renders and embedded
+/// text ready immediately, plus deferred OCR work to finish in background.
+pub struct Prepared {
+    pub output: LocalOutput,
+    pub pending: PendingOcr,
+}
+
+pub struct PendingOcr(PendingOcrInner);
+
+impl PendingOcr {
+    pub fn is_none(&self) -> bool {
+        matches!(self.0, PendingOcrInner::None)
+    }
+}
+
+enum PendingOcrInner {
+    None,
+    Image {
+        image: Arc<DynamicImage>,
+        pt_per_px: f32,
+    },
+    PdfPages {
+        pages: Vec<PendingPdfPage>,
+        all_need_ocr: bool,
+        in_flight: usize,
+    },
+    RescanPdf {
+        source: SourceFile,
+        in_flight: usize,
+    },
+}
+
+struct PendingPdfPage {
+    n: u32,
+    image: Arc<DynamicImage>,
+    native: Option<f32>,
+    embedded: EmbeddedText,
+    render_ms: Duration,
 }
 
 pub struct PageOut {
@@ -163,20 +207,20 @@ fn joined<T>(result: std::result::Result<Result<T>, JoinError>) -> Result<T> {
 }
 
 pub async fn extract(app: &App, file: &SourceFile) -> Result<LocalOutput> {
+    extract_with_in_flight(app, file, pages_in_flight(app.config.ocr_workers)).await
+}
+
+async fn extract_with_in_flight(
+    app: &App,
+    file: &SourceFile,
+    in_flight: usize,
+) -> Result<LocalOutput> {
     let started = Instant::now();
     let bytes = read_original(app, &file.storage_key).await?;
     let tesseract = Tesseract::new(app.config.ocr_langs.clone());
     let isolation = Isolation::new(&app.config);
     let out = match file.mime.as_str() {
-        "application/pdf" => {
-            pdf(
-                &isolation,
-                &tesseract,
-                bytes,
-                pages_in_flight(app.config.ocr_workers),
-            )
-            .await
-        }
+        "application/pdf" => pdf(&isolation, &tesseract, bytes, in_flight).await,
         "text/plain" | "text/markdown" => Ok(text(&bytes)),
         mime => image(&isolation, &tesseract, bytes, mime.to_string()).await,
     }?;
@@ -184,6 +228,102 @@ pub async fn extract(app: &App, file: &SourceFile) -> Result<LocalOutput> {
         pages = out.pages.len(),
         ms = ms(started.elapsed()),
         "local extraction done"
+    );
+    Ok(out)
+}
+
+/// Extracts embedded text, decodes/renders pages and encodes initial WebP
+/// previews without running OCR, deferring recognition to [`finish_ocr`].
+pub async fn prepare(app: &App, file: &SourceFile) -> Result<Prepared> {
+    let started = Instant::now();
+    let bytes = read_original(app, &file.storage_key).await?;
+    let isolation = Isolation::new(&app.config);
+    let in_flight = pages_in_flight(app.config.ocr_workers);
+    let prepared = match file.mime.as_str() {
+        "application/pdf" => prepare_pdf(&isolation, file, bytes, in_flight).await?,
+        "text/plain" | "text/markdown" => Prepared {
+            output: text(&bytes),
+            pending: PendingOcr(PendingOcrInner::None),
+        },
+        mime => prepare_image(&isolation, bytes, mime).await?,
+    };
+    tracing::info!(
+        pages = prepared.output.pages.len(),
+        pending = !prepared.pending.is_none(),
+        ms = ms(started.elapsed()),
+        "local preparation done"
+    );
+    Ok(prepared)
+}
+
+/// Completes deferred OCR and clean-copy generation produced by [`prepare`].
+pub async fn finish_ocr(app: &App, pending: PendingOcr) -> Result<LocalOutput> {
+    let started = Instant::now();
+    let tesseract = Tesseract::new(app.config.ocr_langs.clone());
+    let out = match pending.0 {
+        PendingOcrInner::None => LocalOutput {
+            pages: Vec::new(),
+            thumbnail: None,
+            clean: None,
+        },
+        PendingOcrInner::Image { image, pt_per_px } => {
+            let decoded = Arc::try_unwrap(image).unwrap_or_else(|a| (*a).clone());
+            let read = ocr_page(&tesseract, decoded, true, pt_per_px, None, true).await?;
+            let times = read.times;
+            let encoding = Instant::now();
+            let encoded = encode_read(read.upright, read.clean, true).await?;
+            let mut times = times;
+            times.encode = encoding.elapsed();
+            times.log(1, Some(read.turn), started.elapsed());
+            finish_image_output(encoded, read.page, read.mrz_text)
+        }
+        PendingOcrInner::PdfPages {
+            pages,
+            all_need_ocr,
+            in_flight,
+        } => {
+            let mut out = LocalOutput {
+                pages: Vec::new(),
+                thumbnail: None,
+                clean: None,
+            };
+            let mut read = stream::iter(pages)
+                .map(|pending_page| {
+                    let tesseract = tesseract.clone();
+                    async move {
+                        let image =
+                            Arc::try_unwrap(pending_page.image).unwrap_or_else(|a| (*a).clone());
+                        pdf_page_image(
+                            &tesseract,
+                            pending_page.n,
+                            (pending_page.embedded, true, pending_page.native),
+                            Ok(image),
+                            pending_page.render_ms,
+                            all_need_ocr,
+                        )
+                        .await
+                    }
+                })
+                .buffered(in_flight);
+            while let Some(result) = read.next().await {
+                let (page, thumbnail) = result?;
+                if thumbnail.is_some() {
+                    out.thumbnail = thumbnail;
+                }
+                out.pages.push(page);
+            }
+            let bound = bind_clean_copy(&mut out.pages, false);
+            take_clean_copy(&mut out, bound);
+            out
+        }
+        PendingOcrInner::RescanPdf { source, in_flight } => {
+            extract_with_in_flight(app, &source, in_flight).await?
+        }
+    };
+    tracing::info!(
+        pages = out.pages.len(),
+        ms = ms(started.elapsed()),
+        "background ocr done"
     );
     Ok(out)
 }
@@ -297,13 +437,51 @@ async fn image(
     let encoded = encode_read(read.upright, read.clean, true).await?;
     times.encode = encoding.elapsed();
     times.log(1, Some(read.turn), started.elapsed());
+    Ok(finish_image_output(encoded, read.page, read.mrz_text))
+}
+
+async fn prepare_image(isolation: &Isolation, bytes: Vec<u8>, mime: &str) -> Result<Prepared> {
+    let decoded = Arc::new(DynamicImage::ImageRgb8(
+        isolation.decode_image(bytes, mime, OCR_MAX_EDGE).await?,
+    ));
+    let pt_per_px = A4_LONG_PT / decoded.width().max(decoded.height()).max(1) as f32;
+    let (render, thumbnail) = encode_shared(Arc::clone(&decoded), true).await?;
+    let output = LocalOutput {
+        pages: vec![PageOut {
+            n: 1,
+            size: Some((render.width, render.height)),
+            embedded: None,
+            ocr: None,
+            mrz_text: None,
+            render: Some(render.bytes),
+            clean: None,
+            clean_render: None,
+            original: None,
+        }],
+        thumbnail,
+        clean: None,
+    };
+    Ok(Prepared {
+        output,
+        pending: PendingOcr(PendingOcrInner::Image {
+            image: decoded,
+            pt_per_px,
+        }),
+    })
+}
+
+fn finish_image_output(
+    encoded: EncodedRead,
+    ocr: OcrPage,
+    mrz_text: Option<String>,
+) -> LocalOutput {
     let thumbnail = encoded.thumbnail;
     let mut pages = vec![PageOut {
         n: 1,
         size: Some((encoded.render.width, encoded.render.height)),
         embedded: None,
-        ocr: Some(read.page),
-        mrz_text: read.mrz_text,
+        ocr: Some(ocr),
+        mrz_text,
         render: Some(encoded.render.bytes),
         clean: encoded.clean,
         clean_render: encoded.clean_render,
@@ -317,7 +495,174 @@ async fn image(
         clean: None,
     };
     take_clean_copy(&mut out, bound);
-    Ok(out)
+    out
+}
+
+async fn prepare_pdf(
+    isolation: &Isolation,
+    source: &SourceFile,
+    bytes: Vec<u8>,
+    in_flight: usize,
+) -> Result<Prepared> {
+    let run = isolation
+        .open_pdf(Arc::new(bytes), OCR_DPI, PREVIEW_DPI)
+        .await?;
+    let (embedded, native): (Vec<EmbeddedText>, Vec<Option<f32>>) = run
+        .texts
+        .into_iter()
+        .map(|page| (page.text.map(|text| (text, page.score)), page.density))
+        .unzip();
+    let receiver = run.pages;
+    let needs_ocr: Vec<bool> = embedded.iter().map(quality::needs_ocr).collect();
+    let ocr_count = needs_ocr.iter().filter(|&&b| b).count();
+    let all_need_ocr = !needs_ocr.is_empty() && ocr_count == needs_ocr.len();
+    let keep_in_memory = ocr_count > 0 && ocr_count <= FAST_SPLIT_MAX_PAGES;
+
+    let pages = embedded
+        .into_iter()
+        .zip(needs_ocr)
+        .zip(native)
+        .map(|((embedded, needs_ocr), native)| (embedded, needs_ocr, native))
+        .enumerate();
+    let inputs = stream::unfold(
+        (receiver, pages),
+        move |(mut receiver, mut pages)| async move {
+            let (i, (embedded, needs_ocr, native)) = pages.next()?;
+            let n = i as u32 + 1;
+            let rendered = match receiver.recv().await {
+                Some((got, result, took)) if got == n => (result, took),
+                _ => (
+                    Err(ServiceError::invalid(
+                        "pdf_corrupt",
+                        "the PDF could not be rendered",
+                    )),
+                    Duration::ZERO,
+                ),
+            };
+            Some((
+                (n, embedded, needs_ocr, native, rendered),
+                (receiver, pages),
+            ))
+        },
+    );
+    let prepared_stream = inputs
+        .map(
+            |(n, embedded, needs_ocr, native, (rendered, took))| async move {
+                prepare_pdf_page(
+                    n,
+                    (embedded, needs_ocr, native),
+                    rendered,
+                    took,
+                    keep_in_memory,
+                )
+                .await
+            },
+        )
+        .buffered(in_flight);
+    let mut prepared_stream = std::pin::pin!(prepared_stream);
+
+    let mut out = LocalOutput {
+        pages: Vec::new(),
+        thumbnail: None,
+        clean: None,
+    };
+    let mut pending_pages = Vec::new();
+    while let Some(result) = prepared_stream.next().await {
+        let (page, thumbnail, pending_page) = result?;
+        if thumbnail.is_some() {
+            out.thumbnail = thumbnail;
+        }
+        out.pages.push(page);
+        if let Some(p) = pending_page {
+            pending_pages.push(p);
+        }
+    }
+    let pending = if ocr_count == 0 {
+        PendingOcr(PendingOcrInner::None)
+    } else if keep_in_memory {
+        PendingOcr(PendingOcrInner::PdfPages {
+            pages: pending_pages,
+            all_need_ocr,
+            in_flight,
+        })
+    } else {
+        PendingOcr(PendingOcrInner::RescanPdf {
+            source: source.clone(),
+            in_flight,
+        })
+    };
+    Ok(Prepared {
+        output: out,
+        pending,
+    })
+}
+
+async fn prepare_pdf_page(
+    n: u32,
+    (embedded, needs_ocr, native): (EmbeddedText, bool, Option<f32>),
+    rendered: Result<RgbImage>,
+    rendering: Duration,
+    keep_in_memory: bool,
+) -> Result<(PageOut, Option<Vec<u8>>, Option<PendingPdfPage>)> {
+    let provisional = provisional_embedded(embedded.clone(), needs_ocr, native);
+    let mut page = PageOut {
+        n,
+        size: None,
+        embedded: provisional,
+        ocr: None,
+        mrz_text: None,
+        render: None,
+        clean: None,
+        clean_render: None,
+        original: None,
+    };
+    let mut thumbnail = None;
+    let mut pending_page = None;
+    match rendered {
+        Ok(rgb) => {
+            let (render, thumb) = if needs_ocr && keep_in_memory {
+                let shared = Arc::new(DynamicImage::ImageRgb8(rgb));
+                let encoded = encode_shared(Arc::clone(&shared), n == 1).await?;
+                pending_page = Some(PendingPdfPage {
+                    n,
+                    image: shared,
+                    native,
+                    embedded,
+                    render_ms: rendering,
+                });
+                encoded
+            } else {
+                encode(DynamicImage::ImageRgb8(rgb), n == 1).await?
+            };
+            page.size = Some((render.width, render.height));
+            page.render = Some(render.bytes);
+            thumbnail = thumb;
+        }
+        Err(e) if !needs_ocr => {
+            tracing::warn!(
+                page = n,
+                code = e.code,
+                "page preview could not be rendered"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+    Ok((page, thumbnail, pending_page))
+}
+
+fn provisional_embedded(
+    embedded: EmbeddedText,
+    needs_ocr: bool,
+    native: Option<f32>,
+) -> EmbeddedText {
+    embedded.map(|(text, score)| {
+        let score = if needs_ocr && native.is_some() {
+            score.min(quality::PARTIAL_SCORE)
+        } else {
+            score
+        };
+        (text, score)
+    })
 }
 
 async fn pdf(
@@ -419,6 +764,25 @@ async fn pdf_page(
     rendering: Duration,
     build_clean: bool,
 ) -> Result<(PageOut, Option<Vec<u8>>)> {
+    pdf_page_image(
+        tesseract,
+        n,
+        (embedded, needs_ocr, native),
+        rendered.map(DynamicImage::ImageRgb8),
+        rendering,
+        build_clean,
+    )
+    .await
+}
+
+async fn pdf_page_image(
+    tesseract: &Tesseract,
+    n: u32,
+    (embedded, needs_ocr, native): (EmbeddedText, bool, Option<f32>),
+    rendered: Result<DynamicImage>,
+    rendering: Duration,
+    build_clean: bool,
+) -> Result<(PageOut, Option<Vec<u8>>)> {
     let started = Instant::now();
     let mut times = PageTimes {
         render: rendering,
@@ -438,8 +802,7 @@ async fn pdf_page(
     };
     let mut thumbnail = None;
     match rendered {
-        Ok(rgb) => {
-            let image = DynamicImage::ImageRgb8(rgb);
+        Ok(image) => {
             let (render, thumb) = if needs_ocr {
                 let render_dpi = effective_ocr_dpi(OCR_DPI, native);
                 let pt_per_px = 72.0 / render_dpi as f32;
@@ -926,7 +1289,7 @@ async fn turn_score(
     gray: &Arc<DynamicImage>,
     degrees: u16,
 ) -> Result<(usize, Option<bool>)> {
-    let (prepared, _) = prepare(gray, degrees).await?;
+    let (prepared, _) = prepare_gray(gray, degrees).await?;
     let ocr = ocr_with_sparse_fallback(tesseract, &prepared).await?;
     let reading = ocr.reading();
     let score = reading_score(reading);
@@ -1037,7 +1400,10 @@ fn pick_fallback(tried: &Tried, first: u16) -> u16 {
 
 /// `gray` turned by `degrees`, deskewed and trimmed for OCR, and how it was
 /// straightened.
-async fn prepare(gray: &Arc<DynamicImage>, degrees: u16) -> Result<(DynamicImage, Straightening)> {
+async fn prepare_gray(
+    gray: &Arc<DynamicImage>,
+    degrees: u16,
+) -> Result<(DynamicImage, Straightening)> {
     let gray = Arc::clone(gray);
     joined(
         tokio::task::spawn_blocking(move || Ok(preprocess::prepare_with(&turned(&gray, degrees))))
@@ -1053,7 +1419,7 @@ async fn read_page(
     times: &mut PageTimes,
 ) -> Result<(OcrPage, Option<String>, Straightening)> {
     let started = Instant::now();
-    let (prepared, straightening) = prepare(gray, degrees).await?;
+    let (prepared, straightening) = prepare_gray(gray, degrees).await?;
     let page = ocr_with_sparse_fallback(tesseract, &prepared).await?;
     times.read += started.elapsed();
     times.reads += 1;
@@ -1081,19 +1447,25 @@ async fn read_mrz(
     }
 }
 
+fn encode_sync(image: &DynamicImage, thumbnail: bool) -> Result<(Webp, Option<Vec<u8>>)> {
+    let thumb = if thumbnail {
+        Some(images::thumbnail(image)?)
+    } else {
+        None
+    };
+    Ok((images::webp(image, CACHE_EDGE)?, thumb))
+}
+
 /// The cached page render and, if asked, the thumbnail.
 async fn encode(image: DynamicImage, thumbnail: bool) -> Result<(Webp, Option<Vec<u8>>)> {
-    joined(
-        tokio::task::spawn_blocking(move || {
-            let thumb = if thumbnail {
-                Some(images::thumbnail(&image)?)
-            } else {
-                None
-            };
-            Ok((images::webp(&image, CACHE_EDGE)?, thumb))
-        })
-        .await,
-    )
+    joined(tokio::task::spawn_blocking(move || encode_sync(&image, thumbnail)).await)
+}
+
+async fn encode_shared(
+    image: Arc<DynamicImage>,
+    thumbnail: bool,
+) -> Result<(Webp, Option<Vec<u8>>)> {
+    joined(tokio::task::spawn_blocking(move || encode_sync(&image, thumbnail)).await)
 }
 
 #[cfg(test)]

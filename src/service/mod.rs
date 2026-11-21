@@ -118,6 +118,8 @@ pub struct App {
     pub llm: Option<LlmClient>,
     /// WebAuthn relying party and pending passkey ceremonies.
     pub passkeys: passkeys::Passkeys,
+    /// Coordinates background OCR runs with LLM steps on the same document.
+    pub ocr_trackers: Arc<crate::pipeline::OcrTrackers>,
 }
 
 impl App {
@@ -138,6 +140,7 @@ impl App {
             jobs: JobQueue::new(db.write.clone()),
             llm,
             passkeys,
+            ocr_trackers: Arc::new(crate::pipeline::OcrTrackers::default()),
             db,
         })
     }
