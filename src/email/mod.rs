@@ -65,7 +65,9 @@ fn clean_envelope_addr(raw: &str) -> Option<&str> {
 }
 
 /// Verifies the sender against `allowed`. When `envelope_from` is supplied it
-/// decides alone; otherwise every address in `mime_from` must match a rule.
+/// decides alone, and an empty or unreadable value is rejected rather than
+/// falling back to `From:`; otherwise every address in `mime_from` must match a
+/// rule.
 pub fn check_sender(
     allowed: &[SenderRule],
     envelope_from: Option<&str>,
@@ -74,9 +76,7 @@ pub fn check_sender(
     if allowed.is_empty() {
         return Ok(());
     }
-    if let Some(raw) = envelope_from
-        && !raw.trim().is_empty()
-    {
+    if let Some(raw) = envelope_from {
         let Some(addr) = clean_envelope_addr(raw) else {
             return Err(sender_not_allowed());
         };
@@ -172,7 +172,7 @@ pub async fn ingest(
     raw: &[u8],
     envelope_from: Option<&str>,
 ) -> Result<EmailIngestReport> {
-    if envelope_from.is_some_and(|s| !s.trim().is_empty()) {
+    if envelope_from.is_some() {
         check_sender(&config.allowed_senders, envelope_from, &[])?;
     }
     let parsed = parse::parse_email(raw, config.body_fallback)?;
@@ -297,6 +297,9 @@ mod tests {
             .is_err()
         );
         assert!(check_sender(&rules, Some("<>"), &["alice@example.org".into()]).is_err());
+        // A relay that sends the header empty does not fall back to `From:`.
+        assert!(check_sender(&rules, Some(""), &["alice@example.org".into()]).is_err());
+        assert!(check_sender(&rules, Some("  "), &["alice@example.org".into()]).is_err());
 
         // Without envelope, every From address must be allowed.
         assert!(check_sender(&rules, None, &["alice@example.org".into()]).is_ok());

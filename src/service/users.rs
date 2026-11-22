@@ -24,6 +24,10 @@ const MAX_USERNAME_CHARS: usize = 64;
 /// the host's memory and cores.
 const ARGON2_PERMITS: usize = 3;
 static ARGON2_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(ARGON2_PERMITS);
+/// How long a password check waits for a slot before it gives up. A flood
+/// from many addresses then turns into quick refusals instead of a queue
+/// that grows without end and holds every sign-in behind it.
+const ARGON2_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 const LOCALES: [&str; 2] = ["en", "ru"];
 
 /// `SELECT <user columns><rest>` as a static string (sqlx wants static SQL).
@@ -60,9 +64,24 @@ fn hash_password_blocking(password: &str) -> Result<String> {
 
 /// Runs an Argon2 job on a blocking thread, at most [`ARGON2_PERMITS`] at a time.
 async fn argon2_job<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> Result<T> {
-    let _slot = ARGON2_SLOTS.acquire().await.map_err(|_| {
-        ServiceError::internal("password_check_failed", "verification is shut down")
-    })?;
+    argon2_job_within(ARGON2_WAIT, job).await
+}
+
+async fn argon2_job_within<T: Send + 'static>(
+    wait: std::time::Duration,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    let _slot = tokio::time::timeout(wait, ARGON2_SLOTS.acquire())
+        .await
+        .map_err(|_| {
+            ServiceError::rate_limited(
+                "too_many_attempts",
+                "too many sign-ins at once, try again in a moment",
+            )
+        })?
+        .map_err(|_| {
+            ServiceError::internal("password_check_failed", "verification is shut down")
+        })?;
     tokio::task::spawn_blocking(job)
         .await
         .map_err(|_| ServiceError::internal("password_check_failed", "verification task failed"))
@@ -747,6 +766,11 @@ mod tests {
         let waiting =
             tokio::time::timeout(std::time::Duration::from_millis(200), argon2_job(|| true)).await;
         assert!(waiting.is_err(), "ran although every slot was taken");
+        // Past the wait the check is refused instead of queueing forever.
+        let refused = argon2_job_within(std::time::Duration::from_millis(50), || true)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, "too_many_attempts");
         drop(held);
         assert!(argon2_job(|| true).await.unwrap());
     }

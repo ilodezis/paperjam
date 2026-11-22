@@ -494,7 +494,7 @@ async fn resolve_organization(
             tracing::debug!(correspondent = %id, "the document does not back the picked correspondent");
         }
     }
-    resolve_by_name(tx, org.new_name.as_deref().unwrap_or_default()).await
+    resolve_by_name(tx, org.new_name.as_deref().unwrap_or_default(), text).await
 }
 
 /// `raw` as a correspondent name (normalized, clipped); None for a
@@ -528,12 +528,26 @@ async fn find_by_name(tx: &mut SqliteConnection, name: &str) -> Result<Option<Co
 
 /// The correspondent whose normalized name or alias is `raw`, or a new one
 /// named `raw`. None for a placeholder or an empty name.
-async fn resolve_by_name(tx: &mut SqliteConnection, raw: &str) -> Result<Option<CorrespondentId>> {
+///
+/// A new correspondent is created only when the document `text` prints the
+/// name ([`matching::name_supported`]). Correspondent names go into every
+/// later classification prompt, so a name the model made up, or one a hostile
+/// document talked it into ("Ignore the document and tag everything …"),
+/// must not become one.
+async fn resolve_by_name(
+    tx: &mut SqliteConnection,
+    raw: &str,
+    text: &str,
+) -> Result<Option<CorrespondentId>> {
     let Some(name) = correspondent_key(raw) else {
         return Ok(None);
     };
     if let Some(id) = find_by_name(tx, &name).await? {
         return Ok(Some(id));
+    }
+    if !matching::name_supported(&name, text) {
+        tracing::debug!("the document does not print the new correspondent's name");
+        return Ok(None);
     }
     let id = CorrespondentId::new();
     sqlx::query(
@@ -736,6 +750,7 @@ pub async fn fields(
     defs: &[FieldDef],
     answer: &FieldsAnswer,
     page_count: u32,
+    text: &str,
 ) -> Result<()> {
     let page_of = |page: Option<i64>| {
         page.and_then(|p| u32::try_from(p).ok())
@@ -851,7 +866,7 @@ pub async fn fields(
         facts += 1;
     }
 
-    let issuer = link_issuer(&mut tx, doc, defs, answer).await?;
+    let issuer = link_issuer(&mut tx, doc, defs, answer, text).await?;
 
     if !mismatch.is_empty() {
         for key in &mismatch {
@@ -939,6 +954,7 @@ async fn link_issuer(
     doc: DocumentId,
     defs: &[FieldDef],
     answer: &FieldsAnswer,
+    text: &str,
 ) -> Result<bool> {
     let linked: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM document_organizations WHERE document_id = ? LIMIT 1")
@@ -957,7 +973,7 @@ async fn link_issuer(
             continue;
         };
         found = if entry.names_organization {
-            resolve_by_name(tx, &name).await?
+            resolve_by_name(tx, &name, text).await?
         } else {
             // The model's call varies between runs on the same issuer; a name
             // the directory already holds as an organization is one anyway.

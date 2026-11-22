@@ -326,6 +326,17 @@ fn trash_is_reversible_and_purge_is_absent_from_the_contract() {
     );
 }
 
+/// A tool that hands out a URL anyone can open is not read-only and reaches
+/// outside the archive, so clients ask the user before running it.
+#[test]
+fn public_link_tools_ask_the_client_to_confirm() {
+    for name in ["share_document", "get_download_link"] {
+        let annotations = &tool_named(name)["annotations"];
+        assert_eq!(annotations["readOnlyHint"], false, "{name}");
+        assert_eq!(annotations["openWorldHint"], true, "{name}");
+    }
+}
+
 // --- tests against the server -----------------------------------------------------
 
 #[tokio::test]

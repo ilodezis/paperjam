@@ -20,9 +20,13 @@ use crate::error::{Result, ServiceError};
 /// copy, text) until the document is stored, so this also bounds a run's memory.
 pub const MAX_PAGES: u32 = 300;
 /// Rendered pages are capped to this many pixels along the longest edge
-/// (hayro works with 16-bit pixel sizes) and this many pixels in total.
-const MAX_EDGE_PIXELS: f32 = 16_000.0;
-const MAX_TOTAL_PIXELS: f32 = 100_000_000.0;
+/// (hayro works with 16-bit pixel sizes) and this many pixels in total. The
+/// total is A3 at about 280 DPI: OCR reads a page at no more than 3508 px on
+/// its longest edge anyway, and up to 16 renders wait in memory for OCR, so a
+/// few-kilobyte PDF with a huge MediaBox must not cost hundreds of megabytes a
+/// page (an A4 page at 300 DPI is 8.7 Mpx and is not affected).
+pub const MAX_EDGE_PIXELS: f32 = 16_000.0;
+pub const MAX_TOTAL_PIXELS: f32 = 16_000_000.0;
 const POINTS_PER_INCH: f32 = 72.0;
 /// Lower bound when capping OCR render resolution to a scan's native density.
 pub const MIN_OCR_DPI: u32 = 150;
@@ -415,11 +419,30 @@ mod tests {
             .open(&bytes("contract_ru_digital.pdf"))
             .unwrap();
         let image = doc.render(1, 20_000).unwrap();
-        assert!(u64::from(image.width()) * u64::from(image.height()) <= 100_000_000);
+        assert!(f64::from(image.width()) * f64::from(image.height()) <= MAX_TOTAL_PIXELS.into());
+    }
+
+    #[test]
+    fn a_huge_media_box_renders_within_the_pixel_budget() {
+        // 200 x 200 inches: at 300 DPI that would be 3.6 Gpx of RGB.
+        let pdf = blank_pdf_sized(1, 14_400, 14_400);
+        let image = HayroRenderer.open(&pdf).unwrap().render(1, 300).unwrap();
+        let pixels = f64::from(image.width()) * f64::from(image.height());
+        assert!(pixels <= f64::from(MAX_TOTAL_PIXELS), "{pixels} px");
+        assert!(image.width().max(image.height()) as f32 <= MAX_EDGE_PIXELS);
+        // A normal A4 page at 300 DPI keeps its full resolution.
+        let a4 = blank_pdf_sized(1, 595, 842);
+        let image = HayroRenderer.open(&a4).unwrap().render(1, 300).unwrap();
+        assert!(image.height() >= 3500, "{}", image.height());
     }
 
     /// A valid, blank PDF with `count` pages.
     fn blank_pdf(count: u32) -> Vec<u8> {
+        blank_pdf_sized(count, 200, 200)
+    }
+
+    /// A valid, blank PDF with `count` pages of `width` x `height` points.
+    fn blank_pdf_sized(count: u32, width: u32, height: u32) -> Vec<u8> {
         let mut out = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         let kids: String = (0..count).map(|i| format!("{} 0 R ", 3 + i)).collect();
@@ -428,8 +451,9 @@ mod tests {
             format!("<< /Type /Pages /Kids [{kids}] /Count {count} >>"),
         ];
         objects.extend(
-            (0..count)
-                .map(|_| "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>".to_string()),
+            (0..count).map(|_| {
+                format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] >>")
+            }),
         );
         for (i, body) in objects.iter().enumerate() {
             offsets.push(out.len());

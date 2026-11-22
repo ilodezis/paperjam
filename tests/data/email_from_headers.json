@@ -1,0 +1,17 @@
+[
+  { "header": "Alice <alice@example.org>", "worker": ["alice@example.org"] },
+  { "header": "\"Smith, Alice\" <Alice@Example.org>", "worker": ["alice@example.org"] },
+  { "header": "alice@example.org (home)", "worker": ["alice@example.org"] },
+  { "header": "alice@example.org, Bob <bob@example.org>", "worker": ["alice@example.org", "bob@example.org"] },
+  { "header": "\"a\\\"b\" <alice@example.org>", "worker": ["alice@example.org"] },
+  { "header": "\"alice@example.org\" <attacker@evil.example>", "worker": ["attacker@evil.example"] },
+  { "header": "attacker@evil.example (x (y) <alice@example.org>)", "worker": ["attacker@evil.example"] },
+  { "header": "attacker@evil.example (a (b (c) <alice@example.org>) d)", "worker": ["attacker@evil.example"] },
+  { "header": "attacker@evil.example (\\) <alice@example.org>)", "worker": ["attacker@evil.example"] },
+  { "header": "alice@example.org (\"), attacker@evil.example, (\")", "worker": ["alice@example.org", "attacker@evil.example"] },
+  { "header": "(unclosed <alice@example.org>", "worker": null },
+  { "header": "attacker@evil.example) <alice@example.org>", "worker": null },
+  { "header": "\"unclosed <alice@example.org>", "worker": null },
+  { "header": "<alice@example.org> <attacker@evil.example>", "worker": null },
+  { "header": "undisclosed-recipients:;", "worker": null }
+]

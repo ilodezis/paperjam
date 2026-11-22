@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+- The Cloudflare Email Worker in `docs/email-intake.md` parses `From:` the way paperjam does, nested comments included. Its one-pass comment stripping let `attacker@evil.example (x (y) <alice@example.org>)` pass an allowlist for `alice@example.org` while paperjam saw the attacker. The guide now says to set `PAPERJAM_EMAIL_ALLOWED_SENDERS` on the server as well, the server warns at startup when it is unset, and a present but empty or non-ASCII `X-Envelope-From` is refused instead of falling back to `From:`.
+- A PDF with a huge MediaBox no longer exhausts memory: a page render is capped at 16 Mpx (A4 at 300 DPI is 8.7 Mpx), and pages waiting for OCR are kept at the 3508 px OCR reads instead of full size.
+- The model can no longer create a correspondent whose name the document does not print, so a hostile document cannot plant an instruction-like name that every later classification prompt would carry. Names, aliases, type labels and tags reach the prompts as JSON strings marked as data.
+- Sign-in: password failures are also counted per client address over all usernames, so random names from one address cannot keep every password check busy; a password check gives up after 10 s waiting for a free slot instead of queueing without end; IPv6 clients count by their /64 in every limiter (sign-in, passkey challenges, OAuth client registration); a full limiter evicts its oldest entries and keeps live lockouts instead of forgetting everything.
+- The service worker no longer caches shared-document pages, OAuth screens, calendar feeds or any response marked `no-store` or `private`, and stores only the app shell from navigations; the cache version is bumped so older caches are dropped. Signing out clears the cached pages, and clears local data even when the server cannot be reached.
+- Each LLM call sets an estimate of its cost aside before it is sent, so calls running at once (pages transcribed side by side, several documents) can no longer all pass the monthly budget check and overspend it.
+- A passkey whose signature counter counted before and now sends 0 is refused as a possible clone; synced passkeys that never count still work.
+- Moving a document to the trash revokes its download links at once. `get_download_link` and `share_document` are marked not read-only and open-world, so MCP clients ask before minting a URL anyone can open.
+
 ## [0.2.0] - 2026-11-21
 
 ### Added

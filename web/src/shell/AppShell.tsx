@@ -78,6 +78,8 @@ export function AppShell({ user }: { user: User | null }) {
     setSigningOut(true);
     try {
       await signOut();
+    } catch {
+      /* the server was unreachable; this device has forgotten the user anyway */
     } finally {
       setSigningOut(false);
     }

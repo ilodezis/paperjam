@@ -946,4 +946,35 @@ mod tests {
             assert_eq!(err.code, "invalid_email");
         }
     }
+
+    /// The Cloudflare Worker in `docs/email-intake.md` checks the allowlist
+    /// against its own parse of `From:`. Every address this server sees must
+    /// be one the Worker checked, or a comment trick slips a sender past it.
+    /// `web/src/emailWorker.test.ts` runs the Worker on the same cases.
+    #[test]
+    fn worker_sees_every_from_address_the_server_sees() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            header: String,
+            worker: Option<Vec<String>>,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../../tests/data/email_from_headers.json")).unwrap();
+        for case in cases {
+            let Some(worker) = case.worker else { continue };
+            let raw = format!(
+                "From: {}\r\nSubject: s\r\nContent-Type: text/plain\r\n\r\nbody\r\n",
+                case.header
+            );
+            let server = parse_email(raw.as_bytes(), true).unwrap().from_addresses;
+            assert!(!server.is_empty(), "{}: server saw no sender", case.header);
+            for addr in &server {
+                assert!(
+                    worker.contains(addr),
+                    "{}: server sees {addr}, worker checked {worker:?}",
+                    case.header
+                );
+            }
+        }
+    }
 }

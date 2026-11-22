@@ -248,7 +248,7 @@ impl<'a> Steps<'a> {
                 )
                 .await?;
                 let answer = fields_res?;
-                self.save_fields(&known.defs, &answer).await?;
+                self.save_fields(&known.defs, &answer, &text).await?;
             }
             _ => {
                 self.ensure_budget().await?;
@@ -275,7 +275,7 @@ impl<'a> Steps<'a> {
                             &doc_fence,
                         )
                         .await?;
-                    self.save_fields(&known.defs, &answer).await?;
+                    self.save_fields(&known.defs, &answer, &text).await?;
                 }
             }
         }
@@ -580,7 +580,7 @@ impl<'a> Steps<'a> {
         let answer = self
             .ask_fields(type_key, type_label, defs, text, &locale, &fence())
             .await?;
-        self.save_fields(defs, &answer).await
+        self.save_fields(defs, &answer, text).await
     }
 
     async fn ask_fields(
@@ -607,7 +607,12 @@ impl<'a> Steps<'a> {
         .await
     }
 
-    async fn save_fields(&self, defs: &[FieldDef], answer: &FieldsAnswer) -> Result<()> {
+    async fn save_fields(
+        &self,
+        defs: &[FieldDef],
+        answer: &FieldsAnswer,
+        text: &str,
+    ) -> Result<()> {
         let pages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pages WHERE document_id = ?")
             .bind(self.doc)
             .fetch_one(&self.app.db.read)
@@ -618,6 +623,7 @@ impl<'a> Steps<'a> {
             defs,
             answer,
             u32::try_from(pages).unwrap_or(u32::MAX),
+            text,
         )
         .await
     }
@@ -668,6 +674,15 @@ impl<'a> Steps<'a> {
         schema: Value,
         max_tokens: u32,
     ) -> Result<T> {
+        // Held until the cost is recorded below.
+        let Some(_reserved) =
+            budget::reserve(self.app, self.client.reservations(), model, step).await?
+        else {
+            return Err(ServiceError::unavailable(
+                BUDGET_EXHAUSTED,
+                "the monthly LLM budget is used up",
+            ));
+        };
         let reasoning_effort = self.app.config.llm_reasoning_effort.clone().or_else(|| {
             // Skip thinking tokens on pure extraction steps on OpenRouter so
             // transcription and field extraction stay fast and cheap; `LlmClient`
@@ -755,11 +770,20 @@ fn document_block(text: &str) -> String {
     document_block_with_fence(text, &fence())
 }
 
+/// `s` as a JSON string literal. Names, aliases, labels and tags reach the
+/// prompt above the document fence and some came from earlier documents, so
+/// they are quoted as data: a newline or a quote in one cannot start a line
+/// of its own that reads like an instruction.
+fn quoted(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_default()
+}
+
 fn aliases_note(aliases: &[String]) -> String {
     if aliases.is_empty() {
         String::new()
     } else {
-        format!(" (aliases: {})", aliases.join("; "))
+        let quoted: Vec<String> = aliases.iter().map(|a| quoted(a)).collect();
+        format!(" (aliases: {})", quoted.join("; "))
     }
 }
 
@@ -781,9 +805,10 @@ fn type_labels_line(t: &crate::model::taxonomy::TypeView, locale: &str) -> Strin
         }
     }
     if labels.is_empty() {
-        t.key.clone()
+        quoted(&t.key)
     } else {
-        labels.join(" / ")
+        let quoted: Vec<String> = labels.iter().map(|l| quoted(l)).collect();
+        quoted.join(" / ")
     }
 }
 
@@ -812,7 +837,7 @@ fn classify_message_with_fence(
         out.push_str(&format!(
             "- {}: {}{}\n",
             c.id,
-            c.name,
+            quoted(&c.name),
             aliases_note(&c.aliases)
         ));
     }
@@ -821,13 +846,13 @@ fn classify_message_with_fence(
         out.push_str(&format!(
             "- {}: {}{}\n",
             p.id,
-            p.name,
+            quoted(&p.name),
             aliases_note(&p.aliases)
         ));
     }
     out.push_str("\nTags:\n");
     for t in &taxonomy.tags {
-        out.push_str(&format!("- {}\n", t.name));
+        out.push_str(&format!("- {}\n", quoted(&t.name)));
     }
     out.push('\n');
     out.push_str(&document_block_with_fence(text, doc_fence));
@@ -868,7 +893,7 @@ fn fields_message_with_fence(
             "- {} ({}{marked}): {}\n",
             def.key,
             def.kind.as_str(),
-            label
+            quoted(label)
         ));
     }
     out.push('\n');
@@ -971,11 +996,11 @@ mod tests {
             type_view("lease", &[("en", "Lease"), ("ru", "Аренда")]),
         ]);
         let ru = classify_message(&taxonomy, "text", "ru");
-        assert!(ru.contains("- visa_sticker: Visa sticker\n"), "{ru}");
+        assert!(ru.contains("- visa_sticker: \"Visa sticker\"\n"), "{ru}");
         // The uploader's label first, the other languages after it.
-        assert!(ru.contains("- lease: Аренда / Lease\n"), "{ru}");
+        assert!(ru.contains("- lease: \"Аренда\" / \"Lease\"\n"), "{ru}");
         let en = classify_message(&taxonomy, "text", "en");
-        assert!(en.contains("- lease: Lease / Аренда\n"), "{en}");
+        assert!(en.contains("- lease: \"Lease\" / \"Аренда\"\n"), "{en}");
     }
 
     /// The prompt files describe the task, never the archive's own types:

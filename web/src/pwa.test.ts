@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import manifest from "../public/manifest.webmanifest?raw";
 import swScript from "../public/sw.js?raw";
-import { monitorOnlineStatus, registerServiceWorker } from "./pwa";
+import { clearCachedPages, monitorOnlineStatus, registerServiceWorker } from "./pwa";
 
 describe("PWA registration", () => {
   afterEach(() => {
@@ -99,10 +99,42 @@ describe("manifest and service worker contracts", () => {
 
   it("enforces strict no-API-caching in the service worker", () => {
     // The service worker MUST explicitly bypass /api/ and non-GET requests
-    expect(swScript).toContain('url.pathname.startsWith("/api/")');
+    expect(swScript).toContain('"/api/"');
     expect(swScript).toContain('request.method !== "GET"');
     expect(swScript).toContain('request.mode === "navigate"');
     expect(swScript).toContain("/manifest.webmanifest");
     expect(swScript).toContain("/index.html");
+  });
+});
+
+describe("clearing cached pages", () => {
+  it("drops every page but the app's static files and leaves other caches alone", async () => {
+    const entries = new Map<string, string[]>([
+      ["paperjam-shell-v2", ["/", "/index.html", "/s/token", "/oauth/authorize", "/assets/app.js", "/fonts/a.woff2"]],
+      ["paperjam-shell-v3", ["/icon.svg", "/documents/1"]],
+      ["someone-else", ["/s/token"]],
+    ]);
+    const storage = {
+      keys: async () => [...entries.keys()],
+      open: async (name: string) => ({
+        keys: async () => (entries.get(name) ?? []).map((p) => new Request(`https://archive.example${p}`)),
+        delete: async (req: Request) => {
+          const path = new URL(req.url).pathname;
+          entries.set(name, (entries.get(name) ?? []).filter((p) => p !== path));
+          return true;
+        },
+      }),
+    } as unknown as CacheStorage;
+
+    await clearCachedPages(storage);
+    expect(entries.get("paperjam-shell-v2")).toEqual(["/", "/index.html", "/assets/app.js", "/fonts/a.woff2"]);
+    expect(entries.get("paperjam-shell-v3")).toEqual(["/icon.svg"]);
+    expect(entries.get("someone-else")).toEqual(["/s/token"]);
+  });
+
+  it("never throws when Cache Storage is missing or refuses", async () => {
+    await expect(clearCachedPages(undefined)).resolves.toBeUndefined();
+    const refusing = { keys: () => Promise.reject(new Error("SecurityError")) } as unknown as CacheStorage;
+    await expect(clearCachedPages(refusing)).resolves.toBeUndefined();
   });
 });

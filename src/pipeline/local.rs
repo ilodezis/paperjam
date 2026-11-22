@@ -92,7 +92,11 @@ enum PendingOcrInner {
 
 struct PendingPdfPage {
     n: u32,
+    /// The render, already fitted to [`OCR_MAX_EDGE`]: OCR reads no more, and
+    /// up to [`FAST_SPLIT_MAX_PAGES`] of these wait in memory.
     image: Arc<DynamicImage>,
+    /// How many render pixels one pixel of `image` stands for.
+    shrunk_by: f32,
     native: Option<f32>,
     embedded: EmbeddedText,
     render_ms: Duration,
@@ -298,6 +302,7 @@ pub async fn finish_ocr(app: &App, pending: PendingOcr) -> Result<LocalOutput> {
                             pending_page.n,
                             (pending_page.embedded, true, pending_page.native),
                             Ok(image),
+                            pending_page.shrunk_by,
                             pending_page.render_ms,
                             all_need_ocr,
                         )
@@ -597,6 +602,15 @@ async fn prepare_pdf(
     })
 }
 
+/// Fits a render that will wait for OCR to [`OCR_MAX_EDGE`], the most OCR
+/// reads, and says by how much it shrank.
+fn fit_for_ocr(rgb: RgbImage) -> (DynamicImage, f32) {
+    let before = rgb.width().max(rgb.height()).max(1);
+    let fitted = fit(DynamicImage::ImageRgb8(rgb), OCR_MAX_EDGE);
+    let after = fitted.width().max(fitted.height()).max(1);
+    (fitted, before as f32 / after as f32)
+}
+
 async fn prepare_pdf_page(
     n: u32,
     (embedded, needs_ocr, native): (EmbeddedText, bool, Option<f32>),
@@ -621,11 +635,14 @@ async fn prepare_pdf_page(
     match rendered {
         Ok(rgb) => {
             let (render, thumb) = if needs_ocr && keep_in_memory {
-                let shared = Arc::new(DynamicImage::ImageRgb8(rgb));
+                let (fitted, shrunk_by) =
+                    joined(tokio::task::spawn_blocking(move || Ok(fit_for_ocr(rgb))).await)?;
+                let shared = Arc::new(fitted);
                 let encoded = encode_shared(Arc::clone(&shared), n == 1).await?;
                 pending_page = Some(PendingPdfPage {
                     n,
                     image: shared,
+                    shrunk_by,
                     native,
                     embedded,
                     render_ms: rendering,
@@ -769,6 +786,7 @@ async fn pdf_page(
         n,
         (embedded, needs_ocr, native),
         rendered.map(DynamicImage::ImageRgb8),
+        1.0,
         rendering,
         build_clean,
     )
@@ -780,6 +798,7 @@ async fn pdf_page_image(
     n: u32,
     (embedded, needs_ocr, native): (EmbeddedText, bool, Option<f32>),
     rendered: Result<DynamicImage>,
+    shrunk_by: f32,
     rendering: Duration,
     build_clean: bool,
 ) -> Result<(PageOut, Option<Vec<u8>>)> {
@@ -805,7 +824,7 @@ async fn pdf_page_image(
         Ok(image) => {
             let (render, thumb) = if needs_ocr {
                 let render_dpi = effective_ocr_dpi(OCR_DPI, native);
-                let pt_per_px = 72.0 / render_dpi as f32;
+                let pt_per_px = 72.0 / render_dpi as f32 * shrunk_by;
                 let read = ocr_page(
                     tesseract,
                     image,
@@ -1803,6 +1822,17 @@ mod tests {
         assert_eq!(fitted.width(), 2631);
         let scan = DynamicImage::new_rgb8(1240, 1754);
         assert_eq!(fit(scan, OCR_MAX_EDGE).dimensions(), (1240, 1754));
+    }
+
+    #[test]
+    fn renders_waiting_for_ocr_are_fitted_and_remember_the_scale() {
+        // A giant page render must not wait for OCR at full size.
+        let (fitted, shrunk_by) = fit_for_ocr(RgbImage::new(200, 7016));
+        assert_eq!(fitted.height(), OCR_MAX_EDGE);
+        assert!((shrunk_by - 2.0).abs() < 1e-3, "{shrunk_by}");
+        let (same, unshrunk) = fit_for_ocr(RgbImage::new(1240, 1754));
+        assert_eq!(same.dimensions(), (1240, 1754));
+        assert_eq!(unshrunk, 1.0);
     }
 
     #[test]

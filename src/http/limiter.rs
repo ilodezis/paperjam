@@ -2,16 +2,22 @@
 //!
 //! The main brake is per `(client address, username)`: a few free failures,
 //! then each further one makes the next attempt wait twice as long. Someone
-//! failing from another address never locks the owner out. A softer brake
-//! per username catches guessing spread over many addresses: past a hundred
-//! failures an hour, password attempts on that name are spaced out, while
-//! passkeys keep working. Keys are stored as hashes and old entries are
-//! pruned, so memory stays small whatever names and addresses arrive.
+//! failing from another address never locks the owner out. A second brake per
+//! address counts failures over every name, so random usernames from one
+//! address cannot keep every password check busy. A softer brake per username
+//! catches guessing spread over many addresses: past a hundred failures an
+//! hour, password attempts on that name are spaced out, while passkeys keep
+//! working.
+//!
+//! An IPv6 address counts by its /64 ([`rate_key`]): one host is usually
+//! handed a whole /64, so its addresses are one client. Keys are stored as
+//! hashes and old entries are pruned, so memory stays small whatever names
+//! and addresses arrive.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -19,6 +25,8 @@ use crate::error::ServiceError;
 
 /// Failures per `(address, name)` before the delay starts.
 const FREE_FAILURES: u32 = 5;
+/// Password failures per address, over all names, before the delay starts.
+const ADDRESS_FREE_FAILURES: u32 = 20;
 const MAX_DELAY: Duration = Duration::from_secs(15 * 60);
 /// A pair is forgotten this long after its last failure.
 const PAIR_TTL: Duration = Duration::from_secs(60 * 60);
@@ -31,9 +39,24 @@ const NAME_GAP: Duration = Duration::from_secs(10);
 /// Passkey challenges per address within [`CHALLENGE_WINDOW`].
 const MAX_CHALLENGES: u32 = 20;
 const CHALLENGE_WINDOW: Duration = Duration::from_secs(5 * 60);
-/// Above this many entries a map is pruned; if pruning is not enough it is
-/// dropped whole, which only forgets some failures.
+/// Above this many entries a map is pruned; if pruning is not enough, the
+/// entries touched longest ago go, live lockouts last.
 const MAX_ENTRIES: usize = 50_000;
+
+/// The address a limiter counts: an IPv4 address as it is, an IPv6 address
+/// by its /64 (an IPv4-mapped one as the IPv4 address).
+pub fn rate_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let mask = u128::MAX << 64;
+                IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
+            }
+        },
+    }
+}
 
 /// The one shape a username has for counting: whitespace and case do not
 /// make a new name.
@@ -58,6 +81,7 @@ struct Window {
 #[derive(Default)]
 struct Maps {
     pairs: HashMap<u64, Strikes>,
+    addresses: HashMap<u64, Strikes>,
     names: HashMap<u64, Window>,
     challenges: HashMap<u64, Window>,
 }
@@ -83,13 +107,49 @@ fn too_many() -> ServiceError {
     )
 }
 
-fn bound<V>(map: &mut HashMap<u64, V>, alive: impl Fn(&V) -> bool) {
-    if map.len() > MAX_ENTRIES {
-        map.retain(|_, v| alive(v));
-        if map.len() > MAX_ENTRIES {
-            map.clear();
-        }
+/// Keeps `map` within [`MAX_ENTRIES`]: expired entries go first; if that is
+/// not enough, the ones touched longest ago go down to three quarters of the
+/// limit, entries that still lock someone out only after all others.
+fn bound<V>(
+    map: &mut HashMap<u64, V>,
+    alive: impl Fn(&V) -> bool,
+    locked: impl Fn(&V) -> bool,
+    touched: impl Fn(&V) -> Instant,
+) {
+    if map.len() <= MAX_ENTRIES {
+        return;
     }
+    map.retain(|_, v| alive(v));
+    if map.len() <= MAX_ENTRIES {
+        return;
+    }
+    let mut order: Vec<(bool, Instant, u64)> = map
+        .iter()
+        .map(|(k, v)| (locked(v), touched(v), *k))
+        .collect();
+    order.sort_unstable();
+    let excess = map.len() - MAX_ENTRIES * 3 / 4;
+    for (_, _, key) in order.into_iter().take(excess) {
+        map.remove(&key);
+    }
+}
+
+fn bound_strikes(map: &mut HashMap<u64, Strikes>, now: Instant) {
+    bound(
+        map,
+        |s| s.last.elapsed() < PAIR_TTL,
+        |s| s.wait_until.is_some_and(|t| t > now),
+        |s| s.last,
+    );
+}
+
+fn bound_windows(map: &mut HashMap<u64, Window>, window: Duration, limit: u32) {
+    bound(
+        map,
+        |w| w.start.elapsed() < window,
+        |w| w.count >= limit,
+        |w| w.last_attempt.unwrap_or(w.start).max(w.start),
+    );
 }
 
 impl LoginLimiter {
@@ -102,7 +162,12 @@ impl LoginLimiter {
     }
 
     fn pair_key(&self, ip: IpAddr, scope: &str, name: &str) -> u64 {
-        self.hasher.hash_one((ip, scope, normalize_username(name)))
+        self.hasher
+            .hash_one((rate_key(ip), scope, normalize_username(name)))
+    }
+
+    fn address_key(&self, ip: IpAddr) -> u64 {
+        self.hasher.hash_one(("address", rate_key(ip)))
     }
 
     fn name_key(&self, name: &str) -> u64 {
@@ -110,15 +175,27 @@ impl LoginLimiter {
     }
 
     fn check_pair(maps: &mut Maps, key: u64, now: Instant) -> Result<(), ServiceError> {
-        match maps.pairs.get(&key) {
+        Self::check_strikes(&maps.pairs, key, now)
+    }
+
+    fn check_strikes(
+        map: &HashMap<u64, Strikes>,
+        key: u64,
+        now: Instant,
+    ) -> Result<(), ServiceError> {
+        match map.get(&key) {
             Some(s) if s.wait_until.is_some_and(|t| t > now) => Err(too_many()),
             _ => Ok(()),
         }
     }
 
     fn fail_pair(maps: &mut Maps, key: u64, now: Instant) {
-        bound(&mut maps.pairs, |s| s.last.elapsed() < PAIR_TTL);
-        let entry = maps.pairs.entry(key).or_insert(Strikes {
+        Self::strike(&mut maps.pairs, key, now, FREE_FAILURES);
+    }
+
+    fn strike(map: &mut HashMap<u64, Strikes>, key: u64, now: Instant, free: u32) {
+        bound_strikes(map, now);
+        let entry = map.entry(key).or_insert(Strikes {
             failures: 0,
             last: now,
             wait_until: None,
@@ -126,23 +203,25 @@ impl LoginLimiter {
         if now.duration_since(entry.last) >= PAIR_TTL {
             entry.failures = 0;
         }
-        entry.failures += 1;
+        entry.failures = entry.failures.saturating_add(1);
         entry.last = now;
-        if entry.failures > FREE_FAILURES {
-            let step = (entry.failures - FREE_FAILURES - 1).min(20);
+        if entry.failures > free {
+            let step = (entry.failures - free - 1).min(20);
             let delay = Duration::from_secs(1u64 << step).min(MAX_DELAY);
             entry.wait_until = Some(now + delay);
         }
     }
 
     /// Before a password is checked: refuses while this address must wait
-    /// for this name, or while the name is over its soft limit and was tried
-    /// moments ago.
+    /// (for this name, or after too many failures over all names), or while
+    /// the name is over its soft limit and was tried moments ago.
     pub fn check_password(&self, ip: IpAddr, name: &str) -> Result<(), ServiceError> {
         let pair = self.pair_key(ip, "password", name);
+        let address = self.address_key(ip);
         let name = self.name_key(name);
         let now = Instant::now();
         self.with(|maps| {
+            Self::check_strikes(&maps.addresses, address, now)?;
             Self::check_pair(maps, pair, now)?;
             if let Some(w) = maps.names.get_mut(&name)
                 && now.duration_since(w.start) < NAME_WINDOW
@@ -161,11 +240,13 @@ impl LoginLimiter {
 
     pub fn password_failed(&self, ip: IpAddr, name: &str) {
         let pair = self.pair_key(ip, "password", name);
+        let address = self.address_key(ip);
         let name = self.name_key(name);
         let now = Instant::now();
         self.with(|maps| {
             Self::fail_pair(maps, pair, now);
-            bound(&mut maps.names, |w| w.start.elapsed() < NAME_WINDOW);
+            Self::strike(&mut maps.addresses, address, now, ADDRESS_FREE_FAILURES);
+            bound_windows(&mut maps.names, NAME_WINDOW, NAME_SOFT_LIMIT);
             let w = maps.names.entry(name).or_insert(Window {
                 start: now,
                 count: 0,
@@ -183,7 +264,8 @@ impl LoginLimiter {
     }
 
     /// A correct password clears this address's strikes for the name. The
-    /// per-name count stays: one success must not reset a spread-out attack.
+    /// per-name count and the address's count over all names stay: one
+    /// success (on an account the guesser owns, say) must not reset an attack.
     pub fn password_succeeded(&self, ip: IpAddr, name: &str) {
         let pair = self.pair_key(ip, "password", name);
         self.with(|maps| {
@@ -228,12 +310,10 @@ impl LoginLimiter {
     /// Counts a passkey challenge; refuses past [`MAX_CHALLENGES`] per
     /// address, so one client cannot fill the shared ceremony store.
     pub fn allow_challenge(&self, ip: IpAddr) -> Result<(), ServiceError> {
-        let key = self.hasher.hash_one(("challenge", ip));
+        let key = self.hasher.hash_one(("challenge", rate_key(ip)));
         let now = Instant::now();
         self.with(|maps| {
-            bound(&mut maps.challenges, |w| {
-                w.start.elapsed() < CHALLENGE_WINDOW
-            });
+            bound_windows(&mut maps.challenges, CHALLENGE_WINDOW, MAX_CHALLENGES);
             let w = maps.challenges.entry(key).or_insert(Window {
                 start: now,
                 count: 0,
@@ -257,7 +337,7 @@ impl LoginLimiter {
     #[cfg(test)]
     fn rewind(&self, by: Duration) {
         self.with(|maps| {
-            for s in maps.pairs.values_mut() {
+            for s in maps.pairs.values_mut().chain(maps.addresses.values_mut()) {
                 s.last -= by;
                 s.wait_until = s.wait_until.map(|t| t - by);
             }
@@ -270,7 +350,9 @@ impl LoginLimiter {
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.with(|maps| maps.pairs.len() + maps.names.len() + maps.challenges.len())
+        self.with(|maps| {
+            maps.pairs.len() + maps.addresses.len() + maps.names.len() + maps.challenges.len()
+        })
     }
 }
 
@@ -280,6 +362,76 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn ipv6_counts_by_its_64() {
+        assert_eq!(rate_key(ip("2001:db8:1:2:aaaa::1")), ip("2001:db8:1:2::"));
+        assert_eq!(
+            rate_key(ip("2001:db8:1:2:ffff:ffff:ffff:ffff")),
+            ip("2001:db8:1:2::")
+        );
+        assert_ne!(rate_key(ip("2001:db8:1:3::1")), ip("2001:db8:1:2::"));
+        assert_eq!(rate_key(ip("::ffff:203.0.113.7")), ip("203.0.113.7"));
+        assert_eq!(rate_key(ip("203.0.113.7")), ip("203.0.113.7"));
+
+        // Hopping addresses inside one /64 does not reset the brake.
+        let l = LoginLimiter::default();
+        for i in 0..=FREE_FAILURES {
+            l.password_failed(ip(&format!("2001:db8::{:x}", i + 1)), "alice");
+        }
+        assert!(l.check_password(ip("2001:db8::beef"), "alice").is_err());
+        l.check_password(ip("2001:db8:0:1::1"), "alice").unwrap();
+        for i in 0..MAX_CHALLENGES {
+            l.allow_challenge(ip(&format!("2001:db8:5::{:x}", i + 1)))
+                .unwrap();
+        }
+        assert!(l.allow_challenge(ip("2001:db8:5::ffff")).is_err());
+    }
+
+    #[test]
+    fn random_names_from_one_address_hit_the_address_brake() {
+        let l = LoginLimiter::default();
+        let a = ip("203.0.113.7");
+        for i in 0..ADDRESS_FREE_FAILURES {
+            let name = format!("guess{i}");
+            l.check_password(a, &name).unwrap();
+            l.password_failed(a, &name);
+        }
+        l.check_password(a, "fresh-name").unwrap();
+        l.password_failed(a, "fresh-name");
+        // Every name is refused now, a new one too, until the wait is over.
+        assert!(l.check_password(a, "another-name").is_err());
+        assert!(l.check_password(a, "alice").is_err());
+        // A success does not clear the address's count.
+        l.password_succeeded(a, "alice");
+        assert!(l.check_password(a, "alice").is_err());
+        // Other addresses are not affected.
+        l.check_password(ip("198.51.100.1"), "alice").unwrap();
+        l.rewind(Duration::from_secs(1));
+        l.check_password(a, "alice").unwrap();
+    }
+
+    #[test]
+    fn a_full_map_keeps_live_lockouts() {
+        let l = LoginLimiter::default();
+        let locked = ip("198.51.100.66");
+        for _ in 0..=FREE_FAILURES {
+            l.password_failed(locked, "alice");
+        }
+        assert!(l.check_password(locked, "alice").is_err());
+        // Fill the pair map past its limit with single failures.
+        l.with(|maps| {
+            let now = Instant::now();
+            for i in 0..=MAX_ENTRIES as u64 {
+                LoginLimiter::fail_pair(maps, i, now);
+            }
+        });
+        assert!(l.with(|maps| maps.pairs.len()) <= MAX_ENTRIES);
+        assert!(
+            l.check_password(locked, "alice").is_err(),
+            "the lockout survived"
+        );
     }
 
     #[test]
@@ -401,7 +553,8 @@ mod tests {
         for i in 0..(MAX_ENTRIES as u32 + 10) {
             l.password_failed(IpAddr::from(i.to_be_bytes()), &format!("user{i}"));
         }
-        assert!(l.len() <= 2 * MAX_ENTRIES + 2);
+        // Pairs, addresses and names: each map stays within its limit.
+        assert!(l.len() <= 3 * MAX_ENTRIES + 3);
     }
 
     #[test]

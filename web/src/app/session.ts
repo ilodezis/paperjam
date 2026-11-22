@@ -1,4 +1,5 @@
 import { api, type User } from "../api";
+import { clearCachedPages } from "../pwa";
 import { sessionQuery } from "../queries";
 import { persister } from "./persist";
 import { queryClient } from "./queryClient";
@@ -38,15 +39,22 @@ export function signedIn(user: User): void {
   queryClient.setQueryData(sessionQuery.queryKey, { user });
 }
 
-/** Nobody is signed in: forget what the device was told about them, in memory and on disk. */
+/** Nobody is signed in: forget what the device was told about them, in memory and on disk
+ *  (the query cache and the pages the service worker kept). */
 export async function forgetUser(): Promise<void> {
   setSessionHint(false);
   dropUserData();
-  await persister.removeClient();
+  await Promise.all([persister.removeClient(), clearCachedPages()]);
 }
 
+/** Signs out on the server and forgets the user here. The local data goes even when the server
+ *  cannot be reached: a shared or lost device must not keep the archive because the network was
+ *  down at the moment of sign-out. The server's error is passed on. */
 export async function signOut(): Promise<void> {
-  await api.logout();
-  await forgetUser();
-  queryClient.setQueryData(sessionQuery.queryKey, { user: null });
+  try {
+    await api.logout();
+  } finally {
+    await forgetUser();
+    queryClient.setQueryData(sessionQuery.queryKey, { user: null });
+  }
 }

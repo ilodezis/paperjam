@@ -64,6 +64,19 @@ pub fn verify_download_token(app: &App, token: &str) -> Result<DocumentId> {
     id.parse().map_err(|_| invalid_download_link())
 }
 
+/// The document behind a download link, while the link is valid and the
+/// document is not in the trash: moving a document to the trash revokes the
+/// links already handed out for it.
+pub async fn open_download_link(app: &App, token: &str) -> Result<DocumentId> {
+    let id = verify_download_token(app, token)?;
+    let live: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM documents WHERE id = ? AND trashed_at IS NULL")
+            .bind(id)
+            .fetch_optional(&app.db.read)
+            .await?;
+    live.map(|_| id).ok_or_else(invalid_download_link)
+}
+
 fn invalid_upload_link() -> ServiceError {
     ServiceError::unauthorized(
         "upload_link_invalid",
@@ -181,6 +194,29 @@ mod tests {
         let (token, expires) = download_token(&app, id);
         assert!(expires > Utc::now());
         assert_eq!(verify_download_token(&app, &token).unwrap(), id);
+    }
+
+    #[tokio::test]
+    async fn moving_a_document_to_the_trash_revokes_its_download_links() {
+        let (_dir, app) = test_app().await;
+        let id = insert_document(&app).await;
+        let (token, _) = download_token(&app, id);
+        assert_eq!(open_download_link(&app, &token).await.unwrap(), id);
+        sqlx::query("UPDATE documents SET trashed_at = ? WHERE id = ?")
+            .bind(time::now_ts())
+            .bind(id)
+            .execute(&app.db.write)
+            .await
+            .unwrap();
+        let err = open_download_link(&app, &token).await.unwrap_err();
+        assert_eq!(err.code, "download_link_invalid");
+        // Restored, the link works again until it expires.
+        sqlx::query("UPDATE documents SET trashed_at = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&app.db.write)
+            .await
+            .unwrap();
+        assert_eq!(open_download_link(&app, &token).await.unwrap(), id);
     }
 
     #[tokio::test]

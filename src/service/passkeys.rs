@@ -240,6 +240,15 @@ fn to_value(value: &impl Serialize) -> Result<Value> {
 
 /// The signature counter inside a serialized passkey (0 for synced passkeys,
 /// which do not count).
+/// Whether a signature counter `sent` may follow the `stored` one. A
+/// counting authenticator must count up: a counter at or below the last one
+/// seen means a cloned key, and so does a key that counted before and now
+/// sends 0 (WebAuthn §6.1.1). A synced passkey that never counts (0 stored,
+/// 0 sent) is fine.
+fn counter_moves_on(stored: i64, sent: i64) -> bool {
+    sent > stored || (sent == 0 && stored == 0)
+}
+
 fn counter_of(json: &Value) -> i64 {
     json["cred"]["counter"].as_i64().unwrap_or(0)
 }
@@ -526,10 +535,8 @@ pub async fn finish_login(
         refused()
     })?;
 
-    // A counting authenticator must count up; a counter at or below the last
-    // one seen means a cloned key.
     let counter = i64::from(verified.counter());
-    if counter > 0 && counter <= row.sign_count {
+    if !counter_moves_on(row.sign_count, counter) {
         tracing::warn!(passkey_id = %row.id, "passkey signature counter went backwards");
         return Err(refused());
     }
@@ -589,6 +596,19 @@ mod tests {
         let (dir, app) = test_app().await;
         let passkeys = Passkeys::from_config(&config(Some(PUBLIC_URL)));
         (dir, App { passkeys, ..app })
+    }
+
+    #[test]
+    fn the_signature_counter_must_move_on() {
+        // A synced passkey never counts.
+        assert!(counter_moves_on(0, 0));
+        // A counting key counts up.
+        assert!(counter_moves_on(0, 1));
+        assert!(counter_moves_on(7, 8));
+        // Backwards, standing still, or back to 0 after counting: a clone.
+        assert!(!counter_moves_on(7, 7));
+        assert!(!counter_moves_on(7, 3));
+        assert!(!counter_moves_on(7, 0));
     }
 
     async fn user(app: &App, name: &str) -> User {

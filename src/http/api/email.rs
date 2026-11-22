@@ -92,7 +92,11 @@ pub async fn ingest(
         raw.extend_from_slice(&chunk);
     }
 
-    let envelope_from = headers.get("x-envelope-from").and_then(|v| v.to_str().ok());
+    // A present but non-ASCII header counts as empty, so the allowlist rejects
+    // it instead of silently falling back to `From:`.
+    let envelope_from = headers
+        .get("x-envelope-from")
+        .map(|v| v.to_str().unwrap_or(""));
     let report = crate::email::ingest(&state.app, config, &raw, envelope_from).await?;
     Ok(Json(report))
 }

@@ -42,3 +42,29 @@ export function monitorOnlineStatus(
     win.removeEventListener("offline", handleOffline);
   };
 }
+
+/** The app's own static files: the shell, its hashed bundles, fonts and icons. */
+const STATIC_PATHS = new Set(["/", "/index.html", "/manifest.webmanifest", "/favicon.svg", "/icon.svg", "/icon-maskable.svg"]);
+
+function isStaticPath(pathname: string): boolean {
+  return STATIC_PATHS.has(pathname) || pathname.startsWith("/assets/") || pathname.startsWith("/fonts/");
+}
+
+/**
+ * Deletes everything the service worker cached except the app's static files, so no page a
+ * signed-in user opened stays in the browser profile after sign-out. Never throws.
+ */
+export async function clearCachedPages(storage: CacheStorage | undefined = globalThis.caches): Promise<void> {
+  if (!storage) return;
+  try {
+    for (const name of await storage.keys()) {
+      if (!name.startsWith("paperjam-shell-")) continue;
+      const cache = await storage.open(name);
+      for (const request of await cache.keys()) {
+        if (!isStaticPath(new URL(request.url).pathname)) await cache.delete(request);
+      }
+    }
+  } catch {
+    /* storage refused or unavailable */
+  }
+}

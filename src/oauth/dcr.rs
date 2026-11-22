@@ -43,6 +43,9 @@ const APP_SCHEMES: &[&str] = &[
     "zed",
 ];
 
+/// Addresses the registration limiter keeps track of at once.
+const MAX_TRACKED: usize = 10_000;
+
 /// Counts registrations per address.
 #[derive(Default)]
 pub struct RegistrationLimiter {
@@ -50,14 +53,20 @@ pub struct RegistrationLimiter {
 }
 
 impl RegistrationLimiter {
-    /// Records an attempt; false when the address has used up its hour.
+    /// Records an attempt; false when the address (an IPv6 one by its /64)
+    /// has used up its hour. When the map is full of live entries, new
+    /// addresses are refused until old ones expire.
     pub fn allow(&self, ip: IpAddr) -> bool {
+        let ip = crate::http::limiter::rate_key(ip);
         let mut map = self
             .hits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if map.len() > 10_000 {
+        if map.len() >= MAX_TRACKED && !map.contains_key(&ip) {
             map.retain(|_, times| times.iter().any(|t| t.elapsed() < WINDOW));
+            if map.len() >= MAX_TRACKED {
+                return false;
+            }
         }
         let times = map.entry(ip).or_default();
         times.retain(|t| t.elapsed() < WINDOW);
@@ -213,6 +222,31 @@ pub async fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registrations_count_an_ipv6_client_by_its_64() {
+        let l = RegistrationLimiter::default();
+        for i in 0..MAX_REGISTRATIONS {
+            let ip: IpAddr = format!("2001:db8:7::{:x}", i + 1).parse().unwrap();
+            assert!(l.allow(ip));
+        }
+        assert!(!l.allow("2001:db8:7::ffff".parse().unwrap()));
+        assert!(l.allow("2001:db8:8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_full_registration_map_refuses_new_addresses_and_stays_bounded() {
+        let l = RegistrationLimiter::default();
+        let known: IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(l.allow(known));
+        for i in 0..MAX_TRACKED as u32 {
+            let ip = IpAddr::from([10, (i >> 16) as u8, (i >> 8) as u8, i as u8]);
+            l.allow(ip);
+        }
+        assert!(!l.allow("198.51.100.1".parse().unwrap()));
+        assert!(l.allow(known), "a known address keeps its own count");
+        assert!(l.hits.lock().unwrap().len() <= MAX_TRACKED);
+    }
 
     #[test]
     fn redirect_uris_are_capped_in_length() {

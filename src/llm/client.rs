@@ -120,6 +120,8 @@ pub struct LlmClient {
     cost_warned: AtomicBool,
     /// OpenRouter models known to reject `reasoning.effort = "none"` with 400.
     no_none_effort: Mutex<HashSet<String>>,
+    /// Budget set aside for this client's calls in flight.
+    reservations: crate::llm::budget::Reservations,
 }
 
 fn build_http(timeout: Duration) -> reqwest::Client {
@@ -145,7 +147,13 @@ impl LlmClient {
             prices: HashMap::new(),
             cost_warned: AtomicBool::new(false),
             no_none_effort: Mutex::new(HashSet::new()),
+            reservations: crate::llm::budget::Reservations::default(),
         }
+    }
+
+    /// The budget held for calls still running; see [`crate::llm::budget::reserve`].
+    pub fn reservations(&self) -> &crate::llm::budget::Reservations {
+        &self.reservations
     }
 
     /// The client for the configured key; `None` when no key is set (the

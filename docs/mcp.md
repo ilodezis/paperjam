@@ -92,7 +92,7 @@ The contract (names, descriptions, input and output schemas) is [`src/mcp/tools.
 
 Everything the REST API can do except purging has a tool, and the other way round. A test keeps the two in step.
 
-Tool annotations are set honestly (`readOnlyHint`, `destructiveHint`, `idempotentHint`), so a client can let read-only tools run without asking.
+Tool annotations are set honestly (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), so a client can let read-only tools run without asking. `get_download_link` and `share_document` mint URLs that work for anyone who holds them, so they are marked not read-only and open-world: a client asks the user before running them. Moving a document to the trash revokes its download links at once.
 
 A search through the endpoint, as an agent would send it:
 

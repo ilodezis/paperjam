@@ -1,6 +1,8 @@
 /// <reference lib="webworker" />
 
-const CACHE_NAME = "paperjam-shell-v2";
+// v3: earlier versions stored shared-document and OAuth pages; activating
+// this one deletes those caches.
+const CACHE_NAME = "paperjam-shell-v3";
 
 const PRECACHE_ASSETS = [
   "/",
@@ -10,6 +12,22 @@ const PRECACHE_ASSETS = [
   "/icon.svg",
   "/icon-maskable.svg",
 ];
+
+/** Paths served only from the live server: the API, shared-document pages, the OAuth screens and
+ *  calendar feeds carry a document or a grant and must never land in the browser profile. */
+const NETWORK_ONLY_PREFIXES = ["/api/", "/s/", "/oauth/", "/calendar/", "/.well-known/"];
+
+function networkOnly(pathname) {
+  return pathname === "/healthz" || NETWORK_ONLY_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
+/** A response the server lets a shared cache keep: a plain same-origin 200 without `no-store` or
+ *  `private`. */
+function storable(response) {
+  if (!response.ok || response.status !== 200 || response.type !== "basic") return false;
+  const cacheControl = (response.headers.get("Cache-Control") || "").toLowerCase();
+  return !/\b(no-store|private)\b/.test(cacheControl);
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -56,26 +74,23 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // STRICT RULE: Never cache API calls or healthcheck endpoints.
+  // STRICT RULE: never cache API calls, shared documents, OAuth or calendar feeds.
   // Sensitive documents and state must only come from the live server.
-  if (url.pathname.startsWith("/api/") || url.pathname === "/healthz") {
+  if (networkOnly(url.pathname)) {
     return;
   }
 
-  // Navigation requests: Network-first, fallback to cached offline app shell.
+  // Navigation requests: network-first, falling back to the cached app shell. Only the shell
+  // itself (`/`) is stored; other pages are never kept, so the offline shell is always the app.
   if (request.mode === "navigate") {
     event.respondWith(
       fetch(request)
         .then((networkResponse) => {
-          if (
-            networkResponse.ok &&
-            networkResponse.status === 200 &&
-            networkResponse.type === "basic"
-          ) {
+          if (url.pathname === "/" && !url.search && storable(networkResponse)) {
             const responseToCache = networkResponse.clone();
             void caches.open(CACHE_NAME).then((cache) => {
-              void cache.put(request, responseToCache);
-              void cache.put("/index.html", responseToCache.clone());
+              void cache.put("/", responseToCache.clone());
+              void cache.put("/index.html", responseToCache);
             });
           }
           return networkResponse;
@@ -105,11 +120,7 @@ self.addEventListener("fetch", (event) => {
       }
 
       return fetch(request).then((networkResponse) => {
-        if (
-          networkResponse.ok &&
-          networkResponse.status === 200 &&
-          networkResponse.type === "basic"
-        ) {
+        if (storable(networkResponse)) {
           const responseToCache = networkResponse.clone();
           void caches.open(CACHE_NAME).then((cache) => {
             void cache.put(request, responseToCache);

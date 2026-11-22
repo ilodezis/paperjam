@@ -433,7 +433,12 @@ fn email_intake_settings(
     }
 
     let allowed_senders = match senders {
-        None => Vec::new(),
+        None => {
+            tracing::warn!(
+                "PAPERJAM_EMAIL_ALLOWED_SENDERS is unset: any sender that reaches the email endpoint can add documents"
+            );
+            Vec::new()
+        }
         Some(raw) => {
             let mut rules = Vec::new();
             for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {

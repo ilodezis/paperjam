@@ -20,7 +20,7 @@ PAPERJAM_EMAIL_TAG=email
 |---|---|---|
 | `PAPERJAM_EMAIL_SECRET` | unset (feature off) | Shared write-only bearer secret (`Authorization: Bearer …`). Must be at least 32 bytes. Can only submit mail; cannot read, list or modify documents. |
 | `PAPERJAM_EMAIL_USER` | the only active user | Username that owns ingested documents. Optional while only one active user exists; required when there are several. |
-| `PAPERJAM_EMAIL_ALLOWED_SENDERS` | unset (any sender) | Comma-separated list of exact addresses (`alice@example.org`) and `@domain` suffixes (`@example.org`). Checked against `X-Envelope-From` when supplied, otherwise against all `From` addresses. |
+| `PAPERJAM_EMAIL_ALLOWED_SENDERS` | unset (any sender) | Comma-separated list of exact addresses (`alice@example.org`) and `@domain` suffixes (`@example.org`). Checked against `X-Envelope-From` when supplied (an empty value is rejected), otherwise against all `From` addresses. Set it even when a Worker filters senders at the edge: paperjam's own parse of `From:` is the one that counts. |
 | `PAPERJAM_EMAIL_BODY_FALLBACK` | `true` | When an email has no eligible attachments (for instance, a receipt or booking confirmation in the body), convert the headers and body text to a `.md` document. Set `false` to ignore attachment-less emails. |
 | `PAPERJAM_EMAIL_LOCAL_ONLY` | `false` | Set `true` to mark every emailed document *Process on this server only* (no LLM calls). |
 | `PAPERJAM_EMAIL_TAG` | unset | Tag name (up to 64 characters) created if missing and attached to every ingested document. |
@@ -63,12 +63,43 @@ Email `From:` headers can be forged by any sender. Before invoking an Email Work
 1. In the Cloudflare dashboard, open **Compute (Workers)** → **Create Worker** (or deploy with Wrangler) and paste the script below:
 
 ```js
+// Splits a From: header into lowercase addresses the way an RFC 5322 parser
+// does: quoted strings and (nested) comments are dropped, and commas inside
+// them do not split. Anything ambiguous returns null so the mail is rejected.
 function extractAddresses(header) {
-  const cleaned = header
-    .replace(/"(?:\\.|[^"\\])*"/g, " ")
-    .replace(/\((?:\\.|[^()\\])*\)/g, " ");
+  const parts = [];
+  let current = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < header.length; i++) {
+    const ch = header[i];
+    if (ch === "\\" && (quoted || depth > 0)) {
+      i++;
+    } else if (quoted) {
+      if (ch === '"') {
+        quoted = false;
+        current += " ";
+      }
+    } else if (depth > 0) {
+      if (ch === "(") depth++;
+      else if (ch === ")" && --depth === 0) current += " ";
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === "(") {
+      depth = 1;
+    } else if (ch === ")") {
+      return null;
+    } else if (ch === ",") {
+      parts.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (quoted || depth > 0) return null;
+  parts.push(current);
   const out = [];
-  for (const part of cleaned.split(",")) {
+  for (const part of parts) {
     const trimmed = part.trim();
     if (!trimmed) continue;
     const angles = trimmed.match(/<([^<>]+)>/g);
@@ -144,7 +175,7 @@ export default {
 2. In the Worker's **Settings → Variables and Secrets**, add:
    - `PAPERJAM_URL`: `https://paperjam.example.org`
    - `EMAIL_SECRET` (**Secret**): the same value as `PAPERJAM_EMAIL_SECRET`
-   - `ALLOWED_SENDERS` (optional): comma-separated list of your addresses, e.g. `alice@example.org`
+   - `ALLOWED_SENDERS`: comma-separated list of your addresses, e.g. `alice@example.org`. Keep the same list in `PAPERJAM_EMAIL_ALLOWED_SENDERS` on the server, so a header the Worker reads differently from paperjam is still refused.
 3. Under **Email → Email Routing → Routing rules**, create a custom address (for example `docs@example.org`) and set its action to **Send to a Worker**, choosing the Worker you just created.
 
 > **Important:** Cloudflare passes the full raw email through the Worker before reaching your server. If you do not want a third-party mail relay in the path, feed the endpoint from your own mail server instead (next section).
@@ -161,7 +192,7 @@ curl -fsS -X POST https://paperjam.example.org/api/v1/ingest/email \
   --data-binary @-
 ```
 
-When `X-Envelope-From` is omitted, paperjam validates `PAPERJAM_EMAIL_ALLOWED_SENDERS` against every address in the email's `From` header instead.
+When `X-Envelope-From` is omitted, paperjam validates `PAPERJAM_EMAIL_ALLOWED_SENDERS` against every address in the email's `From` header instead. A header that is present but empty is refused with `sender_not_allowed` rather than falling back to `From:`.
 
 ## Response format
 
@@ -195,7 +226,7 @@ When `X-Envelope-From` is omitted, paperjam validates `PAPERJAM_EMAIL_ALLOWED_SE
 
 - **`PAPERJAM_EMAIL_SECRET` is write-only.** Unlike a `pj_…` API token, it cannot search, read, edit, or delete documents. Never put a user API token into a Cloudflare Worker or mail script.
 - **Brute-force protection.** Failed secret attempts are rate-limited per client address with exponential backoff (`429 too_many_attempts`). Behind a reverse proxy, make sure `PAPERJAM_TRUSTED_PROXIES` and `PAPERJAM_CLIENT_IP_HEADER` are configured ([proxy notes](configuration.md#behind-a-reverse-proxy)).
-- **Sender allowlist + budget.** Use `PAPERJAM_EMAIL_ALLOWED_SENDERS` (and `dmarc=pass` in the Worker) together with `PAPERJAM_LLM_MONTHLY_BUDGET_USD` if your address is easy to guess. Set `PAPERJAM_EMAIL_LOCAL_ONLY=true` if emailed documents should never go to an LLM.
+- **Sender allowlist + budget.** Always set `PAPERJAM_EMAIL_ALLOWED_SENDERS` on the server, even with the Worker's `dmarc=pass` and `ALLOWED_SENDERS` checks in front: the edge and the server parse `From:` with different code, and only the server's check sees exactly what gets ingested. Add `PAPERJAM_LLM_MONTHLY_BUDGET_USD` if your address is easy to guess. Set `PAPERJAM_EMAIL_LOCAL_ONLY=true` if emailed documents should never go to an LLM.
 - **Unauthenticated bodies are not buffered.** The secret and rate limiter are checked before reading the request body, and oversized payloads fail at `PAPERJAM_MAX_UPLOAD_BYTES`.
 
 ## Troubleshooting

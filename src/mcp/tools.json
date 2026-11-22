@@ -1056,7 +1056,7 @@
     {
       "name": "get_download_link",
       "title": "Get a download link",
-      "description": "A short-lived (10 minutes) URL to the original file, for a person to open or an agent with a shell to fetch. The file is returned byte for byte.",
+      "description": "A short-lived (10 minutes) URL to the original file, for a person to open or an agent with a shell to fetch. The file is returned byte for byte. Anyone holding the URL can download the file until it expires (or the document is trashed): fetch it yourself or hand it to the person who asked, never post it anywhere else.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1102,16 +1102,16 @@
         "additionalProperties": false
       },
       "annotations": {
-        "readOnlyHint": true,
+        "readOnlyHint": false,
         "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
     {
       "name": "share_document",
       "title": "Share a document",
-      "description": "A link to a page that shows the document to anyone who has it, without signing in: its pages, a download button (the clean copy of a scan, else the original) and, with show_details, the summary and extracted values. It works for 15 minutes, an hour or a day; people see and revoke live links in the web UI. Give the URL to the person who asked; never post it anywhere on your own.",
+      "description": "A link to a page that shows the document to anyone who has it, without signing in: its pages, a download button (the clean copy of a scan, else the original) and, with show_details, the summary and extracted values. It works for 15 minutes, an hour or a day; people see and revoke live links in the web UI. Give the URL to the person who asked; never post it anywhere on your own. Only call it when the user asked to share this document: the page is public to anyone with the link.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1172,7 +1172,7 @@
         "readOnlyHint": false,
         "destructiveHint": false,
         "idempotentHint": false,
-        "openWorldHint": false
+        "openWorldHint": true
       }
     },
     {

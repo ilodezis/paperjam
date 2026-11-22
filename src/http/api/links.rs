@@ -96,7 +96,7 @@ pub async fn download(
     State(state): State<HttpState>,
     ApiPath(token): ApiPath<String>,
 ) -> ApiResult<Response> {
-    let id = links::verify_download_token(&state.app, &token)?;
+    let id = links::open_download_link(&state.app, &token).await?;
     let file = documents::original_file(&state.app.ctx(Actor::system()), id).await?;
     file_response(&state.app, file.into(), false)
 }
