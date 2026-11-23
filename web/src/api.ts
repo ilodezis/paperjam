@@ -149,6 +149,89 @@ export interface CreatedEmailSecret {
   secret: string;
 }
 
+export interface SettingsSummary {
+  llm_enabled: boolean;
+  llm_configured: boolean;
+  llm_model: string;
+  llm_handwriting_enabled: boolean;
+  llm_allowed_models: string[];
+  llm_monthly_budget_usd: string | null;
+  calendar_lead_days: number;
+  inbox_configured: boolean;
+  inbox_paused: boolean;
+}
+
+export interface InboxFailedFile {
+  name: string;
+  reason: string | null;
+  size: number;
+  failed_at: string | null;
+}
+
+export interface AdminLlmSettings {
+  enabled: boolean;
+  has_api_key: boolean;
+  api_key_source: "none" | "env" | "database";
+  base_url: string;
+  provider: "auto" | "openrouter" | "generic";
+  effective_provider: "openrouter" | "generic";
+  model: string;
+  vision_model: string;
+  handwriting_enabled: boolean;
+  handwriting_model: string;
+  allowed_models: string[];
+  reasoning_effort: string | null;
+  create_tags: boolean;
+  monthly_budget_usd: string | null;
+  prices: string;
+  has_overrides: boolean;
+}
+
+export interface AdminCalendarSettings {
+  lead_days: number;
+  has_overrides: boolean;
+}
+
+export interface AdminInboxSettings {
+  configured: boolean;
+  paused: boolean;
+  user_id: string | null;
+  interval_secs: number;
+  failed_files: InboxFailedFile[];
+  has_overrides: boolean;
+}
+
+export interface AdminSettingsView {
+  llm: AdminLlmSettings;
+  calendar: AdminCalendarSettings;
+  inbox: AdminInboxSettings;
+  ocr_langs: string;
+}
+
+export interface AdminSettingsPatch {
+  llm?: {
+    enabled?: boolean;
+    api_key?: string | null;
+    clear_api_key?: boolean;
+    base_url?: string;
+    provider?: "auto" | "openrouter" | "generic";
+    model?: string;
+    vision_model?: string;
+    handwriting_enabled?: boolean;
+    handwriting_model?: string;
+    allowed_models?: string[];
+    reasoning_effort?: string | null;
+    create_tags?: boolean;
+    monthly_budget_usd?: string | null;
+    prices?: string | null;
+  };
+  calendar?: { lead_days?: number };
+  inbox?: { paused?: boolean; user_id?: string | null; interval_secs?: number };
+  reset_llm?: boolean;
+  reset_calendar?: boolean;
+  reset_inbox?: boolean;
+}
+
 export interface PasskeyView {
   id: string;
   credential_id: string;
@@ -470,7 +553,8 @@ export const api = {
   document: (id: string, textPage?: number) => call<DocumentView>(`/documents/${id}${textPage ? `?text_page=${textPage}` : ""}`),
   documentEvents: (id: string) => call<DocumentEvent[]>(`/documents/${id}/events`),
   patchDocument: (id: string, patch: DocumentPatch) => call<DocumentView>(`/documents/${id}`, json(patch, "PATCH")),
-  reprocess: (id: string, llm: boolean) => call<{ id: string; status: DocumentStatus }>(`/documents/${id}/reprocess`, json({ local: true, llm })),
+  reprocess: (id: string, llm: boolean, model?: string) =>
+    call<{ id: string; status: DocumentStatus }>(`/documents/${id}/reprocess`, json(model ? { local: true, llm, model } : { local: true, llm })),
   createDownloadLink: (id: string) => call<DownloadLink>(`/documents/${id}/download-link`, { method: "POST" }),
   shares: (id: string) => call<Share[]>(`/documents/${id}/shares`),
   createShare: (id: string, input: { ttl: ShareTtl; show_details: boolean }) => call<Share>(`/documents/${id}/shares`, json(input)),
@@ -494,6 +578,9 @@ export const api = {
   updateEmailSettings: (patch: EmailSettingsPatch) => call<EmailSettingsView>("/settings/email", json(patch, "PATCH")),
   rotateEmailSecret: () => call<CreatedEmailSecret>("/settings/email/secret", { method: "POST" }),
   revokeEmailSecret: () => call<EmailSettingsView>("/settings/email/secret", { method: "DELETE" }),
+  settingsSummary: () => call<SettingsSummary>("/settings/summary"),
+  adminSettings: () => call<AdminSettingsView>("/settings"),
+  updateSettings: (patch: AdminSettingsPatch) => call<AdminSettingsView>("/settings", json(patch, "PATCH")),
   connections: () => call<Connection[]>("/connections"),
   disconnect: (id: string) => call<void>(`/connections/${id}`, { method: "DELETE" }),
   stats: () => call<Stats>("/stats"),

@@ -1,17 +1,25 @@
 //! Runtime-mutable instance settings backed by SQLite, with environment-variable
 //! defaults and hot reloading via `App::runtime_settings`.
 
+use std::collections::HashMap;
 use std::fmt;
 
+use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use url::Url;
 
-use crate::config::{Config, ConfigError, MAX_EMAIL_TAG_CHARS, SenderRule, parse_sender_rule};
+use crate::config::{
+    Config, ConfigError, DEFAULT_HANDWRITING_MODEL, LlmProvider, MAX_EMAIL_TAG_CHARS,
+    MAX_INBOX_INTERVAL_SECS, ModelPrice, SenderRule, parse_llm_prices, parse_sender_rule,
+};
+use crate::crypto;
 use crate::db::Db;
 use crate::error::{Result, ServiceError};
 use crate::hashing::sha256_hex;
 use crate::ids::UserId;
+use crate::inbox::{self, FailedInboxFile};
 use crate::service::{Ctx, Via, events};
 use crate::signing::constant_time_eq;
 use crate::{random, time};
@@ -19,6 +27,9 @@ use crate::{random, time};
 const EMAIL_SECRET_PREFIX: &str = "pje_";
 const EMAIL_SECRET_RANDOM_CHARS: usize = 40;
 const EMAIL_SECRET_VISIBLE_PREFIX_CHARS: usize = 12;
+const MAX_LLM_MODEL_CHARS: usize = 200;
+const MAX_CALENDAR_LEAD_DAYS: u32 = 3650;
+const LLM_API_KEY_SETTING: &str = "llm.api_key";
 
 /// How an incoming webhook secret is verified at runtime.
 #[derive(Clone)]
@@ -75,10 +86,74 @@ pub struct EmailRuntimeConfig {
     pub received_count: i64,
 }
 
+/// Active LLM configuration after merging DB overrides with env defaults.
+#[derive(Debug, Clone)]
+pub struct LlmRuntimeConfig {
+    pub enabled: bool,
+    pub api_key: Option<SecretString>,
+    pub api_key_source: &'static str,
+    pub base_url: Url,
+    pub provider: String,
+    pub effective_provider: LlmProvider,
+    pub model: String,
+    pub vision_model: String,
+    pub handwriting_enabled: bool,
+    pub handwriting_model: String,
+    pub allowed_models: Vec<String>,
+    pub reasoning_effort: Option<String>,
+    pub create_tags: bool,
+    pub monthly_budget_usd: Option<Decimal>,
+    pub prices: HashMap<String, ModelPrice>,
+    pub has_overrides: bool,
+}
+
+impl LlmRuntimeConfig {
+    /// Effective handwriting re-read model, or `None` when disabled, empty,
+    /// or identical to the primary vision model.
+    pub fn effective_handwriting_model(&self) -> Option<&str> {
+        (self.handwriting_enabled
+            && !self.handwriting_model.is_empty()
+            && self.handwriting_model != self.vision_model)
+            .then_some(self.handwriting_model.as_str())
+    }
+
+    /// Whether `model` is permitted for LLM reprocessing.
+    pub fn is_model_allowed(&self, model: &str) -> bool {
+        self.allowed_models.iter().any(|m| m == model)
+    }
+}
+
+/// Active calendar feed configuration after merging DB overrides with env defaults.
+#[derive(Debug, Clone)]
+pub struct CalendarRuntimeConfig {
+    pub lead_days: u32,
+    pub has_overrides: bool,
+}
+
+/// Active watched inbox folder configuration after merging DB overrides with env defaults.
+#[derive(Debug, Clone)]
+pub struct InboxRuntimeConfig {
+    pub configured: bool,
+    pub paused: bool,
+    pub user: Option<EmailUserTarget>,
+    pub interval_secs: u64,
+    pub has_overrides: bool,
+}
+
 /// Snapshot of all runtime-configurable settings kept in memory on [`crate::service::App`].
 #[derive(Debug, Clone)]
 pub struct RuntimeSettings {
     pub email: EmailRuntimeConfig,
+    pub llm: LlmRuntimeConfig,
+    pub calendar: CalendarRuntimeConfig,
+    pub inbox: InboxRuntimeConfig,
+}
+
+#[derive(sqlx::FromRow)]
+struct AppSettingRow {
+    key: String,
+    value: String,
+    encrypted: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -201,7 +276,372 @@ pub async fn load(config: &Config, db: &Db) -> Result<RuntimeSettings> {
         }
     };
 
-    Ok(RuntimeSettings { email })
+    let setting_rows: Vec<AppSettingRow> =
+        sqlx::query_as("SELECT key, value, encrypted FROM app_settings")
+            .fetch_all(&db.read)
+            .await?;
+    let rows: HashMap<String, (String, i64)> = setting_rows
+        .into_iter()
+        .map(|r| (r.key, (r.value, r.encrypted)))
+        .collect();
+
+    let llm = load_llm_settings(config, &rows);
+    let calendar = load_calendar_settings(config, &rows);
+    let inbox = load_inbox_settings(config, &rows);
+
+    Ok(RuntimeSettings {
+        email,
+        llm,
+        calendar,
+        inbox,
+    })
+}
+
+fn parse_bool_setting(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn validate_http_url(raw: &str) -> Result<Url> {
+    let trimmed = raw.trim();
+    let url = Url::parse(trimmed).map_err(|_| {
+        ServiceError::invalid("invalid_llm_base_url", "base URL must be a valid URL")
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(ServiceError::invalid(
+            "invalid_llm_base_url",
+            "base URL must use http or https with a host",
+        ));
+    }
+    Ok(url)
+}
+
+fn validate_provider(raw: &str) -> Result<String> {
+    let norm = raw.trim().to_ascii_lowercase();
+    match norm.as_str() {
+        "auto" | "openrouter" | "generic" => Ok(norm),
+        _ => Err(ServiceError::invalid(
+            "invalid_llm_provider",
+            "provider must be auto, openrouter, or generic",
+        )),
+    }
+}
+
+fn validate_model_name(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_LLM_MODEL_CHARS
+        || trimmed.chars().any(char::is_control)
+    {
+        return Err(ServiceError::invalid(
+            "invalid_llm_model",
+            format!("model identifier must be 1 to {MAX_LLM_MODEL_CHARS} printable characters"),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_reasoning_effort(raw: &str) -> Result<String> {
+    let norm = raw.trim().to_ascii_lowercase();
+    match norm.as_str() {
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" => Ok(norm),
+        _ => Err(ServiceError::invalid(
+            "invalid_reasoning_effort",
+            "reasoning effort must be one of none, minimal, low, medium, high, or xhigh",
+        )),
+    }
+}
+
+fn validate_budget(raw: &str) -> Result<Decimal> {
+    let trimmed = raw.trim();
+    trimmed
+        .parse::<Decimal>()
+        .ok()
+        .filter(|d| !d.is_sign_negative())
+        .ok_or_else(|| {
+            ServiceError::invalid(
+                "invalid_llm_budget",
+                "monthly budget must be a non-negative decimal amount",
+            )
+        })
+}
+
+pub(crate) fn format_llm_prices(prices: &HashMap<String, ModelPrice>) -> String {
+    let mut entries: Vec<(&String, &ModelPrice)> = prices.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+        .into_iter()
+        .map(|(model, p)| format!("{model}={}:{}", p.input_per_mtok, p.output_per_mtok))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn load_llm_settings(config: &Config, rows: &HashMap<String, (String, i64)>) -> LlmRuntimeConfig {
+    let has_overrides = rows.keys().any(|k| k.starts_with("llm."));
+    let enabled = rows
+        .get("llm.enabled")
+        .and_then(|(v, _)| parse_bool_setting(v))
+        .unwrap_or(true);
+
+    let mut db_api_key: Option<SecretString> = None;
+    if let Some((raw, encrypted)) = rows.get(LLM_API_KEY_SETTING) {
+        if *encrypted != 0 {
+            match crypto::decrypt_secret(
+                config.secret_key.expose_secret().as_bytes(),
+                LLM_API_KEY_SETTING,
+                raw,
+            ) {
+                Ok(plain) if !plain.trim().is_empty() => {
+                    db_api_key = Some(SecretString::from(plain.trim().to_string()));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to decrypt stored llm.api_key; treating database key as unavailable"
+                    );
+                }
+            }
+        } else if !raw.trim().is_empty() {
+            db_api_key = Some(SecretString::from(raw.trim().to_string()));
+        }
+    }
+
+    let (api_key, api_key_source) = match db_api_key {
+        Some(key) => (Some(key), "database"),
+        None => match &config.llm_api_key {
+            Some(key) => (Some(key.clone()), "env"),
+            None => (None, "none"),
+        },
+    };
+
+    let base_url = rows
+        .get("llm.base_url")
+        .and_then(|(raw, _)| match validate_http_url(raw) {
+            Ok(url) => Some(url),
+            Err(e) => {
+                tracing::warn!(error = %e, "ignoring invalid stored llm.base_url");
+                None
+            }
+        })
+        .unwrap_or_else(|| config.llm_base_url.clone());
+
+    let provider = rows
+        .get("llm.provider")
+        .and_then(|(raw, _)| match validate_provider(raw) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(error = %e, "ignoring invalid stored llm.provider");
+                None
+            }
+        })
+        .unwrap_or_else(|| config.llm_provider_raw.clone());
+
+    let effective_provider = match provider.as_str() {
+        "openrouter" => LlmProvider::OpenRouter,
+        "generic" => LlmProvider::Generic,
+        _ => LlmProvider::from_base_url(&base_url),
+    };
+
+    let model = rows
+        .get("llm.model")
+        .and_then(|(raw, _)| validate_model_name(raw).ok())
+        .unwrap_or_else(|| config.llm_model.clone());
+
+    let vision_model = rows
+        .get("llm.vision_model")
+        .and_then(|(raw, _)| validate_model_name(raw).ok())
+        .unwrap_or_else(|| config.llm_vision_model.clone());
+
+    let handwriting_enabled = rows
+        .get("llm.handwriting_enabled")
+        .and_then(|(raw, _)| parse_bool_setting(raw))
+        .unwrap_or(config.llm_handwriting_model.is_some());
+
+    let handwriting_model = rows
+        .get("llm.handwriting_model")
+        .and_then(|(raw, _)| validate_model_name(raw).ok())
+        .unwrap_or_else(|| {
+            config
+                .llm_handwriting_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_HANDWRITING_MODEL.to_string())
+        });
+
+    let stored_allowed = rows.get("llm.allowed_models").and_then(|(raw, _)| {
+        let parsed = serde_json::from_str::<Vec<String>>(raw)
+            .map_err(|e| tracing::warn!(error = %e, "ignoring malformed llm.allowed_models JSON"))
+            .ok()?;
+        let cleaned: Vec<String> = parsed
+            .into_iter()
+            .filter_map(|item| validate_model_name(&item).ok())
+            .collect();
+        (!cleaned.is_empty()).then_some(cleaned)
+    });
+
+    let allowed_models = match stored_allowed {
+        Some(list) => list,
+        None if config.llm_allowed_models_explicit => config.llm_allowed_models.clone(),
+        None => {
+            let mut models = vec![model.clone()];
+            if !models.contains(&vision_model) {
+                models.push(vision_model.clone());
+            }
+            if handwriting_enabled
+                && !handwriting_model.is_empty()
+                && handwriting_model != vision_model
+                && !models.contains(&handwriting_model)
+            {
+                models.push(handwriting_model.clone());
+            }
+            models
+        }
+    };
+
+    let reasoning_effort = match rows.get("llm.reasoning_effort") {
+        Some((raw, _)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                match validate_reasoning_effort(trimmed) {
+                    Ok(effort) => Some(effort),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ignoring invalid stored llm.reasoning_effort");
+                        config.llm_reasoning_effort.clone()
+                    }
+                }
+            }
+        }
+        None => config.llm_reasoning_effort.clone(),
+    };
+
+    let create_tags = rows
+        .get("llm.create_tags")
+        .and_then(|(raw, _)| parse_bool_setting(raw))
+        .unwrap_or(config.llm_create_tags);
+
+    let monthly_budget_usd = match rows.get("llm.monthly_budget_usd") {
+        Some((raw, _)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                match validate_budget(trimmed) {
+                    Ok(budget) => Some(budget),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ignoring invalid stored llm.monthly_budget_usd");
+                        config.llm_monthly_budget_usd
+                    }
+                }
+            }
+        }
+        None => config.llm_monthly_budget_usd,
+    };
+
+    let prices = match rows.get("llm.prices") {
+        Some((raw, _)) => {
+            if raw.trim().is_empty() {
+                HashMap::new()
+            } else {
+                match parse_llm_prices(raw) {
+                    Ok(map) => map,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ignoring invalid stored llm.prices");
+                        config.llm_prices.clone()
+                    }
+                }
+            }
+        }
+        None => config.llm_prices.clone(),
+    };
+
+    LlmRuntimeConfig {
+        enabled,
+        api_key,
+        api_key_source,
+        base_url,
+        provider,
+        effective_provider,
+        model,
+        vision_model,
+        handwriting_enabled,
+        handwriting_model,
+        allowed_models,
+        reasoning_effort,
+        create_tags,
+        monthly_budget_usd,
+        prices,
+        has_overrides,
+    }
+}
+
+fn load_calendar_settings(
+    config: &Config,
+    rows: &HashMap<String, (String, i64)>,
+) -> CalendarRuntimeConfig {
+    let has_overrides = rows.contains_key("calendar.lead_days");
+    let lead_days = rows
+        .get("calendar.lead_days")
+        .and_then(|(raw, _)| {
+            raw.trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|d| *d <= MAX_CALENDAR_LEAD_DAYS)
+        })
+        .unwrap_or(config.calendar_lead_days);
+    CalendarRuntimeConfig {
+        lead_days,
+        has_overrides,
+    }
+}
+
+fn load_inbox_settings(
+    config: &Config,
+    rows: &HashMap<String, (String, i64)>,
+) -> InboxRuntimeConfig {
+    let has_overrides = rows.keys().any(|k| k.starts_with("inbox."));
+    let paused = rows
+        .get("inbox.paused")
+        .and_then(|(raw, _)| parse_bool_setting(raw))
+        .unwrap_or(false);
+    let user = match rows.get("inbox.user_id") {
+        Some((raw, _)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                match trimmed.parse::<UserId>() {
+                    Ok(uid) => Some(EmailUserTarget::UserId(uid)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ignoring invalid stored inbox.user_id");
+                        config.inbox_user.clone().map(EmailUserTarget::Username)
+                    }
+                }
+            }
+        }
+        None => config.inbox_user.clone().map(EmailUserTarget::Username),
+    };
+    let interval_secs = rows
+        .get("inbox.interval_secs")
+        .and_then(|(raw, _)| {
+            raw.trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|s| (1..=MAX_INBOX_INTERVAL_SECS).contains(s))
+        })
+        .unwrap_or(config.inbox_interval_secs);
+
+    InboxRuntimeConfig {
+        configured: config.inbox_dir.is_some(),
+        paused,
+        user,
+        interval_secs,
+        has_overrides,
+    }
 }
 
 /// Public view of inbound email settings returned by the admin REST API.
@@ -259,7 +699,7 @@ where
     }
 }
 
-fn de_patch_tag<'de, D>(deserializer: D) -> std::result::Result<PatchOpt<String>, D::Error>
+fn de_patch_string<'de, D>(deserializer: D) -> std::result::Result<PatchOpt<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -286,7 +726,7 @@ pub struct EmailSettingsPatch {
     pub allowed_senders: Option<Vec<String>>,
     pub body_fallback: Option<bool>,
     pub local_only: Option<bool>,
-    #[serde(default, deserialize_with = "de_patch_tag")]
+    #[serde(default, deserialize_with = "de_patch_string")]
     #[schema(value_type = Option<String>)]
     pub tag: PatchOpt<String>,
 }
@@ -475,28 +915,51 @@ fn validate_senders(senders: Option<Vec<String>>) -> Result<Option<Vec<String>>>
         .transpose()
 }
 
+async fn resolve_target_user_id(
+    db: &Db,
+    target: Option<&EmailUserTarget>,
+) -> Result<Option<UserId>> {
+    match target {
+        Some(EmailUserTarget::UserId(id)) => Ok(sqlx::query_scalar::<_, UserId>(
+            "SELECT id FROM users WHERE id = ?",
+        )
+        .bind(*id)
+        .fetch_optional(&db.read)
+        .await?),
+        Some(EmailUserTarget::Username(name)) => Ok(sqlx::query_scalar::<_, UserId>(
+            "SELECT id FROM users WHERE username = ? AND disabled_at IS NULL",
+        )
+        .bind(name)
+        .fetch_optional(&db.read)
+        .await?),
+        None => Ok(None),
+    }
+}
+
+async fn ensure_active_user(
+    db: &Db,
+    uid: UserId,
+    disabled_code: &'static str,
+    disabled_message: &str,
+) -> Result<()> {
+    let user_row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT disabled_at FROM users WHERE id = ?")
+            .bind(uid)
+            .fetch_optional(&db.read)
+            .await?;
+    match user_row {
+        None => Err(ServiceError::not_found("user_not_found", "no such user")),
+        Some((Some(_),)) => Err(ServiceError::invalid(disabled_code, disabled_message)),
+        Some((None,)) => Ok(()),
+    }
+}
+
 /// Returns the current inbound email configuration for administrators.
 pub async fn get_email_settings(ctx: &Ctx<'_>, endpoint_url: &str) -> Result<EmailSettingsView> {
     require_admin(ctx).await?;
     let email = ctx.app.runtime_settings().email;
 
-    let user_id = match &email.user {
-        Some(EmailUserTarget::UserId(id)) => {
-            sqlx::query_scalar::<_, UserId>("SELECT id FROM users WHERE id = ?")
-                .bind(*id)
-                .fetch_optional(&ctx.app.db.read)
-                .await?
-        }
-        Some(EmailUserTarget::Username(name)) => {
-            sqlx::query_scalar::<_, UserId>(
-                "SELECT id FROM users WHERE username = ? AND disabled_at IS NULL",
-            )
-            .bind(name)
-            .fetch_optional(&ctx.app.db.read)
-            .await?
-        }
-        None => None,
-    };
+    let user_id = resolve_target_user_id(&ctx.app.db, email.user.as_ref()).await?;
 
     let last_received_at = match email.last_received_at {
         Some(ts) => Some(ts),
@@ -538,21 +1001,13 @@ pub async fn update_email_settings(
     let validated_tag = validate_tag(patch.tag)?;
 
     if let PatchOpt::Value(uid) = patch.user_id {
-        let user_row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT disabled_at FROM users WHERE id = ?")
-                .bind(uid)
-                .fetch_optional(&ctx.app.db.read)
-                .await?;
-        match user_row {
-            None => return Err(ServiceError::not_found("user_not_found", "no such user")),
-            Some((Some(_),)) => {
-                return Err(ServiceError::invalid(
-                    "invalid_email_user",
-                    "cannot attribute emailed documents to a disabled user",
-                ));
-            }
-            Some((None,)) => {}
-        }
+        ensure_active_user(
+            &ctx.app.db,
+            uid,
+            "invalid_email_user",
+            "cannot attribute emailed documents to a disabled user",
+        )
+        .await?;
     }
 
     let mut tx = ctx.app.db.write.begin().await?;
@@ -689,6 +1144,646 @@ pub async fn record_email_received(app: &crate::service::App) -> Result<()> {
     Ok(())
 }
 
+/// Non-sensitive instance settings summary exposed to any signed-in user.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SettingsSummary {
+    pub llm_enabled: bool,
+    pub llm_configured: bool,
+    pub llm_model: String,
+    pub llm_handwriting_enabled: bool,
+    pub llm_allowed_models: Vec<String>,
+    pub llm_monthly_budget_usd: Option<String>,
+    pub calendar_lead_days: u32,
+    pub inbox_configured: bool,
+    pub inbox_paused: bool,
+}
+
+/// Administrator view of runtime LLM settings (never includes the API key).
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct LlmSettingsView {
+    pub enabled: bool,
+    pub has_api_key: bool,
+    pub api_key_source: String,
+    pub base_url: String,
+    pub provider: String,
+    pub effective_provider: String,
+    pub model: String,
+    pub vision_model: String,
+    pub handwriting_enabled: bool,
+    pub handwriting_model: String,
+    pub allowed_models: Vec<String>,
+    pub reasoning_effort: Option<String>,
+    pub create_tags: bool,
+    pub monthly_budget_usd: Option<String>,
+    pub prices: String,
+    pub has_overrides: bool,
+}
+
+/// Administrator view of calendar settings.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct CalendarSettingsView {
+    pub lead_days: u32,
+    pub has_overrides: bool,
+}
+
+/// Administrator view of watched inbox folder settings and recent rejections.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct InboxSettingsView {
+    pub configured: bool,
+    pub paused: bool,
+    #[schema(value_type = Option<String>)]
+    pub user_id: Option<UserId>,
+    pub interval_secs: u64,
+    pub failed_files: Vec<FailedInboxFile>,
+    pub has_overrides: bool,
+}
+
+/// Complete administrator view returned by `GET /api/v1/settings` and `PATCH /api/v1/settings`.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AdminSettingsView {
+    pub llm: LlmSettingsView,
+    pub calendar: CalendarSettingsView,
+    pub inbox: InboxSettingsView,
+    pub ocr_langs: String,
+}
+
+/// Partial update for runtime LLM settings.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct LlmSettingsPatch {
+    pub enabled: Option<bool>,
+    pub api_key: Option<String>,
+    pub clear_api_key: Option<bool>,
+    pub base_url: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub vision_model: Option<String>,
+    pub handwriting_enabled: Option<bool>,
+    pub handwriting_model: Option<String>,
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "de_patch_string")]
+    #[schema(value_type = Option<String>)]
+    pub reasoning_effort: PatchOpt<String>,
+    pub create_tags: Option<bool>,
+    #[serde(default, deserialize_with = "de_patch_string")]
+    #[schema(value_type = Option<String>)]
+    pub monthly_budget_usd: PatchOpt<String>,
+    #[serde(default, deserialize_with = "de_patch_string")]
+    #[schema(value_type = Option<String>)]
+    pub prices: PatchOpt<String>,
+}
+
+/// Partial update for calendar settings.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct CalendarSettingsPatch {
+    pub lead_days: Option<u32>,
+}
+
+/// Partial update for watched inbox folder settings.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct InboxSettingsPatch {
+    pub paused: Option<bool>,
+    #[serde(default, deserialize_with = "de_patch_user_id")]
+    #[schema(value_type = Option<String>)]
+    pub user_id: PatchOpt<UserId>,
+    pub interval_secs: Option<u64>,
+}
+
+/// Partial update for runtime instance settings.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct AdminSettingsPatch {
+    pub llm: Option<LlmSettingsPatch>,
+    pub calendar: Option<CalendarSettingsPatch>,
+    pub inbox: Option<InboxSettingsPatch>,
+    pub reset_llm: Option<bool>,
+    pub reset_calendar: Option<bool>,
+    pub reset_inbox: Option<bool>,
+}
+
+struct ValidatedLlmPatch {
+    enabled: Option<bool>,
+    api_key: Option<String>,
+    clear_api_key: bool,
+    base_url: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    vision_model: Option<String>,
+    handwriting_enabled: Option<bool>,
+    handwriting_model: Option<String>,
+    allowed_models: Option<Vec<String>>,
+    reasoning_effort: PatchOpt<String>,
+    create_tags: Option<bool>,
+    monthly_budget_usd: PatchOpt<String>,
+    prices: PatchOpt<String>,
+}
+
+fn validate_llm_patch(patch: LlmSettingsPatch) -> Result<ValidatedLlmPatch> {
+    let base_url = patch
+        .base_url
+        .map(|raw| validate_http_url(&raw).map(|u| u.as_str().to_string()))
+        .transpose()?;
+    let provider = patch
+        .provider
+        .map(|raw| validate_provider(&raw))
+        .transpose()?;
+    let model = patch
+        .model
+        .map(|raw| validate_model_name(&raw))
+        .transpose()?;
+    let vision_model = patch
+        .vision_model
+        .map(|raw| validate_model_name(&raw))
+        .transpose()?;
+    let handwriting_model = patch
+        .handwriting_model
+        .map(|raw| validate_model_name(&raw))
+        .transpose()?;
+    let allowed_models = patch
+        .allowed_models
+        .map(|list| {
+            let mut cleaned = Vec::with_capacity(list.len());
+            for item in list {
+                let m = validate_model_name(&item)?;
+                if !cleaned.contains(&m) {
+                    cleaned.push(m);
+                }
+            }
+            Ok::<Vec<String>, ServiceError>(cleaned)
+        })
+        .transpose()?;
+    let reasoning_effort = match patch.reasoning_effort {
+        PatchOpt::Unset => PatchOpt::Unset,
+        PatchOpt::Null => PatchOpt::Null,
+        PatchOpt::Value(raw) => PatchOpt::Value(validate_reasoning_effort(&raw)?),
+    };
+    let monthly_budget_usd = match patch.monthly_budget_usd {
+        PatchOpt::Unset => PatchOpt::Unset,
+        PatchOpt::Null => PatchOpt::Null,
+        PatchOpt::Value(raw) => PatchOpt::Value(validate_budget(&raw)?.to_string()),
+    };
+    let prices = match patch.prices {
+        PatchOpt::Unset => PatchOpt::Unset,
+        PatchOpt::Null => PatchOpt::Null,
+        PatchOpt::Value(raw) => {
+            let map = parse_llm_prices(&raw)
+                .map_err(|reason| ServiceError::invalid("invalid_llm_prices", reason))?;
+            PatchOpt::Value(format_llm_prices(&map))
+        }
+    };
+    let api_key = patch
+        .api_key
+        .map(|raw| raw.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Ok(ValidatedLlmPatch {
+        enabled: patch.enabled,
+        api_key,
+        clear_api_key: patch.clear_api_key == Some(true),
+        base_url,
+        provider,
+        model,
+        vision_model,
+        handwriting_enabled: patch.handwriting_enabled,
+        handwriting_model,
+        allowed_models,
+        reasoning_effort,
+        create_tags: patch.create_tags,
+        monthly_budget_usd,
+        prices,
+    })
+}
+
+async fn upsert_app_setting(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &str,
+    value: &str,
+    encrypted: bool,
+    now: &str,
+    updated_by: Option<UserId>,
+    changed_keys: &mut Vec<String>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO app_settings (key, value, encrypted, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+             value = excluded.value,
+             encrypted = excluded.encrypted,
+             updated_at = excluded.updated_at,
+             updated_by = excluded.updated_by",
+    )
+    .bind(key)
+    .bind(value)
+    .bind(i64::from(encrypted))
+    .bind(now)
+    .bind(updated_by)
+    .execute(&mut **tx)
+    .await?;
+    if !changed_keys.iter().any(|k| k == key) {
+        changed_keys.push(key.to_string());
+    }
+    Ok(())
+}
+
+async fn delete_app_setting(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &str,
+    changed_keys: &mut Vec<String>,
+) -> Result<()> {
+    let res = sqlx::query("DELETE FROM app_settings WHERE key = ?")
+        .bind(key)
+        .execute(&mut **tx)
+        .await?;
+    if res.rows_affected() > 0 && !changed_keys.iter().any(|k| k == key) {
+        changed_keys.push(key.to_string());
+    }
+    Ok(())
+}
+
+/// Returns non-sensitive runtime settings for any signed-in user.
+pub async fn get_settings_summary(ctx: &Ctx<'_>) -> Result<SettingsSummary> {
+    if ctx.actor.via != Via::Cli {
+        ctx.actor.require_user()?;
+    }
+    let runtime = ctx.app.runtime_settings();
+    let llm_configured = runtime.llm.api_key.is_some();
+    let llm_handwriting_enabled = runtime.llm.effective_handwriting_model().is_some();
+    Ok(SettingsSummary {
+        llm_enabled: runtime.llm.enabled && llm_configured,
+        llm_configured,
+        llm_model: runtime.llm.model,
+        llm_handwriting_enabled,
+        llm_allowed_models: runtime.llm.allowed_models,
+        llm_monthly_budget_usd: runtime.llm.monthly_budget_usd.map(|d| d.to_string()),
+        calendar_lead_days: runtime.calendar.lead_days,
+        inbox_configured: runtime.inbox.configured,
+        inbox_paused: runtime.inbox.paused,
+    })
+}
+
+/// Returns the full administrator view of runtime settings (without secret values).
+pub async fn get_admin_settings(ctx: &Ctx<'_>) -> Result<AdminSettingsView> {
+    require_admin(ctx).await?;
+    let runtime = ctx.app.runtime_settings();
+    let inbox_user_id = resolve_target_user_id(&ctx.app.db, runtime.inbox.user.as_ref()).await?;
+    let failed_files = match ctx.app.config.inbox_dir.clone() {
+        Some(dir) => tokio::task::spawn_blocking(move || inbox::list_failed_files(&dir))
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    Ok(AdminSettingsView {
+        llm: LlmSettingsView {
+            enabled: runtime.llm.enabled,
+            has_api_key: runtime.llm.api_key.is_some(),
+            api_key_source: runtime.llm.api_key_source.to_string(),
+            base_url: runtime.llm.base_url.as_str().to_string(),
+            provider: runtime.llm.provider,
+            effective_provider: runtime.llm.effective_provider.as_str().to_string(),
+            model: runtime.llm.model,
+            vision_model: runtime.llm.vision_model,
+            handwriting_enabled: runtime.llm.handwriting_enabled,
+            handwriting_model: runtime.llm.handwriting_model,
+            allowed_models: runtime.llm.allowed_models,
+            reasoning_effort: runtime.llm.reasoning_effort,
+            create_tags: runtime.llm.create_tags,
+            monthly_budget_usd: runtime.llm.monthly_budget_usd.map(|d| d.to_string()),
+            prices: format_llm_prices(&runtime.llm.prices),
+            has_overrides: runtime.llm.has_overrides,
+        },
+        calendar: CalendarSettingsView {
+            lead_days: runtime.calendar.lead_days,
+            has_overrides: runtime.calendar.has_overrides,
+        },
+        inbox: InboxSettingsView {
+            configured: runtime.inbox.configured,
+            paused: runtime.inbox.paused,
+            user_id: inbox_user_id,
+            interval_secs: runtime.inbox.interval_secs,
+            failed_files,
+            has_overrides: runtime.inbox.has_overrides,
+        },
+        ocr_langs: ctx.app.config.ocr_langs.clone(),
+    })
+}
+
+async fn upsert_opt_setting(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &str,
+    value: Option<&str>,
+    now: &str,
+    updated_by: Option<UserId>,
+    changed_keys: &mut Vec<String>,
+) -> Result<()> {
+    if let Some(value) = value {
+        upsert_app_setting(tx, key, value, false, now, updated_by, changed_keys).await?;
+    }
+    Ok(())
+}
+
+async fn upsert_bool_setting(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &str,
+    value: Option<bool>,
+    now: &str,
+    updated_by: Option<UserId>,
+    changed_keys: &mut Vec<String>,
+) -> Result<()> {
+    if let Some(value) = value {
+        let text = if value { "true" } else { "false" };
+        upsert_app_setting(tx, key, text, false, now, updated_by, changed_keys).await?;
+    }
+    Ok(())
+}
+
+async fn apply_clearable_setting(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &str,
+    patch: PatchOpt<String>,
+    now: &str,
+    updated_by: Option<UserId>,
+    changed_keys: &mut Vec<String>,
+) -> Result<()> {
+    match patch {
+        PatchOpt::Unset => Ok(()),
+        PatchOpt::Null => {
+            upsert_app_setting(tx, key, "", false, now, updated_by, changed_keys).await
+        }
+        PatchOpt::Value(value) => {
+            upsert_app_setting(tx, key, &value, false, now, updated_by, changed_keys).await
+        }
+    }
+}
+
+async fn apply_llm_patch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    secret_key: &[u8],
+    llm: ValidatedLlmPatch,
+    now: &str,
+    actor_id: Option<UserId>,
+    changed_keys: &mut Vec<String>,
+) -> Result<()> {
+    upsert_bool_setting(tx, "llm.enabled", llm.enabled, now, actor_id, changed_keys).await?;
+    if llm.clear_api_key {
+        delete_app_setting(tx, LLM_API_KEY_SETTING, changed_keys).await?;
+    } else if let Some(plain_key) = llm.api_key {
+        let encrypted = crypto::encrypt_secret(secret_key, LLM_API_KEY_SETTING, &plain_key)?;
+        upsert_app_setting(
+            tx,
+            LLM_API_KEY_SETTING,
+            &encrypted,
+            true,
+            now,
+            actor_id,
+            changed_keys,
+        )
+        .await?;
+    }
+    upsert_opt_setting(
+        tx,
+        "llm.base_url",
+        llm.base_url.as_deref(),
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    upsert_opt_setting(
+        tx,
+        "llm.provider",
+        llm.provider.as_deref(),
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    upsert_opt_setting(
+        tx,
+        "llm.model",
+        llm.model.as_deref(),
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    upsert_opt_setting(
+        tx,
+        "llm.vision_model",
+        llm.vision_model.as_deref(),
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    upsert_bool_setting(
+        tx,
+        "llm.handwriting_enabled",
+        llm.handwriting_enabled,
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    upsert_opt_setting(
+        tx,
+        "llm.handwriting_model",
+        llm.handwriting_model.as_deref(),
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    if let Some(allowed) = llm.allowed_models {
+        if allowed.is_empty() {
+            delete_app_setting(tx, "llm.allowed_models", changed_keys).await?;
+        } else {
+            let encoded = serde_json::to_string(&allowed)
+                .map_err(|e| ServiceError::internal("json_encode_failed", e.to_string()))?;
+            upsert_app_setting(
+                tx,
+                "llm.allowed_models",
+                &encoded,
+                false,
+                now,
+                actor_id,
+                changed_keys,
+            )
+            .await?;
+        }
+    }
+    apply_clearable_setting(
+        tx,
+        "llm.reasoning_effort",
+        llm.reasoning_effort,
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    upsert_bool_setting(
+        tx,
+        "llm.create_tags",
+        llm.create_tags,
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    apply_clearable_setting(
+        tx,
+        "llm.monthly_budget_usd",
+        llm.monthly_budget_usd,
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    apply_clearable_setting(tx, "llm.prices", llm.prices, now, actor_id, changed_keys).await
+}
+
+async fn apply_inbox_patch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    inbox: InboxSettingsPatch,
+    now: &str,
+    actor_id: Option<UserId>,
+    changed_keys: &mut Vec<String>,
+) -> Result<()> {
+    upsert_bool_setting(
+        tx,
+        "inbox.paused",
+        inbox.paused,
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await?;
+    let user_patch = match inbox.user_id {
+        PatchOpt::Unset => PatchOpt::Unset,
+        PatchOpt::Null => PatchOpt::Null,
+        PatchOpt::Value(uid) => PatchOpt::Value(uid.to_string()),
+    };
+    apply_clearable_setting(tx, "inbox.user_id", user_patch, now, actor_id, changed_keys).await?;
+    let interval_str = inbox.interval_secs.map(|s| s.to_string());
+    upsert_opt_setting(
+        tx,
+        "inbox.interval_secs",
+        interval_str.as_deref(),
+        now,
+        actor_id,
+        changed_keys,
+    )
+    .await
+}
+
+/// Validates and persists runtime setting overrides, audits key names, and hot-reloads [`App`].
+pub async fn update_admin_settings(
+    ctx: &Ctx<'_>,
+    patch: AdminSettingsPatch,
+) -> Result<AdminSettingsView> {
+    require_admin_session(ctx).await?;
+
+    let llm_patch = patch.llm.map(validate_llm_patch).transpose()?;
+    let calendar_lead_days = patch
+        .calendar
+        .and_then(|c| c.lead_days)
+        .map(|days| {
+            if days > MAX_CALENDAR_LEAD_DAYS {
+                return Err(ServiceError::invalid(
+                    "invalid_calendar_lead_days",
+                    format!("calendar lead days must be between 0 and {MAX_CALENDAR_LEAD_DAYS}"),
+                ));
+            }
+            Ok(days)
+        })
+        .transpose()?;
+
+    let inbox_patch = patch.inbox;
+    if let Some(ref inbox) = inbox_patch {
+        if let Some(secs) = inbox.interval_secs
+            && !(1..=MAX_INBOX_INTERVAL_SECS).contains(&secs)
+        {
+            return Err(ServiceError::invalid(
+                "invalid_inbox_interval",
+                format!("inbox interval must be between 1 and {MAX_INBOX_INTERVAL_SECS} seconds"),
+            ));
+        }
+        if let PatchOpt::Value(uid) = inbox.user_id {
+            ensure_active_user(
+                &ctx.app.db,
+                uid,
+                "invalid_inbox_user",
+                "cannot attribute inbox documents to a disabled user",
+            )
+            .await?;
+        }
+    }
+
+    let mut tx = ctx.app.db.write.begin().await?;
+    let mut changed_keys: Vec<String> = Vec::new();
+    let now = time::now_ts();
+    let actor_id = ctx.actor.user_id;
+
+    if patch.reset_llm == Some(true) {
+        sqlx::query("DELETE FROM app_settings WHERE key LIKE 'llm.%'")
+            .execute(&mut *tx)
+            .await?;
+        changed_keys.push("llm.*".to_string());
+    }
+    if patch.reset_calendar == Some(true) {
+        sqlx::query("DELETE FROM app_settings WHERE key = 'calendar.lead_days'")
+            .execute(&mut *tx)
+            .await?;
+        changed_keys.push("calendar.lead_days".to_string());
+    }
+    if patch.reset_inbox == Some(true) {
+        sqlx::query("DELETE FROM app_settings WHERE key LIKE 'inbox.%'")
+            .execute(&mut *tx)
+            .await?;
+        changed_keys.push("inbox.*".to_string());
+    }
+
+    if let Some(llm) = llm_patch {
+        apply_llm_patch(
+            &mut tx,
+            ctx.app.config.secret_key.expose_secret().as_bytes(),
+            llm,
+            &now,
+            actor_id,
+            &mut changed_keys,
+        )
+        .await?;
+    }
+
+    let lead_str = calendar_lead_days.map(|d| d.to_string());
+    upsert_opt_setting(
+        &mut tx,
+        "calendar.lead_days",
+        lead_str.as_deref(),
+        &now,
+        actor_id,
+        &mut changed_keys,
+    )
+    .await?;
+
+    if let Some(inbox) = inbox_patch {
+        apply_inbox_patch(&mut tx, inbox, &now, actor_id, &mut changed_keys).await?;
+    }
+
+    if !changed_keys.is_empty() {
+        events::record(
+            &mut tx,
+            &ctx.actor,
+            "settings.update",
+            None,
+            json!({ "keys": changed_keys }),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+
+    ctx.app.reload_settings().await?;
+    get_admin_settings(ctx).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +1809,51 @@ mod tests {
             serde_json::from_str(&format!(r#"{{"user_id": "{uid}", "tag": " mail "}}"#)).unwrap();
         assert_eq!(vals.user_id, PatchOpt::Value(uid));
         assert_eq!(vals.tag, PatchOpt::Value("mail".to_string()));
+    }
+
+    #[test]
+    fn admin_patch_opt_fields_distinguish_unset_null_and_value() {
+        let omitted: AdminSettingsPatch = serde_json::from_str(r#"{"llm":{},"inbox":{}}"#).unwrap();
+        let llm = omitted.llm.unwrap();
+        assert_eq!(llm.reasoning_effort, PatchOpt::Unset);
+        assert_eq!(llm.monthly_budget_usd, PatchOpt::Unset);
+        assert_eq!(llm.prices, PatchOpt::Unset);
+        assert_eq!(omitted.inbox.unwrap().user_id, PatchOpt::Unset);
+
+        let cleared: AdminSettingsPatch = serde_json::from_str(
+            r#"{"llm":{"reasoning_effort":null,"monthly_budget_usd":"","prices":"  "},"inbox":{"user_id":""}}"#,
+        )
+        .unwrap();
+        let llm = cleared.llm.unwrap();
+        assert_eq!(llm.reasoning_effort, PatchOpt::Null);
+        assert_eq!(llm.monthly_budget_usd, PatchOpt::Null);
+        assert_eq!(llm.prices, PatchOpt::Null);
+        assert_eq!(cleared.inbox.unwrap().user_id, PatchOpt::Null);
+    }
+
+    #[test]
+    fn prices_serialize_canonically_sorted() {
+        let parsed = parse_llm_prices("z-model=1:2, a-model=0.40:1.60").unwrap();
+        assert_eq!(format_llm_prices(&parsed), "a-model=0.40:1.60,z-model=1:2");
+    }
+
+    #[tokio::test]
+    async fn corrupt_encrypted_api_key_logs_and_does_not_fail_load() {
+        let (_dir, app) = crate::service::testing::test_app().await;
+        sqlx::query(
+            "INSERT INTO app_settings (key, value, encrypted, updated_at) VALUES (?, ?, 1, ?)",
+        )
+        .bind("llm.api_key")
+        .bind("v1:not-valid-ciphertext")
+        .bind(time::now_ts())
+        .execute(&app.db.write)
+        .await
+        .unwrap();
+
+        let loaded = load(&app.config, &app.db).await.unwrap();
+        assert!(loaded.llm.api_key.is_none());
+        assert_eq!(loaded.llm.api_key_source, "none");
+        assert!(loaded.llm.has_overrides);
     }
 
     #[test]

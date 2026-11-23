@@ -50,10 +50,11 @@ pub async fn get(
     principal: Principal,
 ) -> ApiResult<Json<CalendarFeed>> {
     let feed = calendar::get(&state.app.ctx(principal.actor)).await?;
+    let lead_days = state.app.runtime_settings().calendar.lead_days;
     Ok(Json(CalendarFeed {
         active: feed.is_some(),
         feed,
-        lead_days: state.app.config.calendar_lead_days,
+        lead_days,
     }))
 }
 

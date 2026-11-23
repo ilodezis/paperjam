@@ -72,6 +72,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Change the signed-in user's own password.
+         * @description Needs a signed-in web session: API tokens and OAuth clients are refused. Ends every other web session of this user while keeping the current session alive.
+         */
+        post: operations["change_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/session": {
         parameters: {
             query?: never;
@@ -309,6 +329,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/documents/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent audit events of a document. */
+        get: operations["events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/documents/{id}/original": {
         parameters: {
             query?: never;
@@ -423,6 +460,27 @@ export interface paths {
         put?: never;
         /** Move a document to the trash (reversible). */
         post: operations["trash"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ingest/email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ingest attachments (or the body) of a raw RFC 5322 email.
+         * @description Authenticated with the write-only email intake bearer secret,
+         *     optionally constrained by an allowed-senders list.
+         */
+        post: operations["ingest"];
         delete?: never;
         options?: never;
         head?: never;
@@ -605,6 +663,107 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** View runtime settings for LLM, calendar, and watched inbox folder (administrators only). */
+        get: operations["get_admin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update runtime settings and hot-reload the active configuration (administrators only).
+         * @description Needs a signed-in web session: an API token cannot modify instance settings.
+         */
+        patch: operations["patch_admin"];
+        trace?: never;
+    };
+    "/settings/email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** View inbound email intake settings (administrators only). */
+        get: operations["get_settings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update inbound email intake settings (administrators only).
+         * @description Needs a signed-in web session: an API token cannot modify email intake settings.
+         */
+        patch: operations["patch_settings"];
+        trace?: never;
+    };
+    "/settings/email/secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate or rotate the email intake webhook secret (administrators only).
+         * @description Needs a signed-in web session. The secret value is returned in this response only.
+         */
+        post: operations["rotate_secret"];
+        /**
+         * Revoke the email intake webhook secret and disable intake (administrators only).
+         * @description Needs a signed-in web session. Any configured secret stops working immediately.
+         */
+        delete: operations["revoke_secret"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get non-sensitive runtime settings summary for the signed-in user. */
+        get: operations["get_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether the first administrator still has to be created. */
+        get: operations["setup_status"];
+        put?: never;
+        /** Create the first administrator with the setup code from the server log; sets the pj_session cookie. */
+        post: operations["setup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/shared/{token}/download": {
         parameters: {
             query?: never;
@@ -735,7 +894,10 @@ export interface paths {
         /** List API tokens of the signed-in user. */
         get: operations["list"];
         put?: never;
-        /** Creates a token. The secret value is in this response only. */
+        /**
+         * Creates a token. The secret value is in this response only.
+         * @description Needs a signed-in web session: a token cannot issue further tokens.
+         */
         post: operations["create"];
         delete?: never;
         options?: never;
@@ -855,7 +1017,10 @@ export interface paths {
         /** List all users (administrators only). */
         get: operations["list"];
         put?: never;
-        /** Create a new user (administrators only). */
+        /**
+         * Create a new user (administrators only).
+         * @description Needs a signed-in web session: a token cannot create accounts.
+         */
         post: operations["create"];
         delete?: never;
         options?: never;
@@ -863,10 +1028,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Permanently delete a user account (administrators only).
+         * @description Needs a signed-in web session. Removes the account, its sessions, tokens and passkeys; documents remain in the archive.
+         */
+        delete: operations["delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a user account (administrators only).
+         * @description Needs a signed-in web session: a token cannot modify accounts, disable users or reset passwords.
+         */
+        patch: operations["update"];
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Partial update for runtime instance settings. */
+        AdminSettingsPatch: {
+            calendar?: components["schemas"]["CalendarSettingsPatch"] | null;
+            inbox?: components["schemas"]["InboxSettingsPatch"] | null;
+            llm?: components["schemas"]["LlmSettingsPatch"] | null;
+            reset_calendar?: boolean | null;
+            reset_inbox?: boolean | null;
+            reset_llm?: boolean | null;
+        };
+        /** @description Complete administrator view returned by `GET /api/v1/settings` and `PATCH /api/v1/settings`. */
+        AdminSettingsView: {
+            calendar: components["schemas"]["CalendarSettingsView"];
+            inbox: components["schemas"]["InboxSettingsView"];
+            llm: components["schemas"]["LlmSettingsView"];
+            ocr_langs: string;
+        };
         AliasBody: {
             alias: string;
         };
@@ -880,6 +1085,21 @@ export interface components {
              * @description Days before a due date the feed adds a "renew" event; 0 means it does not.
              */
             lead_days: number;
+        };
+        /** @description Partial update for calendar settings. */
+        CalendarSettingsPatch: {
+            /** Format: int32 */
+            lead_days?: number | null;
+        };
+        /** @description Administrator view of calendar settings. */
+        CalendarSettingsView: {
+            has_overrides: boolean;
+            /** Format: int32 */
+            lead_days: number;
+        };
+        ChangePasswordBody: {
+            current_password: string;
+            new_password: string;
         };
         CreateUser: {
             display_name?: string | null;
@@ -897,6 +1117,21 @@ export interface components {
             /** @description The full address when `PAPERJAM_PUBLIC_URL` is set; otherwise the client prefixes the origin it reached the server on. */
             url?: string | null;
         };
+        /** @description Returned once when a new email intake secret is generated or rotated. */
+        CreatedEmailSecret: {
+            secret: string;
+            settings: components["schemas"]["EmailSettingsView"];
+        };
+        /** @description One audit log entry for a document. */
+        DocumentEvent: {
+            action: string;
+            actor_name?: string | null;
+            at: string;
+            diff: Record<string, never>;
+            /** Format: int64 */
+            id: number;
+            via: string;
+        };
         /** @description A download link as handed to a client. */
         DownloadLink: {
             /** @description RFC 3339 UTC. */
@@ -911,12 +1146,58 @@ export interface components {
             size: number;
             url: string;
         };
+        /** @description An attachment whose exact bytes are already in the archive. */
+        DuplicateAttachment: {
+            document_id: string;
+            filename: string;
+        };
+        /** @description Summary returned after processing one email. */
+        EmailIngestReport: {
+            documents: components["schemas"]["IngestedDocument"][];
+            duplicates: components["schemas"]["DuplicateAttachment"][];
+            skipped: components["schemas"]["SkippedItem"][];
+            used_body_fallback: boolean;
+        };
+        /** @description Partial update for inbound email settings. */
+        EmailSettingsPatch: {
+            allowed_senders?: string[] | null;
+            body_fallback?: boolean | null;
+            enabled?: boolean | null;
+            local_only?: boolean | null;
+            tag?: string | null;
+            user_id?: string | null;
+        };
+        /** @description Public view of inbound email settings returned by the admin REST API. */
+        EmailSettingsView: {
+            allowed_senders: string[];
+            body_fallback: boolean;
+            enabled: boolean;
+            endpoint_url: string;
+            has_secret: boolean;
+            last_received_at?: string | null;
+            local_only: boolean;
+            /** Format: int64 */
+            received_count: number;
+            secret_prefix?: string | null;
+            secret_source: string;
+            source: string;
+            tag?: string | null;
+            user_id?: string | null;
+        };
         /** @description The JSON error body returned on failure: `{"code", "message", "details"}`. */
         ErrorResponse: {
             code: string;
             details?: unknown;
             document_id?: string | null;
             message: string;
+        };
+        /** @description One rejected file present in `<inbox>/.failed`. */
+        FailedInboxFile: {
+            failed_at?: string | null;
+            name: string;
+            reason?: string | null;
+            /** Format: int64 */
+            size: number;
         };
         /**
          * @description A user's calendar subscription as shown in settings. The secret is not
@@ -1001,6 +1282,11 @@ export interface components {
             types: string[];
         };
         Hit: {
+            /**
+             * @description The checks that failed on the document, e.g. `mrz_mismatch`; empty
+             *     when it needs no attention.
+             */
+            attention: string[];
             /** Format: date */
             document_date?: string | null;
             /**
@@ -1010,6 +1296,11 @@ export interface components {
              *     (20 or 45). Absent for documents without one.
              */
             due_date?: string | null;
+            /**
+             * @description The document has page images and a thumbnail; false for a failed
+             *     document and for a plain-text file, whose image routes answer 404.
+             */
+            has_pages: boolean;
             id: string;
             /**
              * @description The type's summary fields that have a value, in the type's order
@@ -1029,6 +1320,66 @@ export interface components {
             /** @description The document is in the trash (only reachable with `include_trashed`). */
             trashed: boolean;
             type_key?: string | null;
+        };
+        /** @description Partial update for watched inbox folder settings. */
+        InboxSettingsPatch: {
+            /** Format: int64 */
+            interval_secs?: number | null;
+            paused?: boolean | null;
+            user_id?: string | null;
+        };
+        /** @description Administrator view of watched inbox folder settings and recent rejections. */
+        InboxSettingsView: {
+            configured: boolean;
+            failed_files: components["schemas"]["FailedInboxFile"][];
+            has_overrides: boolean;
+            /** Format: int64 */
+            interval_secs: number;
+            paused: boolean;
+            user_id?: string | null;
+        };
+        /** @description A document created or restored from an email attachment (or body). */
+        IngestedDocument: {
+            filename: string;
+            id: string;
+            restored: boolean;
+            status: string;
+        };
+        /** @description Partial update for runtime LLM settings. */
+        LlmSettingsPatch: {
+            allowed_models?: string[] | null;
+            api_key?: string | null;
+            base_url?: string | null;
+            clear_api_key?: boolean | null;
+            create_tags?: boolean | null;
+            enabled?: boolean | null;
+            handwriting_enabled?: boolean | null;
+            handwriting_model?: string | null;
+            model?: string | null;
+            monthly_budget_usd?: string | null;
+            prices?: string | null;
+            provider?: string | null;
+            reasoning_effort?: string | null;
+            vision_model?: string | null;
+        };
+        /** @description Administrator view of runtime LLM settings (never includes the API key). */
+        LlmSettingsView: {
+            allowed_models: string[];
+            api_key_source: string;
+            base_url: string;
+            create_tags: boolean;
+            effective_provider: string;
+            enabled: boolean;
+            handwriting_enabled: boolean;
+            handwriting_model: string;
+            has_api_key: boolean;
+            has_overrides: boolean;
+            model: string;
+            monthly_budget_usd?: string | null;
+            prices: string;
+            provider: string;
+            reasoning_effort?: string | null;
+            vision_model: string;
         };
         LoginBody: {
             password: string;
@@ -1157,6 +1508,29 @@ export interface components {
             /** @description `en` or `ru`. */
             locale: string;
         };
+        /** @description Non-sensitive instance settings summary exposed to any signed-in user. */
+        SettingsSummary: {
+            /** Format: int32 */
+            calendar_lead_days: number;
+            inbox_configured: boolean;
+            inbox_paused: boolean;
+            llm_allowed_models: string[];
+            llm_configured: boolean;
+            llm_enabled: boolean;
+            llm_handwriting_enabled: boolean;
+            llm_model: string;
+            llm_monthly_budget_usd?: string | null;
+        };
+        SetupBody: {
+            /** @description The setup code the server prints to its log at start-up. */
+            code: string;
+            /** @description Shown in the interface; defaults to the username. */
+            display_name?: string | null;
+            /** @description Interface language, `en` or `ru`; defaults to `en`. */
+            locale?: string | null;
+            password: string;
+            username: string;
+        };
         /** @description A live share link. */
         Share: {
             /** @description RFC 3339 UTC. */
@@ -1172,11 +1546,22 @@ export interface components {
          * @enum {string}
          */
         ShareTtl: "15m" | "1h" | "24h";
+        /** @description An attachment or inline asset that was intentionally skipped. */
+        SkippedItem: {
+            filename: string;
+            reason: string;
+        };
         /**
          * @description Order of the hits.
          * @enum {string}
          */
         Sort: "relevance" | "date_desc" | "date_asc";
+        UpdateUser: {
+            disabled?: boolean | null;
+            display_name?: string | null;
+            is_admin?: boolean | null;
+            password?: string | null;
+        };
         UploadForm: {
             /**
              * Format: binary
@@ -1245,7 +1630,16 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Malformed request body */
+            /** @description Request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Malformed request body, or a username over 64 characters or a password over 1024 bytes */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -1376,6 +1770,64 @@ export interface operations {
             };
             /** @description Passkeys are not configured (PAPERJAM_PUBLIC_URL) */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    change_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangePasswordBody"];
+            };
+        };
+        responses: {
+            /** @description Password updated */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Needs a web session, or current password is wrong */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Weak or invalid new password */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too many failed attempts */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2246,6 +2698,50 @@ export interface operations {
             };
         };
     };
+    events: {
+        parameters: {
+            query?: {
+                /** @description Maximum events to return (1-100, default 50) */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Document ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Document events, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentEvent"][];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Document not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     original: {
         parameters: {
             query?: {
@@ -2376,7 +2872,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Invalid request body */
+            /** @description Invalid request body, or a model not in PAPERJAM_LLM_ALLOWED_MODELS */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2583,6 +3079,87 @@ export interface operations {
             };
             /** @description Document not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    ingest: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description SMTP envelope sender verified by the mail relay */
+                "X-Envelope-From"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "message/rfc822": string;
+            };
+        };
+        responses: {
+            /** @description Email processed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailIngestReport"];
+                };
+            };
+            /** @description Invalid or missing email ingest secret */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Sender not in allowed senders list */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Email exceeds PAPERJAM_MAX_UPLOAD_BYTES */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Malformed email message */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too many failed attempts */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Email intake is not configured or target user is unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3202,6 +3779,387 @@ export interface operations {
             };
         };
     };
+    get_admin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current runtime settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSettingsView"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    patch_admin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminSettingsPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated runtime settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSettingsView"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges and a web session required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Target user not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid settings value */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current inbound email settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailSettingsView"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    patch_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmailSettingsPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated inbound email settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailSettingsView"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges and a web session required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Target user not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid settings or missing secret when enabling */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    rotate_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Generated or rotated email intake secret */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedEmailSecret"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges and a web session required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    revoke_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked email intake secret and disabled inbound email */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailSettingsView"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges and a web session required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Non-sensitive settings summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsSummary"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    setup_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description `{"needed": true}` until the first user exists */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    setup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetupBody"];
+            };
+        };
+        responses: {
+            /** @description The administrator was created and signed in */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description The instance already has a user */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Wrong setup code, or an invalid username or password */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too many wrong codes */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     download: {
         parameters: {
             query?: never;
@@ -3578,6 +4536,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description Called with a token instead of a web session */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Invalid token request */
             422: {
                 headers: {
@@ -3928,7 +4895,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Administrator privileges required */
+            /** @description Administrator privileges and a web session required */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -3947,6 +4914,144 @@ export interface operations {
                 };
             };
             /** @description Invalid user data or weak password */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description User deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges and a web session required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description User not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Cannot delete the last active administrator */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Cannot delete your own account */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateUser"];
+            };
+        };
+        responses: {
+            /** @description Updated user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Administrator privileges and a web session required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description User not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Cannot disable or demote the last active administrator */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid patch data or self-modification refused */
             422: {
                 headers: {
                     [name: string]: unknown;

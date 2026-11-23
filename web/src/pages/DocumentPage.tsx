@@ -10,7 +10,7 @@ import { SelectDropdown } from "../components/controls/SelectDropdown";
 import { toast } from "../components/controls/toast";
 import { fieldFromInput, hasPageImages, toggleId } from "../document";
 import { dueState, formatFileSize, formatIsoDate } from "../format";
-import { documentEventsQuery, documentQuery, invalidateArchive, taxonomyQuery } from "../queries";
+import { documentEventsQuery, documentQuery, invalidateArchive, settingsSummaryQuery, taxonomyQuery } from "../queries";
 import { documentIdOf } from "../shell/nav";
 import { ScreenLink, hrefOf, useGo, useScreenBack } from "../shell/navigation";
 import { TopBar } from "../shell/PageHead";
@@ -541,6 +541,7 @@ export function DocumentPage() {
   const { data: document, error: queryError, isPending } = useQuery({ ...documentQuery(id, page), placeholderData: keepPreviousData });
   const { data: events } = useQuery(documentEventsQuery(id));
   const { data: taxonomy } = useQuery(taxonomyQuery);
+  const { data: settingsSummary } = useQuery(settingsSummaryQuery);
   const error = queryError instanceof ApiError ? queryError.code : queryError ? "network" : null;
 
   const failed = (cause: unknown) => setActionError(cause instanceof ApiError ? cause.code : "network");
@@ -565,7 +566,8 @@ export function DocumentPage() {
   });
 
   const reprocess = useMutation({
-    mutationFn: (llm: boolean) => api.reprocess(id, llm),
+    mutationFn: ({ llm, model }: { llm: boolean; model?: string }) =>
+      model ? api.reprocess(id, llm, model) : api.reprocess(id, llm),
     onMutate: () => setActionError(null),
     onSuccess: () => {
       queryClient.setQueriesData<DocumentView>({ queryKey: ["document", id] }, (current) => (
@@ -641,10 +643,10 @@ export function DocumentPage() {
     setShareOpen(true);
   }
 
-  function reprocessDocument(llm: boolean) {
+  function reprocessDocument(llm: boolean, model?: string) {
     actionMenu.current?.removeAttribute("open");
     setMenuOpen(false);
-    reprocess.mutate(llm);
+    reprocess.mutate(model ? { llm, model } : { llm });
   }
 
   function trash() {
@@ -753,6 +755,10 @@ export function DocumentPage() {
     />
   );
 
+  const allowedModels = settingsSummary?.llm_enabled && settingsSummary.llm_allowed_models.length > 1
+    ? settingsSummary.llm_allowed_models
+    : [];
+
   function promoteFact(value: string, key: string) {
     const definition = fieldDefinitions.get(key);
     if (definition) safeSave({ fields: { [key]: fieldFromInput(definition.kind, value) } });
@@ -787,6 +793,23 @@ export function DocumentPage() {
               <p className="action-menu-label">{t("document.reprocess")}</p>
               <button type="button" onClick={() => reprocessDocument(true)} disabled={busy || isProcessing}><RefreshCw aria-hidden="true" />{t("document.reprocessLlm")}</button>
               <button type="button" onClick={() => reprocessDocument(false)} disabled={busy || isProcessing}><RefreshCw aria-hidden="true" />{t("document.reprocessLocal")}</button>
+              {allowedModels.length > 0 ? (
+                <>
+                  <p className="action-menu-label">{t("document.reprocessWithModel")}</p>
+                  {allowedModels.map((model) => (
+                    <button
+                      key={model}
+                      type="button"
+                      className="action-menu-subitem"
+                      onClick={() => reprocessDocument(true, model)}
+                      disabled={busy || isProcessing}
+                      title={model}
+                    >
+                      <RefreshCw aria-hidden="true" /><span>{model}</span>
+                    </button>
+                  ))}
+                </>
+              ) : null}
               <hr />
               <button type="button" className="action-menu-danger" onClick={() => trash()} disabled={busy} aria-label={t("document.trash")}><Trash2 aria-hidden="true" />{t("document.trash")}</button>
             </div>
@@ -943,7 +966,7 @@ export function DocumentPage() {
                       {fields.length > 0 ? <strong className="attention-fields"> {t("document.attentionFields", { fields: fields.join(", ") })}</strong> : null}
                       {canReprocess || canDismiss ? (
                         <div className="attention-actions">
-                          {canReprocess ? <button type="button" className="quiet-button attention-action" disabled={busy || isProcessing} onClick={() => reprocess.mutate(true)}><RefreshCw aria-hidden="true" />{t("document.reprocess")}</button> : null}
+                          {canReprocess ? <button type="button" className="quiet-button attention-action" disabled={busy || isProcessing} onClick={() => reprocess.mutate({ llm: true })}><RefreshCw aria-hidden="true" />{t("document.reprocess")}</button> : null}
                           {canDismiss ? <button type="button" className="quiet-button attention-action" disabled={saving || busy} onClick={() => safeSave({ dismiss_attention: [flag] })}><Check aria-hidden="true" />{t("document.dismissAttention")}</button> : null}
                         </div>
                       ) : null}
@@ -1010,8 +1033,24 @@ export function DocumentPage() {
           <a className="sheet-action" href={api.downloadUrl(id)} onClick={() => setMenuOpen(false)}><Download aria-hidden="true" />{t("document.download")}</a>
           {hasCleanCopy ? <a className="sheet-action" href={api.originalUrl(id)} onClick={() => setMenuOpen(false)}><FileDown aria-hidden="true" />{t("document.downloadOriginalFile")}</a> : null}
           <button type="button" className="sheet-action" disabled={busy} onClick={() => openShare()}><Share2 aria-hidden="true" />{t("document.share")}</button>
-          <button type="button" className="sheet-action" disabled={busy || isProcessing} onClick={() => { setMenuOpen(false); reprocess.mutate(true); }}><RefreshCw aria-hidden="true" />{t("document.reprocessLlm")}</button>
-          <button type="button" className="sheet-action" disabled={busy || isProcessing} onClick={() => { setMenuOpen(false); reprocess.mutate(false); }}><RefreshCw aria-hidden="true" />{t("document.reprocessLocal")}</button>
+          <button type="button" className="sheet-action" disabled={busy || isProcessing} onClick={() => reprocessDocument(true)}><RefreshCw aria-hidden="true" />{t("document.reprocessLlm")}</button>
+          <button type="button" className="sheet-action" disabled={busy || isProcessing} onClick={() => reprocessDocument(false)}><RefreshCw aria-hidden="true" />{t("document.reprocessLocal")}</button>
+          {allowedModels.length > 0 ? (
+            <div className="sheet-action-subgroup" role="group" aria-label={t("document.reprocessWithModel")}>
+              <p className="sheet-action-label">{t("document.reprocessWithModel")}</p>
+              {allowedModels.map((model) => (
+                <button
+                  key={model}
+                  type="button"
+                  className="sheet-action sheet-action--sub"
+                  disabled={busy || isProcessing}
+                  onClick={() => reprocessDocument(true, model)}
+                >
+                  <RefreshCw aria-hidden="true" /><span>{model}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
           <button type="button" className="sheet-action sheet-action--danger" disabled={busy} onClick={() => trash()}><Trash2 aria-hidden="true" />{t("document.trash")}</button>
         </div>
       </Sheet>

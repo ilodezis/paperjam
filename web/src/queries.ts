@@ -84,6 +84,25 @@ export const emailSettingsQuery = queryOptions({
   staleTime: 60_000,
 });
 
+export const settingsSummaryQuery = queryOptions({
+  queryKey: ["settings-summary"],
+  queryFn: api.settingsSummary,
+  staleTime: 60_000,
+});
+
+export const adminSettingsQuery = queryOptions({
+  queryKey: ["settings"],
+  queryFn: async () => {
+    try {
+      return await api.adminSettings();
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 403) return null;
+      throw cause;
+    }
+  },
+  staleTime: 60_000,
+});
+
 export const passkeysQuery = queryOptions({
   queryKey: ["passkeys"],
   queryFn: api.passkeys,

@@ -63,7 +63,7 @@ pub async fn reserve<'a>(
     model: &str,
     step: &str,
 ) -> Result<Option<Reservation<'a>>> {
-    let Some(budget) = app.config.llm_monthly_budget_usd else {
+    let Some(budget) = app.runtime_settings().llm.monthly_budget_usd else {
         return Ok(Some(Reservation {
             pool: None,
             amount: Decimal::ZERO,
@@ -109,7 +109,7 @@ pub async fn reserve<'a>(
 /// What may still be spent this UTC month; `None` when no budget is set.
 /// Never negative: an exhausted budget is `Some(0)`.
 pub async fn remaining(app: &App) -> Result<Option<Decimal>> {
-    let Some(budget) = app.config.llm_monthly_budget_usd else {
+    let Some(budget) = app.runtime_settings().llm.monthly_budget_usd else {
         return Ok(None);
     };
     let spent = stats::llm_month_usd(&app.ctx(Actor::system())).await?;
@@ -154,6 +154,7 @@ mod tests {
         Arc::get_mut(&mut app.config)
             .expect("the test app's config is not shared yet")
             .llm_monthly_budget_usd = Some(usd.parse().unwrap());
+        app.reload_settings().await.unwrap();
         (dir, app)
     }
 

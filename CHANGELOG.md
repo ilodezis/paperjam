@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Database-backed runtime configuration (`app_settings` and `email_intake`) editable live from **Settings** in the web UI with environment-variable fallback and immediate reload (no restart required):
+  - **Inbound email intake** (**Settings → Access → Email intake**): generate, rotate, and revoke a one-time `pje_…` webhook secret (stored as a SHA-256 hash with a visible prefix), enable or pause intake, edit the sender allowlist, target user, auto-tag, body fallback, and local-only mode, and view the webhook endpoint URL and receipt stats.
+  - **LLM enrichment**: enable or disable LLM calls, store an API key (encrypted at rest in SQLite with AES-256-GCM derived from `PAPERJAM_SECRET_KEY`), choose classification/extraction and vision models, toggle and pick the handwriting re-read model, manage the allowed-models list for reprocessing, set the monthly USD budget, toggle automatic tag creation, set reasoning effort, edit the API base URL and provider dialect, configure custom model prices, and reset overrides back to environment defaults.
+  - **Calendar reminder lead days**: override `PAPERJAM_CALENDAR_LEAD_DAYS` live from **Settings**.
+  - **Watched inbox folder controls**: when `PAPERJAM_INBOX_DIR` is set, pause or resume polling, choose the owner account, adjust the scan interval, and inspect rejected files in `.failed/`.
+- Settings REST API endpoints: `GET /api/v1/settings/summary` (non-sensitive LLM, calendar, and inbox status), `GET /api/v1/settings`, `PATCH /api/v1/settings`, `GET /api/v1/settings/email`, `PATCH /api/v1/settings/email`, `POST /api/v1/settings/email/secret`, and `DELETE /api/v1/settings/email/secret`. Settings writes require an administrator web session; API bearer tokens and OAuth clients are rejected.
+- Document activity history (`GET /api/v1/documents/{id}/events`) and an upload source line on document pages.
+- Per-model reprocess choices in the web UI.
+- Checksum validator selection (`personal_number`, `iban`, `mrz`, national IDs, or none) on identifier fields in document type settings.
+- Inline display-name and administrator role editing in **Settings → Access → Users**.
+- Manual person relink action ("Match documents again") in **People & organizations**.
+- `has:expiring` and `due:<…` filter hints in the archive search syntax sheet.
+
+### Changed
+- Environment variables for LLM enrichment, inbound email intake, calendar lead days, and watched inbox polling (`PAPERJAM_INBOX_USER`, `PAPERJAM_INBOX_INTERVAL_SECS`) now serve as startup defaults and fallback values beneath SQLite overrides saved from **Settings** (`Web UI / SQLite override > environment variable > built-in default`).
+
 ### Security
 - The Cloudflare Email Worker in `docs/email-intake.md` parses `From:` the way paperjam does, nested comments included. Its one-pass comment stripping let `attacker@evil.example (x (y) <alice@example.org>)` pass an allowlist for `alice@example.org` while paperjam saw the attacker. The guide now says to set `PAPERJAM_EMAIL_ALLOWED_SENDERS` on the server as well, the server warns at startup when it is unset, and a present but empty or non-ASCII `X-Envelope-From` is refused instead of falling back to `From:`.
 - A PDF with a huge MediaBox no longer exhausts memory: a page render is capped at 16 Mpx (A4 at 300 DPI is 8.7 Mpx), and pages waiting for OCR are kept at the 3508 px OCR reads instead of full size.

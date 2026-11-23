@@ -709,7 +709,7 @@ pub async fn reprocess_document(ctx: &Ctx<'_>, id: DocumentId, opts: ProcessOpti
         ));
     }
     if let Some(ref model) = opts.model_override
-        && !ctx.app.config.is_model_allowed(model)
+        && !ctx.app.runtime_settings().llm.is_model_allowed(model)
     {
         return Err(ServiceError::invalid(
             "model_not_allowed",

@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 
-import type { Connection, DocumentEvent, DocumentOrganization, DocumentPatch, DocumentView, EmailSettingsPatch, EmailSettingsView, ManagedUser, PasskeyView, Share, ShareTtl, TokenView } from "../api";
+import type { AdminLlmSettings, AdminSettingsPatch, AdminSettingsView, Connection, DocumentEvent, DocumentOrganization, DocumentPatch, DocumentView, EmailSettingsPatch, EmailSettingsView, ManagedUser, PasskeyView, SettingsSummary, Share, ShareTtl, TokenView } from "../api";
 import { attentionDocuments, documentTags, documentViews, expiringDocuments, hits, mockUser, taxonomy } from "./data";
 
 let signedIn = true;
@@ -25,6 +25,75 @@ let emailSettings: EmailSettingsView = {
   last_received_at: null,
   received_count: 0,
 };
+const DEFAULT_ADMIN_SETTINGS: AdminSettingsView = {
+  llm: {
+    enabled: true,
+    has_api_key: true,
+    api_key_source: "env",
+    base_url: "https://openrouter.ai/api/v1",
+    provider: "auto",
+    effective_provider: "openrouter",
+    model: "anthropic/claude-haiku-5.5",
+    vision_model: "anthropic/claude-haiku-5.5",
+    handwriting_enabled: true,
+    handwriting_model: "google/gemini-2.5-flash",
+    allowed_models: ["anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5"],
+    reasoning_effort: null,
+    create_tags: true,
+    monthly_budget_usd: "5.00",
+    prices: "",
+    has_overrides: false,
+  },
+  calendar: {
+    lead_days: 60,
+    has_overrides: false,
+  },
+  inbox: {
+    configured: false,
+    paused: false,
+    user_id: null,
+    interval_secs: 15,
+    failed_files: [],
+    has_overrides: false,
+  },
+  ocr_langs: "eng+rus+ron",
+};
+let adminSettings: AdminSettingsView = structuredClone(DEFAULT_ADMIN_SETTINGS);
+
+const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+function computeLlmOverrides(llm: AdminLlmSettings): boolean {
+  const def = DEFAULT_ADMIN_SETTINGS.llm;
+  return (
+    llm.api_key_source === "database"
+    || llm.enabled !== def.enabled
+    || llm.base_url !== def.base_url
+    || llm.provider !== def.provider
+    || llm.model !== def.model
+    || llm.vision_model !== def.vision_model
+    || llm.handwriting_enabled !== def.handwriting_enabled
+    || llm.handwriting_model !== def.handwriting_model
+    || JSON.stringify(llm.allowed_models) !== JSON.stringify(def.allowed_models)
+    || llm.reasoning_effort !== def.reasoning_effort
+    || llm.create_tags !== def.create_tags
+    || llm.monthly_budget_usd !== def.monthly_budget_usd
+    || llm.prices !== def.prices
+  );
+}
+
+function currentSettingsSummary(): SettingsSummary {
+  return {
+    llm_enabled: adminSettings.llm.enabled,
+    llm_configured: adminSettings.llm.has_api_key,
+    llm_model: adminSettings.llm.model,
+    llm_handwriting_enabled: adminSettings.llm.handwriting_enabled,
+    llm_allowed_models: [...adminSettings.llm.allowed_models],
+    llm_monthly_budget_usd: adminSettings.llm.monthly_budget_usd,
+    calendar_lead_days: adminSettings.calendar.lead_days,
+    inbox_configured: adminSettings.inbox.configured,
+    inbox_paused: adminSettings.inbox.paused,
+  };
+}
 const connections: Connection[] = [{ id: "grant-assistant", client_id: "client-assistant", client_name: "Assistant", created_at: "2026-02-03T10:00:00Z", last_used_at: "2026-02-12T07:45:00Z" }];
 const tokens: TokenView[] = [{ id: "token-reader", user_id: mockUser.id, name: "Reading device", prefix: "pj_demo_read", created_at: "2026-02-01T09:00:00Z", last_used_at: "2026-02-12T08:30:00Z", revoked_at: null }];
 
@@ -533,7 +602,7 @@ export const handlers = [
     users.splice(index, 1);
     return new HttpResponse(null, { status: 204 });
   }),
-  http.get("/api/v1/calendar-feed", () => HttpResponse.json({ active: calendarFeed !== null, feed: calendarFeed, lead_days: 60 })),
+  http.get("/api/v1/calendar-feed", () => HttpResponse.json({ active: calendarFeed !== null, feed: calendarFeed, lead_days: adminSettings.calendar.lead_days })),
   http.post("/api/v1/calendar-feed", () => {
     calendarFeed = { created_at: new Date().toISOString(), last_used_at: null };
     const secret = `pjc_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -606,6 +675,165 @@ export const handlers = [
       ...emailSettings,
       endpoint_url: new URL("/api/v1/ingest/email", request.url).toString(),
     });
+  }),
+  http.get("/api/v1/settings/summary", () => HttpResponse.json(currentSettingsSummary())),
+  http.get("/api/v1/settings", () => HttpResponse.json(structuredClone(adminSettings))),
+  http.patch("/api/v1/settings", async ({ request }) => {
+    const patch = await request.json() as AdminSettingsPatch;
+    const next = structuredClone(adminSettings);
+
+    if (patch.reset_llm) {
+      next.llm = structuredClone(DEFAULT_ADMIN_SETTINGS.llm);
+    }
+    if (patch.reset_calendar) {
+      next.calendar = structuredClone(DEFAULT_ADMIN_SETTINGS.calendar);
+    }
+    if (patch.reset_inbox) {
+      next.inbox = {
+        ...structuredClone(DEFAULT_ADMIN_SETTINGS.inbox),
+        configured: next.inbox.configured,
+        failed_files: next.inbox.failed_files,
+      };
+    }
+
+    if (patch.llm) {
+      const llmPatch = patch.llm;
+      if (llmPatch.base_url !== undefined) {
+        const trimmed = llmPatch.base_url.trim();
+        let parsedUrl: URL | null;
+        try {
+          parsedUrl = new URL(trimmed);
+        } catch {
+          parsedUrl = null;
+        }
+        if (!parsedUrl || (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:")) {
+          return HttpResponse.json({ code: "invalid_llm_base_url", message: "Base URL must be http or https" }, { status: 422 });
+        }
+        next.llm.base_url = trimmed;
+      }
+      if (llmPatch.provider !== undefined) {
+        if (llmPatch.provider !== "auto" && llmPatch.provider !== "openrouter" && llmPatch.provider !== "generic") {
+          return HttpResponse.json({ code: "invalid_llm_provider", message: "Invalid provider" }, { status: 422 });
+        }
+        next.llm.provider = llmPatch.provider;
+      }
+      if (llmPatch.model !== undefined) {
+        const trimmed = llmPatch.model.trim();
+        if (!trimmed) {
+          return HttpResponse.json({ code: "invalid_llm_model", message: "Model cannot be empty" }, { status: 422 });
+        }
+        next.llm.model = trimmed;
+      }
+      if (llmPatch.vision_model !== undefined) {
+        const trimmed = llmPatch.vision_model.trim();
+        if (!trimmed) {
+          return HttpResponse.json({ code: "invalid_llm_model", message: "Vision model cannot be empty" }, { status: 422 });
+        }
+        next.llm.vision_model = trimmed;
+      }
+      if (llmPatch.handwriting_model !== undefined) {
+        const trimmed = llmPatch.handwriting_model.trim();
+        if (!trimmed) {
+          return HttpResponse.json({ code: "invalid_llm_model", message: "Handwriting model cannot be empty" }, { status: 422 });
+        }
+        next.llm.handwriting_model = trimmed;
+      }
+      if ("reasoning_effort" in llmPatch) {
+        const value = llmPatch.reasoning_effort?.trim() || null;
+        if (value !== null && !VALID_REASONING_EFFORTS.has(value)) {
+          return HttpResponse.json({ code: "invalid_reasoning_effort", message: "Invalid reasoning effort" }, { status: 422 });
+        }
+        next.llm.reasoning_effort = value;
+      }
+      if ("monthly_budget_usd" in llmPatch) {
+        const raw = llmPatch.monthly_budget_usd?.trim() ?? "";
+        if (raw) {
+          if (!/^\d+(?:\.\d{1,6})?$/.test(raw)) {
+            return HttpResponse.json({ code: "invalid_llm_budget", message: "Monthly budget must be a non-negative number" }, { status: 422 });
+          }
+          next.llm.monthly_budget_usd = raw;
+        } else {
+          next.llm.monthly_budget_usd = null;
+        }
+      }
+      if ("prices" in llmPatch) {
+        const raw = llmPatch.prices?.trim() ?? "";
+        if (raw) {
+          const entries = raw.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+          for (const entry of entries) {
+            if (!/^[^=\s]+=\d+(?:\.\d+)?:\d+(?:\.\d+)?$/.test(entry)) {
+              return HttpResponse.json({ code: "invalid_llm_prices", message: "Prices must use model=input:output format" }, { status: 422 });
+            }
+          }
+          next.llm.prices = entries.join(", ");
+        } else {
+          next.llm.prices = "";
+        }
+      }
+      if (llmPatch.enabled !== undefined) next.llm.enabled = llmPatch.enabled;
+      if (llmPatch.handwriting_enabled !== undefined) next.llm.handwriting_enabled = llmPatch.handwriting_enabled;
+      if (llmPatch.create_tags !== undefined) next.llm.create_tags = llmPatch.create_tags;
+      if (llmPatch.allowed_models !== undefined) {
+        next.llm.allowed_models = llmPatch.allowed_models.map((item) => item.trim()).filter(Boolean);
+      }
+      if (llmPatch.clear_api_key) {
+        next.llm.has_api_key = DEFAULT_ADMIN_SETTINGS.llm.has_api_key;
+        next.llm.api_key_source = DEFAULT_ADMIN_SETTINGS.llm.api_key_source;
+      } else if (llmPatch.api_key !== undefined) {
+        const key = llmPatch.api_key?.trim() ?? "";
+        if (key) {
+          next.llm.has_api_key = true;
+          next.llm.api_key_source = "database";
+        }
+      }
+      next.llm.effective_provider = next.llm.provider === "openrouter"
+        ? "openrouter"
+        : next.llm.provider === "generic"
+          ? "generic"
+          : next.llm.base_url.toLowerCase().includes("openrouter")
+            ? "openrouter"
+            : "generic";
+      next.llm.has_overrides = computeLlmOverrides(next.llm);
+    }
+
+    if (patch.calendar?.lead_days !== undefined) {
+      const days = patch.calendar.lead_days;
+      if (!Number.isInteger(days) || days < 0 || days > 3650) {
+        return HttpResponse.json({ code: "invalid_calendar_lead_days", message: "Lead days must be between 0 and 3650" }, { status: 422 });
+      }
+      next.calendar.lead_days = days;
+      next.calendar.has_overrides = days !== DEFAULT_ADMIN_SETTINGS.calendar.lead_days;
+    }
+
+    if (patch.inbox) {
+      const inboxPatch = patch.inbox;
+      if (inboxPatch.interval_secs !== undefined) {
+        if (!Number.isInteger(inboxPatch.interval_secs) || inboxPatch.interval_secs < 1 || inboxPatch.interval_secs > 86400) {
+          return HttpResponse.json({ code: "invalid_inbox_interval", message: "Poll interval must be between 1 and 86400 seconds" }, { status: 422 });
+        }
+        next.inbox.interval_secs = inboxPatch.interval_secs;
+      }
+      if ("user_id" in inboxPatch) {
+        if (inboxPatch.user_id) {
+          const active = users.some((user) => user.id === inboxPatch.user_id && user.disabled_at === null);
+          if (!active) {
+            return HttpResponse.json({ code: "invalid_inbox_user", message: "Select an active user" }, { status: 422 });
+          }
+          next.inbox.user_id = inboxPatch.user_id;
+        } else {
+          next.inbox.user_id = null;
+        }
+      }
+      if (inboxPatch.paused !== undefined) next.inbox.paused = inboxPatch.paused;
+      next.inbox.has_overrides = (
+        next.inbox.paused !== DEFAULT_ADMIN_SETTINGS.inbox.paused
+        || next.inbox.user_id !== DEFAULT_ADMIN_SETTINGS.inbox.user_id
+        || next.inbox.interval_secs !== DEFAULT_ADMIN_SETTINGS.inbox.interval_secs
+      );
+    }
+
+    adminSettings = next;
+    return HttpResponse.json(structuredClone(adminSettings));
   }),
   http.get("/api/v1/tokens", () => HttpResponse.json(tokens)),
   http.post("/api/v1/tokens", async ({ request }) => {

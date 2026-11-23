@@ -13,7 +13,7 @@ const MIN_SECRET_KEY_BYTES: usize = 32;
 const DEFAULT_LLM_MODEL: &str = "anthropic/claude-haiku-5.5";
 /// Re-reads handwritten pages on OpenRouter: the default vision model misreads
 /// cursive names, dates and personal numbers that this one reads.
-const DEFAULT_HANDWRITING_MODEL: &str = "anthropic/claude-sonnet-5.5";
+pub(crate) const DEFAULT_HANDWRITING_MODEL: &str = "anthropic/claude-sonnet-5.5";
 const DEFAULT_LLM_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// The dialect of the chat-completions endpoint behind the LLM layer.
@@ -35,6 +35,14 @@ impl LlmProvider {
         }
     }
 
+    /// Canonical lowercase name of this provider profile.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmProvider::OpenRouter => "openrouter",
+            LlmProvider::Generic => "generic",
+        }
+    }
+
     /// How error messages and logs name the service, at the start of a
     /// sentence.
     pub fn name(self) -> &'static str {
@@ -52,19 +60,11 @@ pub struct ModelPrice {
     pub output_per_mtok: Decimal,
 }
 
-/// `PAPERJAM_LLM_PRICES`: `model=input:output,model=input:output`, where the
-/// last `=` ends the model id (ids may contain `:` or `/`).
-fn llm_prices(
-    get: &impl Fn(&str) -> Option<String>,
-) -> Result<HashMap<String, ModelPrice>, ConfigError> {
-    const VAR: &str = "PAPERJAM_LLM_PRICES";
-    let Some(raw) = get(VAR) else {
-        return Ok(HashMap::new());
-    };
-    let invalid = |reason: String| ConfigError::Invalid { var: VAR, reason };
+/// Parses a comma-separated `model=input:output` price table.
+pub(crate) fn parse_llm_prices(raw: &str) -> Result<HashMap<String, ModelPrice>, String> {
     let mut prices = HashMap::new();
     for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        let bad = || invalid(format!("{entry:?} is not model=input:output"));
+        let bad = || format!("{entry:?} is not model=input:output");
         let (model, pair) = entry.rsplit_once('=').ok_or_else(bad)?;
         let (input, output) = pair.split_once(':').ok_or_else(bad)?;
         let number = |text: &str| {
@@ -72,7 +72,7 @@ fn llm_prices(
                 .parse::<Decimal>()
                 .ok()
                 .filter(|d| !d.is_sign_negative())
-                .ok_or_else(|| invalid(format!("{text:?} is not a price in USD per million")))
+                .ok_or_else(|| format!("{text:?} is not a price in USD per million"))
         };
         let model = model.trim();
         if model.is_empty() {
@@ -85,6 +85,18 @@ fn llm_prices(
         prices.insert(model.to_string(), price);
     }
     Ok(prices)
+}
+
+/// `PAPERJAM_LLM_PRICES`: `model=input:output,model=input:output`, where the
+/// last `=` ends the model id (ids may contain `:` or `/`).
+fn llm_prices(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<HashMap<String, ModelPrice>, ConfigError> {
+    const VAR: &str = "PAPERJAM_LLM_PRICES";
+    let Some(raw) = get(VAR) else {
+        return Ok(HashMap::new());
+    };
+    parse_llm_prices(&raw).map_err(|reason| ConfigError::Invalid { var: VAR, reason })
 }
 
 fn parse<T>(
@@ -253,7 +265,7 @@ fn static_oauth_client(
 }
 
 const DEFAULT_INBOX_INTERVAL_SECS: u64 = 30;
-const MAX_INBOX_INTERVAL_SECS: u64 = 86_400;
+pub(crate) const MAX_INBOX_INTERVAL_SECS: u64 = 86_400;
 
 /// Absolute, symlink-free form of `path` for comparisons. The longest existing
 /// ancestor is canonicalized; a tail that does not exist yet is normalized
@@ -503,6 +515,8 @@ pub struct Config {
     pub llm_base_url: Url,
     /// Which dialect the endpoint speaks; derived from the host unless set.
     pub llm_provider: LlmProvider,
+    /// Raw provider selection from environment (`"auto"`, `"openrouter"`, or `"generic"`).
+    pub(crate) llm_provider_raw: String,
     /// USD per million tokens, by model, for endpoints that report no cost.
     pub llm_prices: HashMap<String, ModelPrice>,
     pub llm_model: String,
@@ -511,6 +525,8 @@ pub struct Config {
     /// `None` keeps the first reading.
     pub llm_handwriting_model: Option<String>,
     pub llm_allowed_models: Vec<String>,
+    /// Whether `PAPERJAM_LLM_ALLOWED_MODELS` was explicitly provided in the environment.
+    pub(crate) llm_allowed_models_explicit: bool,
     /// Only what the operator set; OpenRouter then falls back to `low` and
     /// other endpoints get no reasoning field at all.
     pub llm_reasoning_effort: Option<String>,
@@ -574,12 +590,18 @@ impl Config {
             Some(url) => url,
             None => Url::parse(DEFAULT_LLM_BASE_URL).expect("a valid default URL"),
         };
-        let llm_provider = match get("PAPERJAM_LLM_PROVIDER") {
-            None => LlmProvider::from_base_url(&llm_base_url),
+        let (llm_provider_raw, llm_provider) = match get("PAPERJAM_LLM_PROVIDER") {
+            None => (
+                "auto".to_string(),
+                LlmProvider::from_base_url(&llm_base_url),
+            ),
             Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-                "auto" => LlmProvider::from_base_url(&llm_base_url),
-                "openrouter" => LlmProvider::OpenRouter,
-                "generic" => LlmProvider::Generic,
+                "auto" => (
+                    "auto".to_string(),
+                    LlmProvider::from_base_url(&llm_base_url),
+                ),
+                "openrouter" => ("openrouter".to_string(), LlmProvider::OpenRouter),
+                "generic" => ("generic".to_string(), LlmProvider::Generic),
                 other => {
                     return Err(ConfigError::Invalid {
                         var: "PAPERJAM_LLM_PROVIDER",
@@ -597,7 +619,9 @@ impl Config {
                 .then(|| DEFAULT_HANDWRITING_MODEL.to_string()),
         }
         .filter(|m| *m != llm_vision_model);
-        let llm_allowed_models: Vec<String> = match get("PAPERJAM_LLM_ALLOWED_MODELS") {
+        let raw_allowed_models = get("PAPERJAM_LLM_ALLOWED_MODELS");
+        let llm_allowed_models_explicit = raw_allowed_models.is_some();
+        let llm_allowed_models: Vec<String> = match raw_allowed_models {
             Some(raw) => raw
                 .split(',')
                 .map(str::trim)
@@ -636,11 +660,13 @@ impl Config {
                 .map(SecretString::from),
             llm_base_url,
             llm_provider,
+            llm_provider_raw,
             llm_prices: llm_prices(&get)?,
             llm_model,
             llm_vision_model,
             llm_handwriting_model,
             llm_allowed_models,
+            llm_allowed_models_explicit,
             llm_reasoning_effort: get("PAPERJAM_LLM_REASONING_EFFORT"),
             llm_create_tags: parse_bool(&get, "PAPERJAM_LLM_CREATE_TAGS")?.unwrap_or(true),
             llm_monthly_budget_usd: parse(&get, "PAPERJAM_LLM_MONTHLY_BUDGET_USD")?,

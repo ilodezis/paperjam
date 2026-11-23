@@ -17,12 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
+use serde::Serialize;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ErrorKind, ServiceError};
 use crate::ids::UserId;
+use crate::service::settings::EmailUserTarget;
 use crate::service::upload::{UploadInput, upload};
 use crate::service::{Actor, App, Via, users};
 
@@ -30,8 +32,65 @@ const FAILED_DIR: &str = ".failed";
 const MAX_DEPTH: usize = 16;
 const TEMP_SUFFIXES: [&str; 2] = [".part", ".tmp"];
 const MIN_AGE_FLOOR_SECS: u64 = 10;
+const MAX_FAILED_FILES: usize = 100;
 /// Upload errors that are about the file's content, not about reading it.
 const REJECTION_CODES: [&str; 3] = ["unsupported_type", "empty_file", "file_too_large"];
+
+/// One rejected file present in `<inbox>/.failed`.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct FailedInboxFile {
+    pub name: String,
+    pub reason: Option<String>,
+    pub size: u64,
+    pub failed_at: Option<String>,
+}
+
+/// Lists rejected files in `<dir>/.failed`, newest first, capped at 100 entries.
+pub fn list_failed_files(dir: &Path) -> Vec<FailedInboxFile> {
+    let failed_dir = dir.join(FAILED_DIR);
+    let Ok(entries) = std::fs::read_dir(&failed_dir) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".reason.txt") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let size = meta.len();
+        let failed_at = meta
+            .modified()
+            .ok()
+            .map(|m| crate::time::ts(chrono::DateTime::<chrono::Utc>::from(m)));
+        let reason_path = failed_dir.join(format!("{name}.reason.txt"));
+        let reason = std::fs::read_to_string(&reason_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        files.push(FailedInboxFile {
+            name,
+            reason,
+            size,
+            failed_at,
+        });
+    }
+    files.sort_by(|a, b| {
+        b.failed_at
+            .cmp(&a.failed_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    files.truncate(MAX_FAILED_FILES);
+    files
+}
 
 /// How old a file's modification time must be before it is taken.
 pub fn default_min_age(interval_secs: u64) -> Duration {
@@ -89,7 +148,7 @@ pub struct Inbox {
     dir: PathBuf,
     seen: HashMap<PathBuf, Seen>,
     last_user_problem: Option<String>,
-    min_age: Duration,
+    min_age_override: Option<Duration>,
     #[cfg(test)]
     open_fault: Option<std::io::ErrorKind>,
 }
@@ -200,13 +259,12 @@ struct Stored {
 
 impl Inbox {
     pub fn new(app: Arc<App>, dir: PathBuf) -> Self {
-        let min_age = default_min_age(app.config.inbox_interval_secs);
         Self {
             app,
             dir,
             seen: HashMap::new(),
             last_user_problem: None,
-            min_age,
+            min_age_override: None,
             #[cfg(test)]
             open_fault: None,
         }
@@ -215,15 +273,33 @@ impl Inbox {
     /// Overrides how old a file must be before it is taken (tests).
     #[must_use]
     pub fn with_min_age(mut self, min_age: Duration) -> Self {
-        self.min_age = min_age;
+        self.min_age_override = Some(min_age);
         self
     }
 
-    /// The configured account, or the only active one. Logs a problem once.
+    fn effective_min_age(&self, interval_secs: u64) -> Duration {
+        self.min_age_override
+            .unwrap_or_else(|| default_min_age(interval_secs))
+    }
+
+    #[cfg(test)]
     async fn resolve_user(&mut self) -> Option<UserId> {
+        let target = self.app.runtime_settings().inbox.user;
+        self.resolve_user_target(target.as_ref()).await
+    }
+
+    /// The configured account, or the only active one. Logs a problem once.
+    async fn resolve_user_target(&mut self, target: Option<&EmailUserTarget>) -> Option<UserId> {
         let ctx = self.app.ctx(Actor::system());
-        let found = match &self.app.config.inbox_user {
-            Some(name) => users::find_user_by_username(&ctx, name)
+        let found = match target {
+            Some(EmailUserTarget::UserId(id)) => users::get_user(&ctx, *id)
+                .await
+                .map_err(|e| format!("inbox user {id}: {e}"))
+                .and_then(|u| match u.disabled_at {
+                    None => Ok(u.id),
+                    Some(_) => Err("inbox user: the account is disabled".to_string()),
+                }),
+            Some(EmailUserTarget::Username(name)) => users::find_user_by_username(&ctx, name)
                 .await
                 .map_err(|e| format!("PAPERJAM_INBOX_USER: {e}"))
                 .and_then(|u| match u.disabled_at {
@@ -262,7 +338,12 @@ impl Inbox {
     /// One scan. Public so tests can drive ticks without waiting.
     pub async fn tick(&mut self, cancel: &CancellationToken) -> TickReport {
         let mut report = TickReport::default();
-        let Some(user) = self.resolve_user().await else {
+        let cfg = self.app.runtime_settings().inbox;
+        if cfg.paused {
+            return report;
+        }
+        let min_age = self.effective_min_age(cfg.interval_secs);
+        let Some(user) = self.resolve_user_target(cfg.user.as_ref()).await else {
             return report;
         };
         let dir = self.dir.clone();
@@ -299,7 +380,7 @@ impl Inbox {
             // the future (clock skew) counts as too recent.
             let old_enough = signature
                 .modified
-                .is_none_or(|m| now.duration_since(m).is_ok_and(|age| age >= self.min_age));
+                .is_none_or(|m| now.duration_since(m).is_ok_and(|age| age >= min_age));
             if signature.size == 0 || !old_enough {
                 report.waiting += 1;
                 continue;
@@ -440,10 +521,11 @@ impl Inbox {
     /// again after the minimum file age.
     fn retry_later(&mut self, path: &Path, signature: Signature, kind: std::io::ErrorKind) {
         tracing::warn!(error = %kind, "could not read an inbox file; will retry");
+        let min_age = self.effective_min_age(self.app.runtime_settings().inbox.interval_secs);
         self.seen.insert(
             path.to_path_buf(),
             Seen {
-                retry_at: Some(Instant::now() + self.min_age),
+                retry_at: Some(Instant::now() + min_age),
                 ..Seen::new(signature)
             },
         );
@@ -534,15 +616,16 @@ pub fn spawn(app: Arc<App>, cancel: CancellationToken) -> JoinHandle<()> {
         .inbox_dir
         .clone()
         .expect("spawn is only called with PAPERJAM_INBOX_DIR set");
-    let interval = Duration::from_secs(app.config.inbox_interval_secs);
+    let initial_interval = app.runtime_settings().inbox.interval_secs;
     tokio::spawn(async move {
         tracing::info!(
-            interval_secs = interval.as_secs(),
+            interval_secs = initial_interval,
             "watching the inbox folder"
         );
-        let mut inbox = Inbox::new(app, dir);
+        let mut inbox = Inbox::new(Arc::clone(&app), dir);
         loop {
             inbox.tick(&cancel).await;
+            let interval = Duration::from_secs(app.runtime_settings().inbox.interval_secs);
             tokio::select! {
                 () = cancel.cancelled() => break,
                 () = tokio::time::sleep(interval) => {}
@@ -599,6 +682,7 @@ mod tests {
             config: Arc::new(config),
             ..app
         });
+        app.reload_settings().await.unwrap();
         for name in users {
             add_user(&app, name).await;
         }
@@ -681,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn a_file_modified_too_recently_waits() {
         let mut f = fixture().await;
-        f.inbox.min_age = Duration::from_secs(3600);
+        f.inbox.min_age_override = Some(Duration::from_secs(3600));
         f.write("scan.pdf", &pdf("fresh"));
         for _ in 0..3 {
             let report = f.tick().await;
@@ -690,7 +774,7 @@ mod tests {
         assert!(f.path("scan.pdf").exists());
         assert_eq!(f.documents().await, 0);
 
-        f.inbox.min_age = Duration::ZERO;
+        f.inbox.min_age_override = Some(Duration::ZERO);
         assert_eq!(f.tick().await.ingested, 1);
         assert!(!f.path("scan.pdf").exists());
     }

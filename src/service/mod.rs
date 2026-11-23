@@ -117,8 +117,10 @@ pub struct App {
     /// Derived data; rebuilt from the database by `paperjam reindex`.
     pub index: SearchIndex,
     pub jobs: JobQueue,
-    /// `None` without an LLM API key: only local recognition runs.
-    pub llm: Option<LlmClient>,
+    /// Active LLM client, rebuilt when runtime settings are reloaded.
+    pub(crate) llm_client: Arc<std::sync::RwLock<Option<Arc<LlmClient>>>>,
+    /// In-flight monthly budget holds shared across client reloads.
+    pub llm_reservations: Arc<crate::llm::budget::Reservations>,
     /// WebAuthn relying party and pending passkey ceremonies.
     pub passkeys: passkeys::Passkeys,
     /// Coordinates background OCR runs with LLM steps on the same document.
@@ -132,11 +134,14 @@ impl App {
     pub async fn open(config: Config) -> anyhow::Result<App> {
         std::fs::create_dir_all(&config.data_dir)?;
         let db = Db::open(&config.data_dir.join("paperjam.db")).await?;
-        let runtime = Arc::new(std::sync::RwLock::new(settings::load(&config, &db).await?));
+        let loaded = settings::load(&config, &db).await?;
+        let llm_client = Arc::new(std::sync::RwLock::new(
+            LlmClient::from_runtime(&loaded.llm).map(Arc::new),
+        ));
+        let runtime = Arc::new(std::sync::RwLock::new(loaded));
         let files = FileStore::open(&config.data_dir)?;
         let config_dir = config.data_dir.clone();
         let index = SearchIndex::open(&config_dir.join("index"), &config.ocr_langs)?;
-        let llm = LlmClient::from_config(&config);
         let passkeys = passkeys::Passkeys::from_config(&config);
         Ok(App {
             config: Arc::new(config),
@@ -144,7 +149,8 @@ impl App {
             locks: HashLocks::default(),
             index,
             jobs: JobQueue::new(db.write.clone()),
-            llm,
+            llm_client,
+            llm_reservations: Arc::new(crate::llm::budget::Reservations::default()),
             passkeys,
             ocr_trackers: Arc::new(crate::pipeline::OcrTrackers::default()),
             runtime,
@@ -164,11 +170,33 @@ impl App {
             .clone()
     }
 
-    /// Reloads runtime settings from SQLite and updates the cached snapshot.
+    /// Returns the active LLM client, or `None` when disabled or unconfigured.
+    pub fn llm_client(&self) -> Option<Arc<LlmClient>> {
+        self.llm_client
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replaces the active LLM client directly (used by tests to configure fast backoff).
+    pub fn set_llm_client(&self, client: Option<LlmClient>) {
+        let mut guard = self.llm_client.write().unwrap_or_else(|e| e.into_inner());
+        *guard = client.map(Arc::new);
+    }
+
+    /// Reloads runtime settings from SQLite and updates the cached snapshot
+    /// and active LLM client.
     pub async fn reload_settings(&self) -> Result<()> {
         let fresh = settings::load(&self.config, &self.db).await?;
-        let mut guard = self.runtime.write().unwrap_or_else(|e| e.into_inner());
-        *guard = fresh;
+        let new_client = LlmClient::from_runtime(&fresh.llm).map(Arc::new);
+        {
+            let mut guard = self.runtime.write().unwrap_or_else(|e| e.into_inner());
+            *guard = fresh;
+        }
+        {
+            let mut client_guard = self.llm_client.write().unwrap_or_else(|e| e.into_inner());
+            *client_guard = new_client;
+        }
         Ok(())
     }
 }

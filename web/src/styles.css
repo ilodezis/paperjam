@@ -482,6 +482,8 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .action-menu > div svg { flex: none; width: 15px; height: 15px; color: var(--ink-muted, currentColor); }
 .action-menu > div hr { height: 0; margin: 4px 0; border: 0; border-top: 1px solid var(--line); }
 .action-menu-label { margin: 0; padding: 6px 10px 3px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.6; }
+.action-menu > div .action-menu-subitem { padding-left: 18px; font-size: var(--text-meta); }
+.action-menu > div .action-menu-subitem > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .action-menu > div .action-menu-danger, .action-menu > div .action-menu-danger svg { color: var(--danger); }
 .document-status-line { display: flex; align-items: center; flex-wrap: wrap; gap: 15px; min-height: 36px; margin-bottom: 16px; padding: 7px 0; color: var(--muted); font-size: var(--text-secondary); }
 .document-status-line > span { display: inline-flex; align-items: center; gap: 6px; }
@@ -903,6 +905,31 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .email-field-hint--notice > svg { flex: 0 0 auto; width: 15px; height: 15px; margin-top: 2px; color: var(--focus); }
 .email-intake-form .settings-form-footer { margin: 4px 0 0; }
 .toggle-row:has(.switch:disabled) { cursor: not-allowed; opacity: .78; }
+.settings-stack { display: grid; gap: 18px; }
+.settings-form { display: grid; gap: 14px; }
+.settings-form .field-label textarea { width: 100%; min-width: 0; padding: 8px 10px; color: var(--ink); background: var(--paper-raised); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font-family: ui-monospace, monospace; font-size: var(--text-control); line-height: 1.5; resize: vertical; }
+.settings-form .field-label textarea:focus { border-color: var(--accent); outline: 1px solid var(--accent); }
+.settings-form .settings-form-footer { margin: 4px 0 0; }
+.settings-key-block { display: grid; gap: 6px; }
+.settings-key-row { display: flex; gap: 8px; align-items: center; }
+.settings-key-row > input { flex: 1; min-width: 0; height: var(--control-h); padding: 7px 9px; color: var(--ink); background: var(--paper-raised); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font-size: var(--text-control); }
+.settings-key-row > .button { flex: 0 0 auto; }
+.settings-advanced-details { margin-top: 0; padding: 12px 14px; background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius-md); }
+.settings-advanced-body { display: grid; gap: 14px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.settings-reset-row { display: flex; justify-content: flex-start; padding-top: 4px; }
+.settings-info-card { display: flex; align-items: flex-start; gap: 12px; padding: 14px; color: var(--ink); background: var(--sidebar); border: 1px solid var(--line); border-radius: var(--radius-md); }
+.settings-info-card > svg { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 2px; color: var(--muted); }
+.settings-info-card strong { display: block; margin-bottom: 4px; font-size: var(--text-secondary); font-weight: 500; }
+.settings-info-card p { margin: 0; color: var(--muted); font-size: var(--text-meta); line-height: 1.5; }
+.inbox-failed-block { display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
+.inbox-failed-block h3 { margin: 0; color: var(--muted); font-size: var(--text-secondary); font-weight: 600; }
+.inbox-failed-block .settings-note { margin: 0; }
+.inbox-failed-reason { color: var(--danger); font-size: var(--text-meta); }
+.calendar-lead-form { display: grid; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.calendar-lead-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.calendar-lead-row .field-label { flex: 0 1 200px; }
+.calendar-lead-row input { width: 100%; min-width: 0; height: var(--control-h); padding: 7px 9px; color: var(--ink); background: var(--paper-raised); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font-size: var(--text-control); }
+.settings-usage-note { margin: -12px 0 18px; }
 .usage-list { display: grid; gap: 0; margin: 0 0 25px; }
 .usage-list > div, .queue-list > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 7px 0; }
 .usage-list dt, .queue-list dt { color: var(--muted); font-size: var(--text-meta); }
@@ -961,6 +988,10 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
   .email-secret-empty { align-items: stretch; flex-direction: column; }
   .email-secret-empty > .button { justify-content: center; }
   .email-worker-details dl > div { grid-template-columns: 1fr; gap: 2px; }
+  .settings-key-row { align-items: stretch; flex-direction: column; }
+  .settings-key-row > .button { justify-content: center; }
+  .calendar-lead-row { align-items: stretch; flex-direction: column; }
+  .calendar-lead-row .field-label { flex: 1 1 auto; }
 }
 
 /* ==========================================================================
@@ -1616,6 +1647,9 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
 .sheet-action:disabled { opacity: .5; cursor: default; }
 .sheet-action svg { width: 20px; height: 20px; color: var(--muted); }
 .sheet-action--danger, .sheet-action--danger svg { color: var(--danger); }
+.sheet-action-subgroup { display: grid; gap: 2px; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--line); }
+.sheet-action-label { margin: 0; padding: 6px 12px 2px; color: var(--muted); font-size: var(--text-badge); letter-spacing: 0.04em; text-transform: uppercase; }
+.sheet-action--sub { padding-left: 20px; font-size: var(--text-secondary); }
 
 /* The trash is a place under Settings on a phone, a rail entry on a desktop. */
 .settings-trash-link {

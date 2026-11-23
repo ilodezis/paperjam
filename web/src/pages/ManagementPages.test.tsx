@@ -578,4 +578,45 @@ describe("SettingsPage", () => {
     // The account keeps it too: summaries of new documents follow it.
     await eventually(() => expect(setLocale).toHaveBeenCalledWith("ru"));
   });
+
+  it("shows spend against budget, OCR languages, and admin LLM/Inbox sections under Archive for administrators", async () => {
+    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
+    await click(tab("Archive"));
+    await eventually(() => expect(panel("archive").textContent).toContain("$0.04 / $5.00"));
+    expect(panel("archive").textContent).toContain("eng+rus+ron");
+    expect(panel("archive").textContent).toContain("LLM enrichment");
+    expect(panel("archive").textContent).toContain("Watched inbox folder");
+
+    await click(tab("Access"));
+    await eventually(() => expect(panel("access").textContent).toContain("Reminder lead time (days)"));
+  });
+
+  it("hides admin LLM, Inbox, and calendar lead editor for non-administrators while showing budget and paused hint", async () => {
+    server.use(
+      http.get("/api/v1/users", () => HttpResponse.json({ code: "forbidden", message: "Administrators only" }, { status: 403 })),
+      http.get("/api/v1/settings", () => HttpResponse.json({ code: "admin_required", message: "Administrators only" }, { status: 403 })),
+      http.get("/api/v1/settings/summary", () => HttpResponse.json({
+        llm_enabled: false,
+        llm_configured: true,
+        llm_model: "anthropic/claude-haiku-5.5",
+        llm_handwriting_enabled: false,
+        llm_allowed_models: [],
+        llm_monthly_budget_usd: "5.00",
+        calendar_lead_days: 60,
+        inbox_configured: false,
+        inbox_paused: false,
+      })),
+    );
+    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
+    await click(tab("Archive"));
+    await eventually(() => expect(panel("archive").textContent).toContain("$0.04 / $5.00"));
+    expect(panel("archive").textContent).toContain("LLM enrichment is paused.");
+    expect(panel("archive").querySelector("#settings-llm")).toBeNull();
+    expect(panel("archive").querySelector("#settings-inbox")).toBeNull();
+
+    await click(tab("Access"));
+    await eventually(() => expect(panel("access").textContent).toContain("Calendar subscription"));
+    expect(panel("access").textContent).toContain("60 days before each due date");
+    expect(byLabel("Reminder lead time (days)")).toBeNull();
+  });
 });

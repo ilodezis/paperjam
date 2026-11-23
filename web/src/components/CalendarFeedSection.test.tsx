@@ -5,10 +5,11 @@ import { I18nextProvider } from "react-i18next";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { api } from "../api";
 import { createI18n } from "../i18n";
 import { handlers } from "../mocks/handlers";
 import { CalendarFeedSection } from "./CalendarFeedSection";
-import { clearToasts } from "./controls/toast";
+import { clearToasts, getToastsSnapshot } from "./controls/toast";
 
 const server = setupServer(...handlers);
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -23,8 +24,19 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  await api.updateSettings({ reset_calendar: true });
 });
 afterAll(() => server.close());
+
+function byLabel<T extends HTMLElement = HTMLElement>(label: string): T | null {
+  return (Array.from(container?.querySelectorAll<HTMLElement>("[aria-label]") ?? [])
+    .find((element) => element.getAttribute("aria-label") === label) as T | undefined) ?? null;
+}
+
+async function changeText(element: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(element, value);
+  await act(async () => { element.dispatchEvent(new Event("input", { bubbles: true })); });
+}
 
 function findButton(name: string): HTMLButtonElement | null {
   return Array.from(container?.querySelectorAll("button") ?? []).find((element) => element.textContent?.trim() === name || element.getAttribute("aria-label") === name) ?? null;
@@ -71,5 +83,43 @@ describe("CalendarFeedSection", () => {
 
     expect(confirm).toHaveBeenCalledTimes(2);
     expect(confirm.mock.calls.map(([options]) => options.cancelLabel)).toEqual(["Cancel", "Cancel"]);
+    expect(byLabel("Reminder lead time (days)")).toBeNull();
+    expect(container?.textContent).toContain("60 days before each due date");
+  });
+
+  it("lets an administrator edit reminder lead days and reports invalid values", async () => {
+    const onError = vi.fn();
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    await act(async () => {
+      root?.render(
+        <QueryClientProvider client={queryClient}>
+          <I18nextProvider i18n={createI18n("en")}>
+            <CalendarFeedSection admin={true} confirm={vi.fn()} onError={onError} />
+          </I18nextProvider>
+        </QueryClientProvider>,
+      );
+    });
+
+    await eventually(() => expect(byLabel("Reminder lead time (days)")).not.toBeNull());
+    const input = byLabel<HTMLInputElement>("Reminder lead time (days)")!;
+    const save = findButton("Save lead time")!;
+    expect(input.value).toBe("60");
+    expect(save.disabled).toBe(true);
+
+    await changeText(input, "30");
+    expect(save.disabled).toBe(false);
+    await click(save);
+
+    await eventually(() => expect(save.disabled).toBe(true));
+    expect((await api.calendarFeed()).lead_days).toBe(30);
+    expect((await api.settingsSummary()).calendar_lead_days).toBe(30);
+    expect(getToastsSnapshot().map((item) => item.message)).toContain("Calendar reminder lead time updated");
+
+    await changeText(input, "4000");
+    await click(save);
+    await eventually(() => expect(onError).toHaveBeenCalledWith("invalid_calendar_lead_days"));
   });
 });

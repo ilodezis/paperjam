@@ -36,8 +36,10 @@ struct Rig {
 async fn rig(vars: &[(&str, &str)]) -> Rig {
     let env = TestEnv::new();
     let mock = MockOpenRouter::start().await;
-    let mut app = env.app_with_llm(&mock, vars).await;
-    app.llm = LlmClient::from_config(&app.config).map(|c| c.with_backoff(Duration::from_millis(5)));
+    let app = env.app_with_llm(&mock, vars).await;
+    app.set_llm_client(
+        LlmClient::from_config(&app.config).map(|c| c.with_backoff(Duration::from_millis(5))),
+    );
     taxonomy::seed_builtin_types(&app.ctx(Actor::system()))
         .await
         .unwrap();
@@ -516,8 +518,8 @@ async fn local_only_document_never_calls_llm() {
     assert!(usage_steps(&r.app).await.is_empty());
 
     // The step runner itself refuses such a document.
-    let client = r.app.llm.as_ref().unwrap();
-    let err = Steps::new(&r.app, client, id, &ProcessOptions::default())
+    let client = r.app.llm_client().unwrap();
+    let err = Steps::new(&r.app, &client, id, &ProcessOptions::default())
         .await
         .err()
         .expect("local_only documents are refused");
@@ -531,7 +533,7 @@ async fn without_a_key_the_llm_layer_is_off() {
     taxonomy::seed_builtin_types(&app.ctx(Actor::system()))
         .await
         .unwrap();
-    assert!(app.llm.is_none());
+    assert!(app.llm_client().is_none());
     let id = upload_fixture(&app, "contract_ru_digital.pdf", false).await;
     process_all(&app, id).await;
     let doc = view(&app, id).await;

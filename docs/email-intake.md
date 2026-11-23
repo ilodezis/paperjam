@@ -8,7 +8,21 @@ The usual bridge in front of it is a small **Cloudflare Email Worker** (free pla
 
 ## 1. Enable the endpoint in paperjam
 
-Set `PAPERJAM_EMAIL_SECRET` in `.env` (at least 32 random bytes, e.g. `openssl rand -base64 48`), plus any filters you want, and restart the server:
+### From the web UI
+
+Open **Settings → Access → Email intake** while signed in with an administrator web session (changes take effect immediately without restarting; API tokens cannot modify email intake settings):
+
+1. Click **Generate secret** and copy the `pje_…` secret right away. It is stored as a SHA-256 hash and shown once; generating it enables **Accept incoming emails** automatically.
+2. Copy the **Webhook endpoint** URL (`https://paperjam.example.org/api/v1/ingest/email`).
+3. Add **Allowed senders** (exact addresses like `alice@example.org` or `@domain` suffixes like `@partner.example`, one per line or comma-separated).
+4. Choose **Assign documents to** (`Automatic (first active admin)` or a specific active user), optionally enter an **Auto-tag** (up to 64 characters), and set **Save email body when there are no attachments** and **Process emailed documents locally only**.
+5. Click **Save settings**. Use **Accept incoming emails** to pause or resume intake without revoking the secret, or use **Rotate secret** / **Revoke** as needed.
+
+Settings saved in the web UI override the `PAPERJAM_EMAIL_*` environment variables below.
+
+### From environment variables (`.env`)
+
+To pre-configure email intake at startup, set `PAPERJAM_EMAIL_SECRET` in `.env` (at least 32 random bytes, e.g. `openssl rand -base64 48`), plus any filters you want, and restart the server:
 
 ```sh
 PAPERJAM_EMAIL_SECRET=replace-with-at-least-32-random-bytes
@@ -42,7 +56,7 @@ paperjam reads the MIME tree recursively (including forwarded `message/rfc822` m
 
 - **Kept:** PDFs and images (JPEG, PNG, WebP, TIFF, HEIC) with `Content-Disposition: attachment` or without a disposition (many scanners omit it on PDFs); explicit `.txt` and `.md` attachments; and inline photos outside `multipart/related` without a `Content-ID` of at least 4 KB — which is how iPhone Mail attaches photos.
 - **Skipped:** images inside `multipart/related` or carrying a `Content-ID` (HTML email logos and signatures) unless explicitly marked `Content-Disposition: attachment`, inline images smaller than 4 KB (tracking pixels and icons), empty files, and service or unsupported formats (`.ics` calendar invites, `.vcf` vCards, `.p7s`/`.p7m`/`.asc`/`.sig` signatures, `winmail.dat`, Office files, CSVs).
-- **No eligible attachments:** if `PAPERJAM_EMAIL_BODY_FALLBACK=true` (the default) and the email has a readable text or HTML body, paperjam formats the subject, sender, UTC date and stripped body text as a `.md` file and ingests it. If the email had attachments that were all duplicates of documents already in the archive, body fallback does **not** run.
+- **No eligible attachments:** if body fallback is enabled (**Save email body when there are no attachments** in Settings, or `PAPERJAM_EMAIL_BODY_FALLBACK=true` by default) and the email has a readable text or HTML body, paperjam formats the subject, sender, UTC date and stripped body text as a `.md` file and ingests it. If the email had attachments that were all duplicates of documents already in the archive, body fallback does **not** run.
 
 ## 3. Set up a Cloudflare Email Worker
 
@@ -174,8 +188,8 @@ export default {
 
 2. In the Worker's **Settings → Variables and Secrets**, add:
    - `PAPERJAM_URL`: `https://paperjam.example.org`
-   - `EMAIL_SECRET` (**Secret**): the same value as `PAPERJAM_EMAIL_SECRET`
-   - `ALLOWED_SENDERS`: comma-separated list of your addresses, e.g. `alice@example.org`. Keep the same list in `PAPERJAM_EMAIL_ALLOWED_SENDERS` on the server, so a header the Worker reads differently from paperjam is still refused.
+   - `EMAIL_SECRET` (**Secret**): the secret generated in **Settings → Access → Email intake** (or `PAPERJAM_EMAIL_SECRET` from `.env`)
+   - `ALLOWED_SENDERS`: comma-separated list of your addresses, e.g. `alice@example.org`. Keep the same list in **Allowed senders** in Settings (or `PAPERJAM_EMAIL_ALLOWED_SENDERS`) on the server, so a header the Worker reads differently from paperjam is still refused.
 3. Under **Email → Email Routing → Routing rules**, create a custom address (for example `docs@example.org`) and set its action to **Send to a Worker**, choosing the Worker you just created.
 
 > **Important:** Cloudflare passes the full raw email through the Worker before reaching your server. If you do not want a third-party mail relay in the path, feed the endpoint from your own mail server instead (next section).
@@ -192,7 +206,7 @@ curl -fsS -X POST https://paperjam.example.org/api/v1/ingest/email \
   --data-binary @-
 ```
 
-When `X-Envelope-From` is omitted, paperjam validates `PAPERJAM_EMAIL_ALLOWED_SENDERS` against every address in the email's `From` header instead. A header that is present but empty is refused with `sender_not_allowed` rather than falling back to `From:`.
+When `X-Envelope-From` is omitted, paperjam validates the configured allowlist (**Allowed senders** or `PAPERJAM_EMAIL_ALLOWED_SENDERS`) against every address in the email's `From` header instead. A header that is present but empty is refused with `sender_not_allowed` rather than falling back to `From:`.
 
 ## Response format
 
@@ -224,17 +238,17 @@ When `X-Envelope-From` is omitted, paperjam validates `PAPERJAM_EMAIL_ALLOWED_SE
 
 ## Security
 
-- **`PAPERJAM_EMAIL_SECRET` is write-only.** Unlike a `pj_…` API token, it cannot search, read, edit, or delete documents. Never put a user API token into a Cloudflare Worker or mail script.
+- **The email intake secret is write-only.** Unlike a `pj_…` API token, it cannot search, read, edit, or delete documents. Never put a user API token into a Cloudflare Worker or mail script.
 - **Brute-force protection.** Failed secret attempts are rate-limited per client address with exponential backoff (`429 too_many_attempts`). Behind a reverse proxy, make sure `PAPERJAM_TRUSTED_PROXIES` and `PAPERJAM_CLIENT_IP_HEADER` are configured ([proxy notes](configuration.md#behind-a-reverse-proxy)).
-- **Sender allowlist + budget.** Always set `PAPERJAM_EMAIL_ALLOWED_SENDERS` on the server, even with the Worker's `dmarc=pass` and `ALLOWED_SENDERS` checks in front: the edge and the server parse `From:` with different code, and only the server's check sees exactly what gets ingested. Add `PAPERJAM_LLM_MONTHLY_BUDGET_USD` if your address is easy to guess. Set `PAPERJAM_EMAIL_LOCAL_ONLY=true` if emailed documents should never go to an LLM.
+- **Sender allowlist + budget.** Always set **Allowed senders** in Settings (or `PAPERJAM_EMAIL_ALLOWED_SENDERS`) on the server, even with the Worker's `dmarc=pass` and `ALLOWED_SENDERS` checks in front: the edge and the server parse `From:` with different code, and only the server's check sees exactly what gets ingested. Set a monthly LLM budget in Settings (or `PAPERJAM_LLM_MONTHLY_BUDGET_USD`) if your address is easy to guess, and enable **Process emailed documents locally only** (or `PAPERJAM_EMAIL_LOCAL_ONLY=true`) if emailed documents should never go to an LLM.
 - **Unauthenticated bodies are not buffered.** The secret and rate limiter are checked before reading the request body, and oversized payloads fail at `PAPERJAM_MAX_UPLOAD_BYTES`.
 
 ## Troubleshooting
 
-- **`401 invalid_email_secret`.** `EMAIL_SECRET` in the Worker does not match `PAPERJAM_EMAIL_SECRET` in `.env`, or the `Authorization: Bearer …` header is missing.
-- **`403 sender_not_allowed`.** Check `PAPERJAM_EMAIL_ALLOWED_SENDERS` against `X-Envelope-From` (when supplied) or every address in `From:`. Transactional relays (SES, Resend) and "Send mail as" aliases rewrite envelope `MAIL FROM` to a VERP bounce address, so omit `X-Envelope-From` after DMARC passes and match the authenticated `From:` header instead.
+- **`401 invalid_email_secret`.** `EMAIL_SECRET` in the Worker does not match the active secret from **Settings → Access → Email intake** (or `PAPERJAM_EMAIL_SECRET` in `.env`), or the `Authorization: Bearer …` header is missing.
+- **`403 sender_not_allowed`.** Check **Allowed senders** (or `PAPERJAM_EMAIL_ALLOWED_SENDERS`) against `X-Envelope-From` (when supplied) or every address in `From:`. Transactional relays (SES, Resend) and "Send mail as" aliases rewrite envelope `MAIL FROM` to a VERP bounce address, so omit `X-Envelope-From` after DMARC passes and match the authenticated `From:` header instead.
 - **`413 file_too_large`.** The message exceeds `PAPERJAM_MAX_UPLOAD_BYTES` (or Cloudflare's 25 MiB limit, or a reverse proxy's `client_max_body_size` — nginx defaults to 1 MB).
 - **`422 invalid_email`.** The body is empty or not a valid RFC 5322 email (for example, raw PDF bytes sent instead of a `.eml` message).
-- **`503 email_not_configured` / `email_user_unconfigured`.** Either `PAPERJAM_EMAIL_SECRET` is unset, or there are multiple active users and `PAPERJAM_EMAIL_USER` is unset or disabled.
+- **`503 email_not_configured` / `email_user_unconfigured`.** Either email intake is disabled or has no secret configured (in **Settings → Access → Email intake** or `PAPERJAM_EMAIL_SECRET`), or there are multiple active users and no target user is assigned (**Assign documents to** or `PAPERJAM_EMAIL_USER` is unset or disabled).
 - **Cloudflare Worker fails with `Too many redirects`.** In Cloudflare → **SSL/TLS → Overview**, set encryption mode to **Full (strict)**.
-- **Forwarded HTML newsletter without PDF created a `.md` document.** Set `PAPERJAM_EMAIL_BODY_FALLBACK=false` if you only want real file attachments.
+- **Forwarded HTML newsletter without PDF created a `.md` document.** Turn off **Save email body when there are no attachments** in Settings (or set `PAPERJAM_EMAIL_BODY_FALLBACK=false`) if you only want real file attachments.

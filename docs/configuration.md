@@ -1,8 +1,8 @@
 # Configuration
 
-paperjam is configured through environment variables, and none of them is required: a first start with no configuration at all works. This page is for the person who runs the server. Every variable is here with its default, and the last section lists the symptoms that a wrong value causes. Installing is covered in the [README](../README.md#install); [`.env.example`](../.env.example) is the file to copy.
+None of paperjam's settings is required at startup: a first start with no `.env` file works out of the box. This page is for the person who runs the server. Every `PAPERJAM_*` variable is listed with its default, and the last section lists the symptoms that a wrong value causes. Installing is covered in the [README](../README.md#install); [`.env.example`](../.env.example) is the file to copy.
 
-Variables come from the process environment and from a `.env` file in the working directory. A variable that is already set in the environment wins over the file, and an empty value counts as unset. With the compose file from the repository, `env_file: .env` hands the file to the container (the file is optional there). A value that cannot be used stops the server at startup with a message that names the variable, so a typo shows up on the first start.
+Environment variables come from the process environment and from a `.env` file in the working directory. A variable that is already set in the environment wins over the file, and an empty value counts as unset. With the compose file from the repository, `env_file: .env` hands the file to the container (the file is optional there). A value that cannot be used stops the server at startup with a message that names the variable, so a typo shows up on the first start.
 
 A minimal `.env` for a server behind a reverse proxy:
 
@@ -10,7 +10,32 @@ A minimal `.env` for a server behind a reverse proxy:
 PAPERJAM_PUBLIC_URL=https://paperjam.example.org
 ```
 
-Add `PAPERJAM_LLM_API_KEY` to switch on the [LLM layer](#llm-layer-optional). Everything else has a default that suits a household archive.
+To switch on the [LLM layer](#llm-layer-optional), either add `PAPERJAM_LLM_API_KEY` in `.env` or enter the key in **Settings** in the web app after startup. Everything else has a default that suits a household archive.
+
+## Startup environment vs. web UI settings
+
+paperjam splits configuration between startup environment variables (for network, storage, sandboxing, and container mounts) and runtime settings stored in SQLite (editable live from **Settings** in the web app).
+
+**Startup and container environment (`.env`, requires a restart):**
+
+- **Server and proxy:** `PAPERJAM_BIND`, `PAPERJAM_DATA_DIR`, `PAPERJAM_SECRET_KEY`, `PAPERJAM_PUBLIC_URL`, `PAPERJAM_TRUSTED_PROXIES`, `PAPERJAM_CLIENT_IP_HEADER`, `PAPERJAM_MAX_UPLOAD_BYTES`, `PAPERJAM_LOG_FORMAT`, `RUST_LOG`.
+- **Bootstrap and fixed OAuth:** `PAPERJAM_ADMIN_USER`, `PAPERJAM_ADMIN_PASSWORD`, and the `PAPERJAM_OAUTH_STATIC_*` variables.
+- **Watched inbox mount path:** `PAPERJAM_INBOX_DIR` (the host directory or container bind mount must be set at startup).
+- **OCR, worker pools, and child-process limits:** `PAPERJAM_OCR_LANGS`, `PAPERJAM_OCR_WORKERS`, `PAPERJAM_LLM_WORKERS`, `PAPERJAM_EXTRACT_TIMEOUT_SECS`, `PAPERJAM_EXTRACT_MEMORY_MB`.
+
+**Operational settings (web UI Settings, applied live without restarting):**
+
+- **Inbound email intake** (**Settings → Access**): generate, rotate, or revoke the webhook secret; turn intake on or pause it; set allowed senders, target user, auto-tag, body fallback, and local-only mode.
+- **LLM enrichment** (**Settings**): turn LLM enrichment on or off, set or replace the API key, choose models (classification/extraction, vision, handwriting re-read toggle and model, allowed models list for reprocessing), set the monthly USD budget, toggle automatic tag creation, set reasoning effort, change the endpoint base URL and provider dialect, configure custom model prices, and reset overrides back to environment defaults.
+- **Calendar feed** (**Settings**): change renewal reminder lead days (`PAPERJAM_CALENDAR_LEAD_DAYS`).
+- **Watched inbox behavior** (**Settings**, when `PAPERJAM_INBOX_DIR` is set): pause or resume scanning, pick the owner account, change the scan interval, and inspect rejected files in `.failed/`.
+
+### Precedence, reset, and protection at rest
+
+- **Precedence:** `Web UI / SQLite override > environment variable > built-in default`. Environment variables supply startup defaults and act as the fallback whenever no database override is present.
+- **Reset to defaults:** Resetting LLM, calendar, or inbox settings in the web UI clears the overrides stored in `app_settings`, reverting immediately to the matching `PAPERJAM_*` environment variables (or built-in defaults if unset). For inbound email (`email_intake`), pausing intake or revoking the database secret disables the webhook immediately.
+- **Access control:** Changing LLM, inbound email, calendar, or watched inbox settings requires an **administrator signed-in web session** (or the server CLI). API bearer tokens (`pj_…`) and OAuth clients (`pjo_…`) are rejected for settings writes (`403`), and reading full configuration (`GET /api/v1/settings`, `GET /api/v1/settings/email`) is restricted to administrators. Any signed-in user can read non-sensitive feature status from `GET /api/v1/settings/summary`.
+- **Protection at rest:** An LLM API key entered in the web UI (`llm.api_key` in `app_settings`) is encrypted in SQLite with **AES-256-GCM** using a key derived from `PAPERJAM_SECRET_KEY` (bound to the setting name as associated data) and is never returned to the browser. Changing `PAPERJAM_SECRET_KEY` makes a database-stored LLM key unreadable until you enter it again in Settings (`paperjam backup` and `restore` preserve `secret.key` alongside the database). Web-generated email intake secrets are shown once on creation and stored in `email_intake` only as a **SHA-256** hash with a short visible prefix.
 
 ## Server
 
@@ -24,7 +49,7 @@ Add `PAPERJAM_LLM_API_KEY` to switch on the [LLM layer](#llm-layer-optional). Ev
 | `PAPERJAM_MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Size limit for one file. Larger files are refused with `file_too_large`. |
 | `PAPERJAM_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128,172.16.0.0/12` | Comma-separated addresses or CIDR ranges of reverse proxies. See [Behind a reverse proxy](#behind-a-reverse-proxy). |
 | `PAPERJAM_CLIENT_IP_HEADER` | `x-forwarded-for` | The header a trusted proxy puts the client address in. |
-| `PAPERJAM_CALENDAR_LEAD_DAYS` | `60` | How many days before a due date the [calendar feed](#calendar-feed) adds a "renew" event. `0` leaves only the event on the due date. |
+| `PAPERJAM_CALENDAR_LEAD_DAYS` | `60` | Default number of days before a due date that the [calendar feed](#calendar-feed) adds a "renew" event (`0` leaves only the event on the due date). Can be overridden live in **Settings**. |
 | `PAPERJAM_LOG_FORMAT` | `text` | `json` writes one JSON object per log line on stderr. The level comes from the standard `RUST_LOG` variable (default `info`; for example `RUST_LOG=paperjam=debug`). |
 
 Logs carry ids and error codes. They never contain document text, field values, passwords or tokens.
@@ -56,10 +81,10 @@ The inbox folder is off unless `PAPERJAM_INBOX_DIR` is set. paperjam then polls 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PAPERJAM_INBOX_DIR` | unset | The directory to watch, subdirectories included (up to 16 levels deep). It must not contain `PAPERJAM_DATA_DIR` or sit inside it; this is checked after resolving `..` and symlinks, and the server refuses to start otherwise. |
-| `PAPERJAM_INBOX_USER` | the only user | Username the documents are attributed to. Optional while exactly one active user exists. With several users and no value, the scanner logs one error and stays idle. |
-| `PAPERJAM_INBOX_INTERVAL_SECS` | `30` | Seconds between scans, from 1 to 86400. |
+| `PAPERJAM_INBOX_USER` | the only user | Default username the documents are attributed to. Optional while exactly one active user exists. With several users and no value (or no owner chosen in Settings), the scanner logs one error and stays idle. |
+| `PAPERJAM_INBOX_INTERVAL_SECS` | `30` | Default seconds between scans, from 1 to 86400. |
 
-Setting `PAPERJAM_INBOX_USER` or `PAPERJAM_INBOX_INTERVAL_SECS` without `PAPERJAM_INBOX_DIR` is an error, so a half-configured inbox does not sit there looking active.
+Setting `PAPERJAM_INBOX_USER` or `PAPERJAM_INBOX_INTERVAL_SECS` without `PAPERJAM_INBOX_DIR` is an error, so a half-configured inbox does not sit there looking active. Once `PAPERJAM_INBOX_DIR` is set, administrators can pause or resume polling, change the owner account or interval, and view rejected files in `.failed/` live from **Settings**.
 
 A container needs the folder mounted, and the mount must be writable by uid 10001, because the scanner deletes and moves files:
 
@@ -83,7 +108,7 @@ How the scanner treats files:
 
 ## Email intake (optional)
 
-Inbound email is off unless `PAPERJAM_EMAIL_SECRET` is set. `POST /api/v1/ingest/email` accepts a raw RFC 5322 email (`message/rfc822`), skips inline signature logos and non-document attachments (such as `.ics`, `.vcf`, `.p7s` and `winmail.dat`), keeps iPhone inline photos and forwarded `.eml` attachments, and hands each file to the normal upload path. See the [Email intake guide](email-intake.md) for the Cloudflare Email Worker setup and troubleshooting.
+Inbound email can be enabled live from **Settings → Access → Email intake** in the web app, or via `.env` variables below (which serve as fallback defaults when no database override exists). `POST /api/v1/ingest/email` accepts a raw RFC 5322 email (`message/rfc822`), skips inline signature logos and non-document attachments (such as `.ics`, `.vcf`, `.p7s` and `winmail.dat`), keeps iPhone inline photos and forwarded `.eml` attachments, and hands each file to the normal upload path. See the [Email intake guide](email-intake.md) for the web UI setup, Cloudflare Email Worker script, and troubleshooting.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -109,19 +134,19 @@ Why a document is parsed in a separate process is explained in [architecture](ar
 
 ## Calendar feed
 
-Settings → Access → *Calendar subscription* makes a private link of the form `/calendar/<secret>.ics`. Subscribe to it in a calendar app and every document with a due date (see `has:expiring` in the [search syntax](mcp.md#due-dates)) shows up as an all-day event, plus a "renew" event `PAPERJAM_CALENDAR_LEAD_DAYS` days earlier (60 by default; `0` turns it off).
+Settings → Access → *Calendar subscription* makes a private link of the form `/calendar/<secret>.ics`. Subscribe to it in a calendar app and every document with a due date (see `has:expiring` in the [search syntax](mcp.md#due-dates)) shows up as an all-day event, plus a "renew" event `PAPERJAM_CALENDAR_LEAD_DAYS` days earlier (60 by default; `0` turns it off; also editable live in **Settings**).
 
 The feed carries titles and dates only (and a link to the document when `PAPERJAM_PUBLIC_URL` is set), never a field value such as a document number, and leaves out documents marked *Never send to the cloud*. The secret opens this feed and nothing else, is stored hashed and is shown once; rotate it to get a new link, or revoke it. It is part of the URL, so it appears in reverse-proxy access logs. Google Calendar fetches the feed from Google's servers, so it cannot reach a paperjam that is only open over a VPN; Apple Calendar fetches it from the device and can.
 
 ## LLM layer (optional)
 
-Without `PAPERJAM_LLM_API_KEY` only local recognition runs, and nothing leaves the machine. With a key, every document that is not marked *Never send to the cloud* goes through the LLM steps, **identity documents included**. Scanned pages are sent to the LLM API as images. Born-digital PDFs skip transcription and are sent as text plus one small image of page 1, so that an issuer printed only as a logo can still be read. The README's [Privacy section](../README.md#privacy) lists exactly what is sent.
+Without an LLM API key (or when LLM enrichment is disabled in **Settings**), only local recognition runs and nothing leaves the machine. When enabled with a key (from **Settings** or `PAPERJAM_LLM_API_KEY`), every document that is not marked *Never send to the cloud* goes through the LLM steps, **identity documents included**. Scanned pages are sent to the LLM API as images. Born-digital PDFs skip transcription and are sent as text plus one small image of page 1, so that an issuer printed only as a logo can still be read. The README's [Privacy section](../README.md#privacy) lists exactly what is sent.
 
-The default is [OpenRouter](https://openrouter.ai) with Claude Haiku 5.5. Any other OpenAI-compatible chat-completions endpoint (OpenAI, Gemini's OpenAI-compatible endpoint, Ollama, vLLM, a proxy of your own) works too; see [Other OpenAI-compatible endpoints](#other-openai-compatible-endpoints).
+The default is [OpenRouter](https://openrouter.ai) with Claude Haiku 5.5. Any other OpenAI-compatible chat-completions endpoint (OpenAI, Gemini's OpenAI-compatible endpoint, Ollama, vLLM, a proxy of your own) works too; see [Other OpenAI-compatible endpoints](#other-openai-compatible-endpoints). Every operational field in the table below (aside from `PAPERJAM_LLM_WORKERS`) can also be overridden live in **Settings** and reset back to these environment defaults at any time.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PAPERJAM_LLM_API_KEY` | unset | Turns the LLM layer on. It is never stored in the database or shown in the web app. The older name `PAPERJAM_OPENROUTER_API_KEY` still works; when both are set, this one wins. |
+| `PAPERJAM_LLM_API_KEY` | unset | Default API key that turns the LLM layer on. When supplied only via the environment, it stays out of the database. A key entered in web UI **Settings** overrides this variable and is stored in SQLite encrypted with AES-256-GCM (never returned to the browser). The older name `PAPERJAM_OPENROUTER_API_KEY` still works; when both are set, this one wins. |
 | `PAPERJAM_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | API root of the chat-completions endpoint; paperjam appends `/chat/completions`. The older name `PAPERJAM_OPENROUTER_BASE_URL` still works; when both are set, this one wins. |
 | `PAPERJAM_LLM_PROVIDER` | `auto` | The request dialect: `openrouter`, `generic`, or `auto` to pick by the host of the base URL (`openrouter.ai` is OpenRouter, every other host is generic). Set it when a proxy or local gateway in front of OpenRouter should still get the OpenRouter fields. |
 | `PAPERJAM_LLM_PRICES` | unset | A price table for endpoints that report no cost, so that the spend budget works. Entries are `model=input:output`, separated by commas, in USD per million tokens, for example `gpt-4.1-mini=0.40:1.60,llama3.1:8b=0:0`. A model id is matched exactly as written in `PAPERJAM_LLM_MODEL`. |
@@ -134,7 +159,7 @@ The default is [OpenRouter](https://openrouter.ai) with Claude Haiku 5.5. Any ot
 | `PAPERJAM_LLM_CREATE_TAGS` | `true` | Whether the model may create new tags: at most two per document, short lower-case topic words in the output language, never one that repeats a document type, a person or an organization. An existing tag with the same name, compared without regard to case, is used instead. `false` limits the model to existing tags. This switch never lets it create people. Accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`. |
 | `PAPERJAM_LLM_MONTHLY_BUDGET_USD` | unset (no limit) | Spend limit per calendar month (UTC), checked before each LLM step. See [Budget](#budget). |
 
-To use the default setup, one line is enough:
+To use the default setup, add one line to `.env` (or enter the key in web UI **Settings**):
 
 ```sh
 PAPERJAM_LLM_API_KEY=sk-or-...
@@ -165,7 +190,7 @@ What differs from OpenRouter:
 
 ### Budget
 
-`PAPERJAM_LLM_MONTHLY_BUDGET_USD` is compared with the cost recorded since the first of the month, UTC. It is checked before each LLM step, so the step that crosses the line still runs and the overshoot is at most one step. After that the remaining steps are skipped, and documents are flagged `llm_budget` and keep their local results. The flag clears when the document is reprocessed with the LLM steps in a month with budget left. The current month's spend is shown by `get_stats` and `GET /api/v1/stats`.
+`PAPERJAM_LLM_MONTHLY_BUDGET_USD` (or the monthly budget set in **Settings**) is compared with the cost recorded since the first of the month, UTC. It is checked before each LLM step, so the step that crosses the line still runs and the overshoot is at most one step. After that the remaining steps are skipped, and documents are flagged `llm_budget` and keep their local results. The flag clears when the document is reprocessed with the LLM steps in a month with budget left. The current month's spend is shown by `get_stats` and `GET /api/v1/stats`.
 
 ### When the LLM call fails
 
@@ -252,10 +277,10 @@ Each original goes through the normal upload path: stored byte for byte, local O
 
 **The passkey option is missing in settings.** `PAPERJAM_PUBLIC_URL` is not an `https://` address with a host name, or you opened paperjam at a different address than the one it names.
 
-**Documents carry `llm_failed`.** The LLM call failed. Look in the logs for the status code, fix the key, base URL or model name, and reprocess with `--llm`. **`llm_budget`** means the monthly budget ran out.
+**Documents carry `llm_failed`.** The LLM call failed. Look in the logs for the status code, fix the key, base URL or model name in **Settings** (or `.env`), and reprocess with `--llm`. **`llm_budget`** means the monthly budget ran out.
 
 **A big photo or scan fails with `image_corrupt` or `pdf_corrupt`.** If the file opens fine elsewhere, the parser may have hit `PAPERJAM_EXTRACT_MEMORY_MB` or `PAPERJAM_EXTRACT_TIMEOUT_SECS`. Raise the matching limit, staying below the container's memory limit.
 
-**Files in the inbox folder are not picked up.** Wait two scan intervals, since a file is ignored until it has stopped changing. Then check the name (hidden, `~`, `.part` and `.tmp` files are skipped), the logs for a permissions error, and, with several users, `PAPERJAM_INBOX_USER`.
+**Files in the inbox folder are not picked up.** Check that the scanner is not paused in **Settings**, then wait two scan intervals, since a file is ignored until it has stopped changing. Check the name (hidden, `~`, `.part` and `.tmp` files are skipped), the logs for a permissions error, and, with several users, the owner setting in **Settings** or `PAPERJAM_INBOX_USER`.
 
 **An upload fails with a bare `413`.** When a file is over `PAPERJAM_MAX_UPLOAD_BYTES`, `POST /api/v1/documents` answers `422` with `file_too_large` in a JSON body, so a plain `413` there comes from a reverse proxy with a body limit of its own (nginx defaults to 1 MB). Raise the limit in the proxy. The one-time upload link is the exception: paperjam itself answers a plain-text `413` for an oversize file.

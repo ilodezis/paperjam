@@ -202,7 +202,7 @@ pub async fn render(app: &App, user_id: UserId, now: DateTime<Utc>) -> Result<St
         }
     }
 
-    let lead = Duration::days(i64::from(app.config.calendar_lead_days));
+    let lead = Duration::days(i64::from(app.runtime_settings().calendar.lead_days));
     let today = now.date_naive();
     let mut events = Vec::new();
     for (id, title, type_key, labels) in documents {

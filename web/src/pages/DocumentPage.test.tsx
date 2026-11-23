@@ -318,6 +318,60 @@ describe("DocumentPage status", () => {
   });
 });
 
+describe("DocumentPage per-model reprocessing", () => {
+  beforeAll(() => {
+    Element.prototype.animate = (() => ({ finished: Promise.resolve(), cancel: () => undefined })) as unknown as Element["animate"];
+  });
+
+  it("shows model-specific reprocess buttons when multiple allowed models are configured and calls api.reprocess with the selected model", async () => {
+    const reprocess = vi.spyOn(api, "reprocess");
+    await render("doc-rental", () => expect(summary("More actions")).toBeTruthy());
+
+    await openActions();
+    await eventually(() => expect(button("anthropic/claude-sonnet-5.5")).toBeTruthy());
+    expect(button("Local extraction + LLM")).toBeTruthy();
+    expect(button("Local extraction only")).toBeTruthy();
+    expect(button("anthropic/claude-haiku-5.5")).toBeTruthy();
+
+    await click(button("anthropic/claude-sonnet-5.5"));
+    await eventually(() => expect(reprocess).toHaveBeenCalledWith("doc-rental", true, "anthropic/claude-sonnet-5.5"));
+    await eventually(() => expect(container?.textContent).toContain("Queued for reprocessing"));
+  });
+
+  it("offers per-model reprocess options in the mobile action sheet and hides them when only one model is allowed", async () => {
+    const reprocess = vi.spyOn(api, "reprocess");
+    await render("doc-rental", () => expect(byLabel("Actions")).not.toBeNull());
+
+    await click(byLabel("Actions")!);
+    await eventually(() => expect(document.querySelector(".sheet")).not.toBeNull());
+    const sheetBtn = Array.from(document.querySelectorAll<HTMLButtonElement>(".sheet button"))
+      .find((el) => el.textContent?.trim() === "anthropic/claude-haiku-5.5");
+    expect(sheetBtn).toBeTruthy();
+    await click(sheetBtn!);
+    await eventually(() => expect(reprocess).toHaveBeenCalledWith("doc-rental", true, "anthropic/claude-haiku-5.5"));
+
+    await act(async () => root?.unmount());
+    container?.remove();
+
+    server.use(
+      http.get("/api/v1/settings/summary", () => HttpResponse.json({
+        llm_enabled: true,
+        llm_configured: true,
+        llm_model: "anthropic/claude-haiku-5.5",
+        llm_handwriting_enabled: true,
+        llm_allowed_models: ["anthropic/claude-haiku-5.5"],
+        llm_monthly_budget_usd: "5.00",
+        calendar_lead_days: 60,
+        inbox_configured: false,
+        inbox_paused: false,
+      })),
+    );
+    await render("doc-rental", () => expect(summary("More actions")).toBeTruthy());
+    await openActions();
+    expect(container?.querySelector(".action-menu-subitem")).toBeNull();
+  });
+});
+
 describe("DocumentPage trash", () => {
   it("moves to trash without a confirm dialog and offers Undo in the toast", async () => {
     await render("doc-receipt", () => expect(summary("More actions")).toBeTruthy());

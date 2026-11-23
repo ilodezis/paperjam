@@ -72,7 +72,7 @@ const BUDGET_EXHAUSTED: &str = "llm_budget_exhausted";
 /// Whether the LLM steps may run for this document: a key is configured and
 /// the document is not marked `local_only`.
 pub async fn applicable(app: &App, id: DocumentId) -> Result<bool> {
-    if app.llm.is_none() {
+    if app.llm_client().is_none() {
         return Ok(false);
     }
     let local_only: Option<bool> =
@@ -86,7 +86,7 @@ pub async fn applicable(app: &App, id: DocumentId) -> Result<bool> {
 /// Runs steps A-C and records how it ended in the document's attention flags.
 /// Returns an error only when the flags themselves cannot be written.
 pub async fn run(app: &App, id: DocumentId, opts: &ProcessOptions) -> Result<()> {
-    let Some(client) = app.llm.as_ref() else {
+    let Some(client) = app.llm_client() else {
         return Ok(());
     };
     // Flags this phase owns start from scratch on every run.
@@ -105,7 +105,7 @@ pub async fn run(app: &App, id: DocumentId, opts: &ProcessOptions) -> Result<()>
         )
         .await?;
     }
-    let outcome = match Steps::new(app, client, id, opts).await {
+    let outcome = match Steps::new(app, &client, id, opts).await {
         Ok(steps) => steps.run_all().await,
         Err(e) => Err(e),
     };
@@ -144,6 +144,8 @@ pub struct Steps<'a> {
     /// Re-reads the pages the vision model reports as handwritten; `None`
     /// with a per-run model override, which decides every reading itself.
     handwriting_model: Option<String>,
+    create_tags: bool,
+    reasoning_effort: Option<String>,
 }
 
 impl<'a> Steps<'a> {
@@ -160,7 +162,7 @@ impl<'a> Steps<'a> {
                 "this document must not be sent to the LLM",
             ));
         }
-        let config = &app.config;
+        let llm = app.runtime_settings().llm;
         Ok(Self {
             app,
             client,
@@ -168,16 +170,18 @@ impl<'a> Steps<'a> {
             text_model: opts
                 .model_override
                 .clone()
-                .unwrap_or_else(|| config.llm_model.clone()),
+                .unwrap_or_else(|| llm.model.clone()),
             vision_model: opts
                 .model_override
                 .clone()
-                .unwrap_or_else(|| config.llm_vision_model.clone()),
+                .unwrap_or_else(|| llm.vision_model.clone()),
             handwriting_model: opts
                 .model_override
                 .is_none()
-                .then(|| config.llm_handwriting_model.clone())
+                .then(|| llm.effective_handwriting_model().map(str::to_string))
                 .flatten(),
+            create_tags: llm.create_tags,
+            reasoning_effort: llm.reasoning_effort,
         })
     }
 
@@ -239,14 +243,8 @@ impl<'a> Steps<'a> {
                     ),
                 );
                 let classification = classify_res?;
-                write::classification(
-                    self.app,
-                    self.doc,
-                    &classification,
-                    self.app.config.llm_create_tags,
-                    &text,
-                )
-                .await?;
+                write::classification(self.app, self.doc, &classification, self.create_tags, &text)
+                    .await?;
                 let answer = fields_res?;
                 self.save_fields(&known.defs, &answer, &text).await?;
             }
@@ -255,14 +253,8 @@ impl<'a> Steps<'a> {
                 let classification = self
                     .ask_classify(&text, first_page_transcribed, None, &locale, &doc_fence)
                     .await?;
-                write::classification(
-                    self.app,
-                    self.doc,
-                    &classification,
-                    self.app.config.llm_create_tags,
-                    &text,
-                )
-                .await?;
+                write::classification(self.app, self.doc, &classification, self.create_tags, &text)
+                    .await?;
                 if let Some(known) = self.document_type().await? {
                     self.ensure_budget().await?;
                     let answer = self
@@ -439,14 +431,7 @@ impl<'a> Steps<'a> {
                 &fence(),
             )
             .await?;
-        write::classification(
-            self.app,
-            self.doc,
-            &answer,
-            self.app.config.llm_create_tags,
-            text,
-        )
-        .await?;
+        write::classification(self.app, self.doc, &answer, self.create_tags, text).await?;
         Ok(answer)
     }
 
@@ -468,7 +453,7 @@ impl<'a> Steps<'a> {
                 .collect(),
             person_ids: taxonomy.people.iter().map(|p| p.id.to_string()).collect(),
             tag_names: taxonomy.tags.iter().map(|t| t.name.clone()).collect(),
-            allow_new_tags: self.app.config.llm_create_tags,
+            allow_new_tags: self.create_tags,
         };
         let schema = schemas::classification_schema(&candidates);
         let mut message = classify_message_with_fence(&taxonomy, text, locale, doc_fence);
@@ -676,14 +661,14 @@ impl<'a> Steps<'a> {
     ) -> Result<T> {
         // Held until the cost is recorded below.
         let Some(_reserved) =
-            budget::reserve(self.app, self.client.reservations(), model, step).await?
+            budget::reserve(self.app, &self.app.llm_reservations, model, step).await?
         else {
             return Err(ServiceError::unavailable(
                 BUDGET_EXHAUSTED,
                 "the monthly LLM budget is used up",
             ));
         };
-        let reasoning_effort = self.app.config.llm_reasoning_effort.clone().or_else(|| {
+        let reasoning_effort = self.reasoning_effort.clone().or_else(|| {
             // Skip thinking tokens on pure extraction steps on OpenRouter so
             // transcription and field extraction stay fast and cheap; `LlmClient`
             // falls back to `low` if a configured model rejects `none`.

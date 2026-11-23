@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, api } from "../api";
-import { calendarFeedQuery } from "../queries";
+import { adminSettingsQuery, calendarFeedQuery } from "../queries";
 import type { useConfirm } from "./controls/ConfirmDialog";
 import { toast } from "./controls/toast";
 
@@ -16,15 +16,65 @@ function formatDate(value: string | null, language: string, never: string): stri
  * The calendar subscription: the due dates of the archive as a link a calendar app polls.
  * The link holds a secret that the server keeps only as a hash, so it is shown once, when it is made.
  */
-export function CalendarFeedSection({ confirm, onError }: { confirm: ReturnType<typeof useConfirm>["confirm"]; onError: (code: string | null) => void }) {
+export function CalendarFeedSection({
+  admin = false,
+  confirm,
+  onError,
+}: {
+  admin?: boolean;
+  confirm: ReturnType<typeof useConfirm>["confirm"];
+  onError: (code: string | null) => void;
+}) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { data } = useQuery(calendarFeedQuery);
   const language = i18n.resolvedLanguage ?? "en";
   const linkInput = useRef<HTMLInputElement>(null);
+  const leadInputId = useId();
   const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [prevLeadDays, setPrevLeadDays] = useState<number | undefined>(undefined);
+  const [leadDaysInput, setLeadDaysInput] = useState("60");
+
+  if (data && data.lead_days !== prevLeadDays) {
+    const wasDirty = prevLeadDays !== undefined && leadDaysInput.trim() !== String(prevLeadDays);
+    setPrevLeadDays(data.lead_days);
+    if (!wasDirty) {
+      setLeadDaysInput(String(data.lead_days));
+    }
+  }
+
+  const leadDirty = data !== undefined && leadDaysInput.trim() !== String(data.lead_days);
+
+  async function saveLeadDays(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    onError(null);
+    const trimmed = leadDaysInput.trim();
+    const parsed = Number(trimmed);
+    if (trimmed === "" || !Number.isInteger(parsed) || parsed < 0) {
+      onError("invalid_calendar_lead_days");
+      setBusy(false);
+      return;
+    }
+    try {
+      const updated = await api.updateSettings({ calendar: { lead_days: parsed } });
+      queryClient.setQueryData(adminSettingsQuery.queryKey, updated);
+      setPrevLeadDays(updated.calendar.lead_days);
+      setLeadDaysInput(String(updated.calendar.lead_days));
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["calendar-feed"] }),
+        queryClient.invalidateQueries({ queryKey: ["settings"] }),
+        queryClient.invalidateQueries({ queryKey: ["settings-summary"] }),
+      ]);
+      toast(t("settings.calendarLeadSavedToast"), { icon: "check" });
+    } catch (cause) {
+      onError(cause instanceof ApiError ? cause.code : "network");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function make(rotated: boolean) {
     if (rotated) {
@@ -118,7 +168,30 @@ export function CalendarFeedSection({ confirm, onError }: { confirm: ReturnType<
           </li>
         </ul>
       ) : null}
-      {data && data.lead_days > 0 ? <p className="settings-note">{t("settings.calendarLead", { count: data.lead_days })}</p> : null}
+      {admin && data ? (
+        <form className="calendar-lead-form" onSubmit={saveLeadDays} noValidate>
+          <div className="calendar-lead-row">
+            <label className="field-label" htmlFor={leadInputId}>
+              <span>{t("settings.calendarLeadLabel")}</span>
+              <input
+                id={leadInputId}
+                type="number"
+                min={0}
+                max={3650}
+                value={leadDaysInput}
+                onChange={(event) => setLeadDaysInput(event.target.value)}
+                aria-label={t("settings.calendarLeadLabel")}
+              />
+            </label>
+            <button type="submit" className="button button--secondary" disabled={busy || !leadDirty}>
+              {t("settings.calendarLeadSave")}
+            </button>
+          </div>
+          <p className="email-field-hint">{t("settings.calendarLeadAdminHint")}</p>
+        </form>
+      ) : data && data.lead_days > 0 ? (
+        <p className="settings-note">{t("settings.calendarLead", { count: data.lead_days })}</p>
+      ) : null}
       <p className="settings-note">{t("settings.calendarHelp")}</p>
     </section>
   );

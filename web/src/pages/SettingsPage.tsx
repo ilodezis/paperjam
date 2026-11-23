@@ -7,11 +7,13 @@ import { ApiError, api, type Connection, type ManagedUser, type TokenView } from
 import { DocumentTypesSettings } from "../components/DocumentTypesSettings";
 import { CalendarFeedSection } from "../components/CalendarFeedSection";
 import { EmailIntakeSection } from "../components/EmailIntakeSection";
+import { InboxSettingsSection } from "../components/InboxSettingsSection";
+import { LlmSettingsSection } from "../components/LlmSettingsSection";
 import { PasskeysSection } from "../components/PasskeysSection";
 import { useConfirm } from "../components/controls/ConfirmDialog";
 import { SegmentedControl } from "../components/controls/SegmentedControl";
 import { toast } from "../components/controls/toast";
-import { connectionsQuery, sessionQuery, statsQuery, tokensQuery, usersQuery } from "../queries";
+import { adminSettingsQuery, connectionsQuery, sessionQuery, settingsSummaryQuery, statsQuery, tokensQuery, usersQuery } from "../queries";
 import { hrefOf, ScreenLink } from "../shell/navigation";
 import { TopBar } from "../shell/PageHead";
 import { setThemePreference, useThemePreference } from "../theme";
@@ -98,7 +100,7 @@ export function SettingsPage() {
         <InterfaceSettings onError={setError} />
       </div>
       <div role="tabpanel" id="settings-panel-archive" aria-labelledby="settings-tab-archive" className="settings-panel" hidden={tab !== "archive"}>
-        <ArchiveSettings />
+        <ArchiveSettings admin={Boolean(users)} confirm={confirm} onError={setError} />
       </div>
       <div role="tabpanel" id="settings-panel-access" aria-labelledby="settings-tab-access" className="settings-panel" hidden={tab !== "access"}>
         <AccessSettings admin={Boolean(users)} confirm={confirm} onError={setError} />
@@ -160,21 +162,37 @@ function InterfaceSettings({ onError }: { onError: ReportError }) {
   );
 }
 
-/** Archive usage and the advanced document schemas. */
-function ArchiveSettings() {
+/** Archive usage, enrichment/inbox settings (administrators only), and the document schemas. */
+function ArchiveSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
   const { t, i18n } = useTranslation();
   const { data: stats } = useQuery(statsQuery);
+  const { data: settingsSummary } = useQuery(settingsSummaryQuery);
+  const { data: adminSettings } = useQuery({ ...adminSettingsQuery, enabled: admin });
   const language = i18n.resolvedLanguage ?? "en";
-  const spend = new Intl.NumberFormat(language, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(stats?.llm_month_usd ?? 0));
+  const formatUsd = (amount: string) => new Intl.NumberFormat(language, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(amount));
+  const spend = formatUsd(stats?.llm_month_usd ?? "0");
+  const budget = settingsSummary?.llm_monthly_budget_usd ? formatUsd(settingsSummary.llm_monthly_budget_usd) : null;
 
   return (
     <>
       <section className="settings-section settings-usage" aria-labelledby="settings-usage">
         <div className="settings-section-heading"><div><h2 id="settings-usage">{t("settings.processing")}</h2></div></div>
-        <dl className="usage-list"><div><dt>{t("settings.monthSpend")}</dt><dd>{spend}</dd></div><div><dt>{t("settings.documents")}</dt><dd>{stats?.documents ?? "—"}</dd></div><div><dt>{t("settings.attention")}</dt><dd>{stats?.attention ?? "—"}</dd></div></dl>
+        <dl className="usage-list">
+          <div><dt>{t("settings.monthSpend")}</dt><dd>{budget ? `${spend} / ${budget}` : spend}</dd></div>
+          <div><dt>{t("settings.documents")}</dt><dd>{stats?.documents ?? "—"}</dd></div>
+          <div><dt>{t("settings.attention")}</dt><dd>{stats?.attention ?? "—"}</dd></div>
+          {adminSettings?.ocr_langs ? <div><dt>{t("settings.ocrLanguages")}</dt><dd><code>{adminSettings.ocr_langs}</code></dd></div> : null}
+        </dl>
+        {settingsSummary && !settingsSummary.llm_configured ? (
+          <p className="settings-note settings-usage-note">{t("settings.llmUsageNotConfigured")}</p>
+        ) : settingsSummary && !settingsSummary.llm_enabled ? (
+          <p className="settings-note settings-usage-note">{t("settings.llmUsagePaused")}</p>
+        ) : null}
         <h3>{t("settings.queue")}</h3>
         <dl className="queue-list"><div><dt>{t("settings.queued")}</dt><dd>{stats?.queue.queued ?? "—"}</dd></div><div><dt>{t("settings.running")}</dt><dd>{stats?.queue.running ?? "—"}</dd></div><div><dt>{t("settings.dead")}</dt><dd>{stats?.queue.dead ?? "—"}</dd></div></dl>
       </section>
+      {admin ? <LlmSettingsSection confirm={confirm} onError={onError} /> : null}
+      {admin ? <InboxSettingsSection onError={onError} /> : null}
       <DocumentTypesSettings />
     </>
   );
@@ -187,7 +205,7 @@ function AccessSettings({ admin, confirm, onError }: { admin: boolean; confirm: 
       {admin ? <UsersSection confirm={confirm} onError={onError} /> : null}
       <PasswordSection onError={onError} />
       <TokensSection confirm={confirm} onError={onError} />
-      <CalendarFeedSection confirm={confirm} onError={onError} />
+      <CalendarFeedSection admin={admin} confirm={confirm} onError={onError} />
       {admin ? <EmailIntakeSection confirm={confirm} onError={onError} /> : null}
       <ConnectionsSection confirm={confirm} onError={onError} />
       <PasskeysSection />

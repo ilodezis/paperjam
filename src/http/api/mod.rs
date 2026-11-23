@@ -7,6 +7,7 @@ pub mod email;
 pub mod links;
 pub mod passkeys;
 pub mod search;
+pub mod settings;
 pub mod shares;
 pub mod stats;
 pub mod taxonomy;
@@ -134,6 +135,8 @@ pub fn router(upload_limit: usize) -> OpenApiRouter<HttpState> {
         .routes(routes!(passkeys::challenge))
         .routes(routes!(passkeys::revoke))
         .routes(routes!(stats::get))
+        .routes(routes!(settings::get_summary))
+        .routes(routes!(settings::get_admin, settings::patch_admin))
         .routes(routes!(email::get_settings, email::patch_settings))
         .routes(routes!(email::rotate_secret, email::revoke_secret))
         .routes(routes!(openapi::document))
