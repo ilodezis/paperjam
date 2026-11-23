@@ -655,6 +655,7 @@
   },
   "settings": {
     "title": "Settings",
+    "description": "Your account, how documents are processed, and who and what can reach the archive.",
     "sections": "Settings sections",
     "newToken": "New token",
     "users": "Users",

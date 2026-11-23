@@ -88,8 +88,8 @@ export function SettingsPage() {
     }
   }
 
-  // Arrow keys move between sections and select as they go, as the tab pattern prescribes. The list
-  // is vertical on a wide screen and wraps on a phone, so both arrow pairs work.
+  // Arrow keys move between sections and select as they go, as the tab pattern prescribes. The row is
+  // horizontal; the vertical pair stays as a harmless alias.
   function onTabKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const index = visible.findIndex(({ id }) => id === current);
     const forward = event.key === "ArrowDown" || event.key === "ArrowRight";
@@ -105,6 +105,14 @@ export function SettingsPage() {
     tabRefs.current[visible[next].id]?.focus();
   }
 
+  // On a phone the row scrolls sideways: keep the chosen tab inside the visible strip. The
+  // administrator tabs arrive with the user list and shift the row, so a change in count re-centres.
+  const tabCount = visible.length;
+  useEffect(() => {
+    const node = tabRefs.current[current];
+    if (node && typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest", inline: "center" });
+  }, [current, tabCount]);
+
   const panes: Record<SectionId, ReactNode> = {
     account: <AccountSettings onError={setError} />,
     processing: <ProcessingSettings admin={admin} confirm={confirm} onError={setError} />,
@@ -117,46 +125,44 @@ export function SettingsPage() {
   return (
     <div className="settings-page">
       <TopBar title={t("settings.title")} />
-      <header className="management-header"><div><h1>{t("settings.title")}</h1></div></header>
+      <header className="management-header"><div><h1>{t("settings.title")}</h1><p>{t("settings.description")}</p></div></header>
       <ScreenLink to={hrefOf("trash")} className="settings-trash-link">
         <Trash2 aria-hidden="true" /><span>{t("nav.trash")}</span><ChevronRight aria-hidden="true" />
       </ScreenLink>
 
-      <div className="settings-layout">
-        <div className="settings-nav" role="tablist" aria-label={t("settings.sections")} aria-orientation="vertical" onKeyDown={onTabKeyDown}>
-          {visible.map(({ id, icon: Icon }) => (
-            <button
-              key={id}
-              ref={(node) => { tabRefs.current[id] = node; }}
-              type="button"
-              role="tab"
-              id={`settings-tab-${id}`}
-              aria-selected={current === id}
-              aria-controls={`settings-panel-${id}`}
-              tabIndex={current === id ? 0 : -1}
-              className={current === id ? "settings-nav-item settings-nav-item--active" : "settings-nav-item"}
-              onClick={() => select(id)}
-            >
-              <Icon aria-hidden="true" /><span>{t(`settings.nav.${id}`)}</span>
-            </button>
-          ))}
-        </div>
+      <div className="taxonomy-tabs settings-tabs" role="tablist" aria-label={t("settings.sections")} onKeyDown={onTabKeyDown}>
+        {visible.map(({ id, icon: Icon }) => (
+          <button
+            key={id}
+            ref={(node) => { tabRefs.current[id] = node; }}
+            type="button"
+            role="tab"
+            id={`settings-tab-${id}`}
+            aria-selected={current === id}
+            aria-controls={`settings-panel-${id}`}
+            tabIndex={current === id ? 0 : -1}
+            className={current === id ? "taxonomy-tab taxonomy-tab--active" : "taxonomy-tab"}
+            onClick={() => select(id)}
+          >
+            <Icon aria-hidden="true" />{t(`settings.nav.${id}`)}
+          </button>
+        ))}
+      </div>
 
-        <div className="settings-content">
-          {error ? <div className="settings-error" role="alert">{t(`errors.${error}`, { defaultValue: t("errors.settings") })}<button type="button" className="quiet-button" onClick={() => setError(null)}>{t("common.dismiss")}</button></div> : null}
-          {/* Every pane stays mounted: a token secret that is shown only once, or a half-filled form, must survive a switch of section. */}
-          {visible.map(({ id, ownHeading }) => (
-            <div key={id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`} className="settings-panel" hidden={current !== id}>
-              {ownHeading ? null : (
-                <header className="settings-pane-head">
-                  <h2 className="settings-pane-title">{t(`settings.nav.${id}`)}</h2>
-                  <p>{t(`settings.navHint.${id}`)}</p>
-                </header>
-              )}
-              {panes[id]}
-            </div>
-          ))}
-        </div>
+      <div className="settings-content">
+        {error ? <div className="settings-error" role="alert">{t(`errors.${error}`, { defaultValue: t("errors.settings") })}<button type="button" className="quiet-button" onClick={() => setError(null)}>{t("common.dismiss")}</button></div> : null}
+        {/* Every pane stays mounted: a token secret that is shown only once, or a half-filled form, must survive a switch of section. */}
+        {visible.map(({ id, ownHeading }) => (
+          <div key={id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`} className="settings-panel" hidden={current !== id}>
+            {ownHeading ? null : (
+              <header className="settings-pane-head">
+                <h2 className="sr-only">{t(`settings.nav.${id}`)}</h2>
+                <p>{t(`settings.navHint.${id}`)}</p>
+              </header>
+            )}
+            {panes[id]}
+          </div>
+        ))}
       </div>
       {dialogElement}
     </div>

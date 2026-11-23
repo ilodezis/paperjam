@@ -178,6 +178,11 @@ async function key(element: Element, name: string) {
 describe("SettingsPage", () => {
   const ADMIN_SECTIONS = ["Account", "Processing", "Document intake", "Document types", "Connections", "Users"];
 
+  it("describes the page under its heading", async () => {
+    await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(6));
+    expect(container!.querySelector(".management-header p")?.textContent).toBe("Your account, how documents are processed, and who and what can reach the archive.");
+  });
+
   it("groups settings into sections by task, one visible at a time", async () => {
     await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(6));
     expect(Array.from(container!.querySelectorAll('[role="tab"]')).map((element) => element.textContent)).toEqual(ADMIN_SECTIONS);
