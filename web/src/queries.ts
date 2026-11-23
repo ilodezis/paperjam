@@ -179,7 +179,9 @@ export const trashQuery = queryOptions({
   queryKey: ["trash"],
   queryFn: async (): Promise<DocumentView[]> => {
     const page = await api.search({ query: "", sort: "date_desc", includeTrashed: true });
-    const details = await Promise.all(page.hits.map((hit) => api.document(hit.id)));
+    const trashedHits = page.hits.filter((hit) => hit.trashed);
+    if (trashedHits.length === 0) return [];
+    const details = await Promise.all(trashedHits.map((hit) => api.document(hit.id)));
     return details.filter((document) => Boolean(document.trashed_at));
   },
   staleTime: 60_000,

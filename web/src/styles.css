@@ -148,9 +148,9 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  background: color-mix(in srgb, var(--sidebar) 88%, transparent);
-  -webkit-backdrop-filter: saturate(160%) blur(16px);
-  backdrop-filter: saturate(160%) blur(16px);
+  background: color-mix(in srgb, var(--sidebar) 92%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   color: var(--ink);
@@ -242,7 +242,8 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .filters-count { min-width: 18px; padding: 0 5px; color: var(--accent); background: var(--accent-soft); border-radius: 9px; font-size: var(--text-badge); font-weight: 600; line-height: 18px; text-align: center; }
 .results-sort .select-dropdown-container { width: auto; min-width: 150px; }
 .results-sort .select-dropdown-trigger { min-height: 32px; }
-.results-sort .select-dropdown-menu { right: 0; left: auto; }
+.results-sort .select-dropdown-menu { right: 0; left: auto; transform-origin: top right; }
+.results-sort .select-dropdown-menu--up { transform-origin: bottom right; }
 .filters-sheet { display: grid; gap: 20px; padding: 6px 8px 4px; }
 .filters-sheet h4 { margin: 0 0 8px; color: var(--muted); font-size: var(--text-meta); font-weight: 600; }
 .filters-chips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -691,7 +692,8 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .taxonomy-header > div > p:last-child { max-width: 650px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .taxonomy-header > .button { flex: 0 0 auto; }
 .taxonomy-tabs { display: flex; gap: 25px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); }
-.taxonomy-tab { position: relative; display: flex; align-items: center; gap: 7px; min-height: 47px; padding: 0 0 10px; color: var(--muted); background: transparent; border: 0; white-space: nowrap; cursor: pointer; transition: color var(--d1) var(--ease-out); }
+.taxonomy-tab { position: relative; display: flex; align-items: center; gap: 7px; min-height: 47px; padding: 0 0 10px; color: var(--muted); background: transparent; border: 0; white-space: nowrap; cursor: pointer; transition: color var(--d1) var(--ease-out), opacity var(--d1) var(--ease-out); }
+.taxonomy-tab:active { color: var(--ink); opacity: .72; }
 .taxonomy-tab::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; background: var(--accent); transform: scaleX(0); transition: transform var(--d2) var(--ease-out); content: ""; }
 .taxonomy-tab--active { color: var(--ink); }
 .taxonomy-tab--active::after { transform: scaleX(1); }
@@ -710,7 +712,8 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .taxonomy-list-item { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-height: 63px; border-bottom: 1px solid var(--line); }
 .taxonomy-list-item::before { position: absolute; top: 12px; bottom: 12px; left: -12px; width: 2px; background: transparent; content: ""; }
 .taxonomy-list-item--active::before { background: var(--accent); }
-.taxonomy-list-item > button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 42px; padding: 7px 8px 4px 0; overflow: hidden; color: var(--ink); background: transparent; border: 0; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.taxonomy-list-item > button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 42px; padding: 7px 8px 4px 0; overflow: hidden; color: var(--ink); background: transparent; border: 0; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: background-color var(--d1) var(--ease-out), opacity var(--d1) var(--ease-out); }
+.taxonomy-list-item > button:active { background: var(--paper-raised); opacity: .82; }
 .taxonomy-list-item > button > svg { width: 14px; height: 14px; color: var(--faint); opacity: 0; transition: opacity 120ms ease; }
 .taxonomy-list-item:hover > button > svg, .taxonomy-list-item--active > button > svg { opacity: 1; }
 .taxonomy-list-item > span { grid-column: 1; margin: -12px 0 8px; color: var(--faint); font-size: var(--text-meta); }
@@ -980,10 +983,22 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
   .settings-form-grid { grid-template-columns: 1fr; }
 }
 
-/* On a phone the tab row scrolls sideways; a fade on the right edge says there is more. */
+/* On a phone the tab row scrolls sideways; fade only the edges that actually overflow. */
 @media (max-width: 640px) {
-  .settings-tabs { margin-bottom: 22px; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+  .settings-tabs { margin-bottom: 22px; scrollbar-width: none; }
   .settings-tabs::-webkit-scrollbar { display: none; }
+  .settings-tabs[data-fade-right] {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .settings-tabs[data-fade-left] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 28px);
+    mask-image: linear-gradient(to right, transparent, #000 28px);
+  }
+  .settings-tabs[data-fade-left][data-fade-right] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+  }
 }
 
 @media (max-width: 760px) {
@@ -1068,9 +1083,10 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: color var(--d1) var(--ease-out);
+  transition: color var(--d1) var(--ease-out), transform var(--d1) var(--ease-out), opacity var(--d1) var(--ease-out);
 }
 .segmented-pill:hover { color: var(--ink); }
+.segmented-pill:active { transform: scale(.97); opacity: .8; }
 .segmented-pill:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 1px; }
 .segmented-pill--active { color: var(--ink); }
 /* Before the thumb is measured (first paint, tests), the chosen pill carries the surface itself. */
@@ -1148,6 +1164,12 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
   transform-origin: top left;
   animation: pop-in var(--d2) var(--ease-out) both;
 }
+.select-dropdown-menu--up {
+  top: auto;
+  bottom: calc(100% + 4px);
+  transform-origin: bottom left;
+  animation-name: pop-in-up;
+}
 .select-dropdown-item {
   display: flex;
   align-items: center;
@@ -1163,6 +1185,7 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 }
 .select-dropdown-item:hover,
 .select-dropdown-item--focused { background: var(--sidebar); }
+.select-dropdown-item:active { background: var(--accent-soft); }
 .select-dropdown-item--selected { font-weight: 500; }
 .select-dropdown-item--disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
 .select-dropdown-label { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.3; }
@@ -1230,8 +1253,9 @@ input[type="checkbox"].switch:checked { background: var(--accent); }
 input[type="checkbox"].switch:checked::after { transform: translateX(16px); }
 
 /* A setting row: what it is on the left, its switch on the right; the whole row is the target. */
-.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius-md); cursor: pointer; transition: border-color var(--d1) var(--ease-out); }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius-md); cursor: pointer; transition: border-color var(--d1) var(--ease-out), background-color var(--d1) var(--ease-out); }
 .toggle-row:hover { border-color: var(--line-strong); }
+.toggle-row:active { background: var(--sidebar); border-color: var(--line-strong); }
 .toggle-row-text { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 .toggle-row-text > svg { flex: 0 0 auto; width: 17px; height: 17px; margin-top: 1px; color: var(--muted); transition: color var(--d1); }
 .toggle-row:has(.switch:checked) .toggle-row-text > svg { color: var(--accent); }
@@ -1240,7 +1264,8 @@ input[type="checkbox"].switch:checked::after { transform: translateX(16px); }
 .toggle-row-text small { color: var(--muted); font-size: var(--text-meta); line-height: 1.45; }
 
 /* Disclosures that remain (long text, sources, pickers): one chevron, turned when open. */
-details > summary { list-style: none; }
+details > summary { list-style: none; transition: opacity var(--d1) var(--ease-out); }
+details > summary:active { opacity: .75; }
 details > summary::-webkit-details-marker { display: none; }
 .disclosure-chevron { width: 15px; height: 15px; flex: 0 0 auto; color: var(--faint); transition: transform var(--d2) var(--ease-out); }
 details[open] > summary .disclosure-chevron { transform: rotate(180deg); }
@@ -1256,6 +1281,7 @@ details[open] > summary ~ * { animation: panel-in var(--d2) var(--ease-out) back
 .fade-in { animation: fade-in var(--d2) var(--ease-out) backwards; }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes pop-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
+@keyframes pop-in-up { from { opacity: 0; transform: translateY(4px) scale(.98); } }
 
 /* Confirm Modal Dialog */
 .confirm-backdrop {
@@ -1518,9 +1544,9 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
   position: absolute;
   inset: 0;
   z-index: -1;
-  background: color-mix(in srgb, var(--paper) 78%, transparent);
-  -webkit-backdrop-filter: saturate(160%) blur(18px);
-  backdrop-filter: saturate(160%) blur(18px);
+  background: color-mix(in srgb, var(--paper) 90%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
   opacity: var(--p);
 }
@@ -1569,9 +1595,9 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
   align-items: center;
   height: calc(var(--bnav-h) + var(--sab));
   padding-bottom: var(--sab);
-  background: color-mix(in srgb, var(--sidebar) 82%, transparent);
-  -webkit-backdrop-filter: saturate(160%) blur(20px);
-  backdrop-filter: saturate(160%) blur(20px);
+  background: color-mix(in srgb, var(--sidebar) 92%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
   border-top: 1px solid var(--line);
 }
 .bnav a {
@@ -1587,10 +1613,10 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
   color: var(--faint);
   font-size: var(--text-badge);
   font-weight: 500;
-  transition: color var(--d2);
+  transition: color var(--d1);
 }
 .bnav a span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bnav a svg { width: 24px; height: 24px; transition: transform var(--d3) var(--ease-out); }
+.bnav a svg { width: 24px; height: 24px; transition: transform var(--d2) var(--ease-out); }
 .bnav a:active svg { transform: scale(.88); }
 .bnav a.on { color: var(--accent); }
 .bnav .ink {
@@ -1601,7 +1627,7 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
   height: 2px;
   background: var(--accent);
   border-radius: 0 0 2px 2px;
-  transition: transform var(--d4) var(--ease-sheet);
+  transition: transform var(--d2) var(--ease-sheet);
 }
 
 /* Toasts and the offline notice sit above the bar. */
@@ -1709,6 +1735,7 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
   .document-header .eyebrow { max-width: none; margin-bottom: 2px; }
   .document-status-line { min-height: 32px; margin-bottom: 8px; }
   .document-workspace { gap: 22px; }
+  .document-viewer { scroll-margin-top: calc(var(--sat) + 56px); }
   .page-canvas { min-height: 240px; padding: 8px; }
 
   /* Dialogs are sheets too. */
@@ -1717,7 +1744,7 @@ a, button, summary, label, select, input, textarea { touch-action: manipulation;
     max-width: none;
     padding: 12px 20px calc(20px + var(--sab));
     border-radius: 28px 28px 0 0;
-    animation: sheet-up var(--d4) var(--ease-sheet) both;
+    animation: sheet-up 250ms var(--ease-sheet) both;
   }
   .confirm-dialog::before { content: ""; display: block; width: 38px; height: 5px; margin: 0 auto 16px; background: var(--line-strong); border-radius: 3px; }
   .confirm-actions { flex-direction: column-reverse; align-items: stretch; }
@@ -1814,6 +1841,15 @@ html { -webkit-tap-highlight-color: transparent; }
   /* Tap targets: 44px. The one-off sizes (compact bulk/upload rows, dropdown fields in rows) are
      lifted here with the shared classes. */
   .button, .bulk-actions .button, .upload-item-actions .button, .quiet-button { min-height: 44px; }
+  .icon-button, .search-clear { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }
+  .upload-file-heading .icon-button { width: 44px; height: 44px; min-width: 44px; min-height: 44px; margin: -10px -10px -6px 0; }
+  .alias-list { gap: 10px; }
+  .alias-list .icon-button { position: relative; width: 28px; height: 28px; min-width: 28px; min-height: 28px; }
+  .alias-list .icon-button::after { position: absolute; inset: -8px; content: ""; }
+  .toast-dismiss { width: 44px; height: 44px; min-width: 44px; min-height: 44px; margin: -6px -8px -6px 0; }
+  .segmented-pill { min-width: 44px; min-height: 44px; padding: 8px 14px; }
+  .page-reference { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 24px; }
+  .page-reference::after { position: absolute; inset: -10px -8px; content: ""; }
   .select-dropdown-container .select-dropdown-trigger, .metadata-picker summary > span:last-child { min-height: 44px; }
   .select-dropdown-item, .metadata-picker label, .metadata-picker-create, .metadata-picker .metadata-picker-input { min-height: 44px; }
   .filters-sheet .filter-chip { min-height: 44px; }

@@ -1,11 +1,12 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { DocumentView } from "./api";
-import { ensureFresh, invalidateArchive, statsQuery, taxonomyQuery, watchIngest } from "./queries";
+import { api, type DocumentView, type Hit } from "./api";
+import { ensureFresh, invalidateArchive, statsQuery, taxonomyQuery, trashQuery, watchIngest } from "./queries";
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 function setup(staleTime = 60_000) {
@@ -103,5 +104,46 @@ describe("the archive's cached lists", () => {
     client.setQueryData(["document", "doc-1", 1], document("failed"));
     expect(invalidated(client)).not.toContain("taxonomy");
     stop();
+  });
+});
+
+describe("trashQuery", () => {
+  const hit = (id: string, trashed: boolean): Hit => ({
+    id,
+    title: id,
+    type_key: null,
+    document_date: null,
+    organizations: [],
+    people: [],
+    key_fields: {},
+    snippet: "",
+    trashed,
+  });
+
+  it("makes zero document detail requests when no search hits are trashed", async () => {
+    vi.spyOn(api, "search").mockResolvedValue({
+      hits: [hit("doc-1", false), hit("doc-2", false)],
+      total: 2,
+      next_cursor: null,
+    });
+    const docSpy = vi.spyOn(api, "document");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const result = await client.fetchQuery(trashQuery);
+    expect(result).toEqual([]);
+    expect(docSpy).not.toHaveBeenCalled();
+  });
+
+  it("fetches details only for search hits marked trashed", async () => {
+    vi.spyOn(api, "search").mockResolvedValue({
+      hits: [hit("doc-live", false), hit("doc-trashed", true)],
+      total: 2,
+      next_cursor: null,
+    });
+    const docSpy = vi.spyOn(api, "document").mockResolvedValue({ id: "doc-trashed", trashed_at: "2026-11-20T00:00:00Z" } as DocumentView);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const result = await client.fetchQuery(trashQuery);
+    expect(docSpy).toHaveBeenCalledTimes(1);
+    expect(docSpy).toHaveBeenCalledWith("doc-trashed");
+    expect(result.map((d) => d.id)).toEqual(["doc-trashed"]);
   });
 });

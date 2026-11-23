@@ -73,4 +73,38 @@ describe("touch screens", () => {
   it("widens the result chip tap area without growing the chip", () => {
     expect(css).toMatch(/\.text-chip::after\s*\{[^}]*inset:\s*-\d+px/);
   });
+
+  it("provides :active touch feedback on interactive tabs, rows, pills, items, summaries, and toggles", () => {
+    for (const selector of [
+      ".taxonomy-tab:active",
+      ".taxonomy-list-item > button:active",
+      ".segmented-pill:active",
+      ".select-dropdown-item:active",
+      "details > summary:active",
+      ".toggle-row:active",
+    ]) {
+      expect(css).toContain(selector);
+    }
+  });
+
+  it("raises compact controls to 44px touch targets on coarse pointers", () => {
+    expect(coarse).toMatch(/\.icon-button,\s*\.search-clear\s*\{[^}]*min-height:\s*44px/);
+    expect(coarse).toMatch(/\.upload-file-heading \.icon-button\s*\{[^}]*min-height:\s*44px/);
+    expect(coarse).toMatch(/\.alias-list \.icon-button::after\s*\{[^}]*inset:\s*-\d+px/);
+    expect(coarse).toMatch(/\.toast-dismiss\s*\{[^}]*min-height:\s*44px/);
+    expect(coarse).toMatch(/\.segmented-pill\s*\{[^}]*min-height:\s*44px/);
+    expect(coarse).toMatch(/\.page-reference::after\s*\{[^}]*inset:\s*-\d+px/);
+  });
+
+  it("keeps mobile bar backdrop-filter lightweight and confirm sheet-up snappy", () => {
+    expect(css).not.toContain("blur(18px)");
+    expect(css).not.toContain("blur(20px)");
+    expect(css).toMatch(/\.confirm-dialog\s*\{[^}]*animation:\s*sheet-up\s+250ms/);
+  });
+
+  it("fades settings tabs dynamically by overflow edge", () => {
+    expect(css).toContain(".settings-tabs[data-fade-left]");
+    expect(css).toContain(".settings-tabs[data-fade-right]");
+    expect(css).toContain(".settings-tabs[data-fade-left][data-fade-right]");
+  });
 });

@@ -278,6 +278,8 @@ export interface Hit {
   people: string[];
   key_fields: Record<string, FieldValue>;
   snippet: string;
+  /** True when the document is currently in the trash (returned with `include_trashed`). */
+  trashed?: boolean;
   /** Attention flags of the document (the same codes as on its page); empty when all is well. */
   attention?: string[];
   /** The document has page images and a thumbnail; false for a plain-text file or one that failed before its pages were rendered. */

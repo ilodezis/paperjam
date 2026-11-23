@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { WifiOff } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { User } from "../api";
@@ -85,8 +85,10 @@ export function AppShell({ user }: { user: User | null }) {
     }
   }
 
+  const layoutValue = useMemo(() => ({ desktop }), [desktop]);
+
   return (
-    <LayoutContext value={{ desktop }}>
+    <LayoutContext value={layoutValue}>
       <div ref={host} className="app-host">
         <div className="vt">
           <Rail active={unknownAddress ? null : stack.top} user={user} signingOut={signingOut} onSignOut={() => void leave()} />

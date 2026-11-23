@@ -24,6 +24,7 @@ afterEach(async () => {
   server.resetHandlers();
   vi.restoreAllMocks();
   window.localStorage.clear();
+  window.sessionStorage.clear();
   if (root) await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -641,5 +642,72 @@ describe("SettingsPage", () => {
     await eventually(() => expect(panel("connections").textContent).toContain("Calendar subscription"));
     expect(panel("connections").textContent).toContain("60 days before each due date");
     expect(byLabel("Reminder lead time (days)")).toBeNull();
+  });
+
+  it("lazily mounts unvisited settings tabs so initial open does not fetch inactive sections", async () => {
+    window.sessionStorage.clear();
+    const paths: string[] = [];
+    const listener = ({ request }: { request: Request }) => {
+      paths.push(new URL(request.url).pathname);
+    };
+    server.events.on("request:start", listener);
+    try {
+      await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(6));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      // Account tab mounted; Processing, Intake, Types, and Connections have not fetched yet.
+      expect(paths).not.toContain("/api/v1/stats");
+      expect(paths).not.toContain("/api/v1/tokens");
+      expect(paths).not.toContain("/api/v1/connections");
+      expect(paths).not.toContain("/api/v1/calendar-feed");
+      expect(paths).not.toContain("/api/v1/settings/email");
+      expect(paths).not.toContain("/api/v1/taxonomy");
+
+      await click(tab("Processing"));
+      await eventually(() => expect(paths).toContain("/api/v1/stats"));
+      expect(paths).not.toContain("/api/v1/tokens");
+    } finally {
+      server.events.removeListener("request:start", listener);
+    }
+  });
+
+  it("scrolls the settings tab bar horizontally only and updates edge fade attributes dynamically", async () => {
+    window.sessionStorage.clear();
+    await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(6));
+    const tablist = container!.querySelector<HTMLElement>(".settings-tabs")!;
+    const scrollTo = vi.fn();
+    tablist.scrollTo = scrollTo;
+    const usersTab = tab("Users");
+    const scrollIntoView = vi.fn();
+    usersTab.scrollIntoView = scrollIntoView;
+
+    let scrollLeft = 0;
+    Object.defineProperty(tablist, "clientWidth", { configurable: true, value: 300 });
+    Object.defineProperty(tablist, "scrollWidth", { configurable: true, value: 600 });
+    Object.defineProperty(tablist, "scrollLeft", { configurable: true, get: () => scrollLeft, set: (v: number) => { scrollLeft = v; } });
+    tablist.getBoundingClientRect = () => ({ left: 0, right: 300, top: 0, bottom: 47, width: 300, height: 47, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    usersTab.getBoundingClientRect = () => ({ left: 500, right: 600, top: 0, bottom: 47, width: 100, height: 47, x: 500, y: 0, toJSON: () => ({}) }) as DOMRect;
+
+    // At the start: right overflow only.
+    await act(async () => { tablist.dispatchEvent(new Event("scroll")); });
+    expect(tablist.hasAttribute("data-fade-left")).toBe(false);
+    expect(tablist.hasAttribute("data-fade-right")).toBe(true);
+
+    // Switching to Users scrolls tablist horizontally without calling vertical scrollIntoView.
+    await click(usersTab);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ left: 300 }));
+
+    // In the middle: both edges fade.
+    scrollLeft = 150;
+    await act(async () => { tablist.dispatchEvent(new Event("scroll")); });
+    expect(tablist.hasAttribute("data-fade-left")).toBe(true);
+    expect(tablist.hasAttribute("data-fade-right")).toBe(true);
+
+    // At the end: left fade only, so the last tab is never faded out.
+    scrollLeft = 300;
+    await act(async () => { tablist.dispatchEvent(new Event("scroll")); });
+    expect(tablist.hasAttribute("data-fade-left")).toBe(true);
+    expect(tablist.hasAttribute("data-fade-right")).toBe(false);
   });
 });

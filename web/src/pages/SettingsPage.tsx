@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, Check, ChevronRight, Copy, Cpu, FileStack, Inbox, KeyRound, Lock, Monitor, Moon, Pencil, Plug, Plus, RotateCcw, Sun, Trash2, Unplug, UserPlus, UserRound, Users } from "lucide-react";
-import { useEffect, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, api, type Connection, type ManagedUser, type TokenView } from "../api";
@@ -13,10 +13,13 @@ import { PasskeysSection } from "../components/PasskeysSection";
 import { useConfirm } from "../components/controls/ConfirmDialog";
 import { SegmentedControl } from "../components/controls/SegmentedControl";
 import { toast } from "../components/controls/toast";
+import { prefersReducedMotion } from "../lib/motion";
 import { adminSettingsQuery, connectionsQuery, sessionQuery, settingsSummaryQuery, statsQuery, tokensQuery, usersQuery } from "../queries";
 import { hrefOf, ScreenLink } from "../shell/navigation";
 import { TopBar } from "../shell/PageHead";
 import { setThemePreference, useThemePreference } from "../theme";
+
+const MemoDocumentTypesSettings = memo(DocumentTypesSettings);
 
 type SectionId = "account" | "processing" | "intake" | "types" | "connections" | "users";
 type ReportError = (code: string | null) => void;
@@ -71,15 +74,29 @@ export function SettingsPage() {
   const { data: users } = useQuery(usersQuery);
   const admin = Boolean(users);
   const [chosen, setChosen] = useState<SectionId>(rememberedSection);
+  const [visited, setVisited] = useState<ReadonlySet<SectionId>>(() => new Set([chosen]));
   const [error, setError] = useState<string | null>(null);
+  const [tabFade, setTabFade] = useState<{ left: boolean; right: boolean }>({ left: false, right: false });
+  const tablistRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Partial<Record<SectionId, HTMLButtonElement | null>>>({});
 
   const visible = SECTIONS.filter((section) => admin || !section.adminOnly);
   // A remembered administrator section falls back to the first one for anyone else.
   const current = visible.some(({ id }) => id === chosen) ? chosen : visible[0].id;
+  if (!visited.has(current)) {
+    const next = new Set(visited);
+    next.add(current);
+    setVisited(next);
+  }
 
   function select(id: SectionId) {
     setChosen(id);
+    setVisited((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
     setError(null);
     try {
       window.sessionStorage.setItem(SECTION_KEY, id);
@@ -105,22 +122,60 @@ export function SettingsPage() {
     tabRefs.current[visible[next].id]?.focus();
   }
 
-  // On a phone the row scrolls sideways: keep the chosen tab inside the visible strip. The
-  // administrator tabs arrive with the user list and shift the row, so a change in count re-centres.
+  const updateTabFade = useCallback(() => {
+    const list = tablistRef.current;
+    if (!list) return;
+    const left = list.scrollLeft > 2;
+    const right = list.scrollLeft + list.clientWidth < list.scrollWidth - 2;
+    setTabFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+  }, []);
+
+  // On a phone the row scrolls sideways: scroll only horizontally so Safari never jerks the page's
+  // vertical scroll position. The administrator tabs arrive with the user list and shift the row,
+  // so a change in count re-centres and recalculates the overflow fade mask.
   const tabCount = visible.length;
   useEffect(() => {
+    const list = tablistRef.current;
     const node = tabRefs.current[current];
-    if (node && typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest", inline: "center" });
-  }, [current, tabCount]);
+    if (list && node && typeof list.scrollTo === "function") {
+      const maxLeft = Math.max(0, list.scrollWidth - list.clientWidth);
+      if (maxLeft > 0) {
+        const listRect = list.getBoundingClientRect();
+        const nodeRect = node.getBoundingClientRect();
+        const nodeCenter = list.scrollLeft + (nodeRect.left - listRect.left) + nodeRect.width / 2;
+        const left = Math.max(0, Math.min(maxLeft, nodeCenter - list.clientWidth / 2));
+        list.scrollTo({ left, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+      }
+    }
+    updateTabFade();
+  }, [current, tabCount, updateTabFade]);
 
-  const panes: Record<SectionId, ReactNode> = {
-    account: <AccountSettings onError={setError} />,
-    processing: <ProcessingSettings admin={admin} confirm={confirm} onError={setError} />,
-    intake: admin ? <IntakeSettings confirm={confirm} onError={setError} /> : null,
-    types: <DocumentTypesSettings />,
-    connections: <ConnectionsSettings admin={admin} confirm={confirm} onError={setError} />,
-    users: admin ? <UsersSection confirm={confirm} onError={setError} /> : null,
-  };
+  useEffect(() => {
+    const list = tablistRef.current;
+    if (!list) return;
+    updateTabFade();
+    list.addEventListener("scroll", updateTabFade, { passive: true });
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver === "function") {
+      observer = new ResizeObserver(updateTabFade);
+      observer.observe(list);
+    }
+    return () => {
+      list.removeEventListener("scroll", updateTabFade);
+      observer?.disconnect();
+    };
+  }, [tabCount, updateTabFade]);
+
+  function renderPane(id: SectionId): ReactNode {
+    switch (id) {
+      case "account": return <AccountSettings onError={setError} />;
+      case "processing": return <ProcessingSettings admin={admin} confirm={confirm} onError={setError} />;
+      case "intake": return admin ? <IntakeSettings confirm={confirm} onError={setError} /> : null;
+      case "types": return <MemoDocumentTypesSettings />;
+      case "connections": return <ConnectionsSettings admin={admin} confirm={confirm} onError={setError} />;
+      case "users": return admin ? <UsersSection confirm={confirm} onError={setError} /> : null;
+    }
+  }
 
   return (
     <div className="settings-page">
@@ -130,7 +185,15 @@ export function SettingsPage() {
         <Trash2 aria-hidden="true" /><span>{t("nav.trash")}</span><ChevronRight aria-hidden="true" />
       </ScreenLink>
 
-      <div className="taxonomy-tabs settings-tabs" role="tablist" aria-label={t("settings.sections")} onKeyDown={onTabKeyDown}>
+      <div
+        ref={tablistRef}
+        className="taxonomy-tabs settings-tabs"
+        role="tablist"
+        aria-label={t("settings.sections")}
+        data-fade-left={tabFade.left ? "" : undefined}
+        data-fade-right={tabFade.right ? "" : undefined}
+        onKeyDown={onTabKeyDown}
+      >
         {visible.map(({ id, icon: Icon }) => (
           <button
             key={id}
@@ -151,16 +214,20 @@ export function SettingsPage() {
 
       <div className="settings-content">
         {error ? <div className="settings-error" role="alert">{t(`errors.${error}`, { defaultValue: t("errors.settings") })}<button type="button" className="quiet-button" onClick={() => setError(null)}>{t("common.dismiss")}</button></div> : null}
-        {/* Every pane stays mounted: a token secret that is shown only once, or a half-filled form, must survive a switch of section. */}
+        {/* Each pane mounts on first visit and stays mounted afterward so one-time secrets and half-filled forms survive switching tabs. */}
         {visible.map(({ id, ownHeading }) => (
           <div key={id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`} className="settings-panel" hidden={current !== id}>
-            {ownHeading ? null : (
-              <header className="settings-pane-head">
-                <h2 className="sr-only">{t(`settings.nav.${id}`)}</h2>
-                <p>{t(`settings.navHint.${id}`)}</p>
-              </header>
-            )}
-            {panes[id]}
+            {visited.has(id) ? (
+              <>
+                {ownHeading ? null : (
+                  <header className="settings-pane-head">
+                    <h2 className="sr-only">{t(`settings.nav.${id}`)}</h2>
+                    <p>{t(`settings.navHint.${id}`)}</p>
+                  </header>
+                )}
+                {renderPane(id)}
+              </>
+            ) : null}
           </div>
         ))}
       </div>
@@ -183,7 +250,7 @@ function SettingRow({ label, hint, children }: { label: string; hint?: string; c
 }
 
 /** Personal to this person: how the app looks, the language it speaks, and how they sign in. */
-function AccountSettings({ onError }: { onError: ReportError }) {
+const AccountSettings = memo(function AccountSettings({ onError }: { onError: ReportError }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const theme = useThemePreference();
@@ -234,10 +301,10 @@ function AccountSettings({ onError }: { onError: ReportError }) {
       <PasskeysSection />
     </>
   );
-}
+});
 
 /** How documents are read and enriched: the archive's state, the queue, and the LLM (administrators configure it). */
-function ProcessingSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
+const ProcessingSettings = memo(function ProcessingSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
   const { t, i18n } = useTranslation();
   const { data: stats } = useQuery(statsQuery);
   const { data: settingsSummary } = useQuery(settingsSummaryQuery);
@@ -283,20 +350,20 @@ function ProcessingSettings({ admin, confirm, onError }: { admin: boolean; confi
       {admin ? <LlmSettingsSection confirm={confirm} onError={onError} /> : null}
     </>
   );
-}
+});
 
 /** The ways documents arrive without the upload page: a watched folder and email. Administrators only. */
-function IntakeSettings({ confirm, onError }: { confirm: Confirm; onError: ReportError }) {
+const IntakeSettings = memo(function IntakeSettings({ confirm, onError }: { confirm: Confirm; onError: ReportError }) {
   return (
     <>
       <InboxSettingsSection onError={onError} />
       <EmailIntakeSection confirm={confirm} onError={onError} />
     </>
   );
-}
+});
 
 /** Everything outside the web app that reads the archive: connected apps, API tokens, the calendar link. */
-function ConnectionsSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
+const ConnectionsSettings = memo(function ConnectionsSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
   return (
     <>
       <ConnectionsSection confirm={confirm} onError={onError} />
@@ -304,9 +371,9 @@ function ConnectionsSettings({ admin, confirm, onError }: { admin: boolean; conf
       <CalendarFeedSection admin={admin} confirm={confirm} onError={onError} />
     </>
   );
-}
+});
 
-function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportError }) {
+const UsersSection = memo(function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportError }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { data: users } = useQuery(usersQuery);
@@ -536,7 +603,7 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
       <ul className="settings-records">
         {users?.map((user) => {
           const disabled = user.disabled_at !== null;
-          const isSelf = user.id === currentUserId;
+          const isSelf = currentUserId === undefined || user.id === currentUserId;
           return (
             <li key={user.id} className={disabled ? "token-revoked" : ""}>
               <div>
@@ -561,7 +628,7 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
       </ul>
     </section>
   );
-}
+});
 
 function PasswordSection({ onError }: { onError: ReportError }) {
   const { t } = useTranslation();

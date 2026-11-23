@@ -320,6 +320,7 @@ export const handlers = [
     return HttpResponse.json({
       hits: page.map((hit) => ({
         ...hit,
+        trashed: Boolean(documentViews[hit.id]?.trashed_at),
         snippet: term && hit.snippet.toLowerCase().includes(term)
           ? escapeHtml(hit.snippet).replace(new RegExp(`(${term})`, "i"), "<mark>$1</mark>")
           : hit.snippet,
