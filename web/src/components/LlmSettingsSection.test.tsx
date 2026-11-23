@@ -270,6 +270,10 @@ describe("LlmSettingsSection", () => {
     await renderNode(<LlmHarness confirm={vi.fn()} />);
     await eventually(() => expect(container?.textContent).toContain("Not configured"));
     expect(container?.textContent).not.toContain("Disabled");
+    // The handwriting model is asked for only while handwriting is re-read.
+    expect(byLabel("Handwriting model")).toBeNull();
+    await click(byLabel("Re-read handwriting with AI")!);
+    expect(byLabel<HTMLInputElement>("Handwriting model")?.value).toBe("google/gemini-2.5-flash");
 
     server.use(
       http.get("/api/v1/settings", () => HttpResponse.json({ code: "admin_required", message: "Forbidden" }, { status: 403 })),

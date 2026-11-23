@@ -176,70 +176,86 @@ async function key(element: Element, name: string) {
 }
 
 describe("SettingsPage", () => {
-  it("splits settings into interface, archive and access, one visible at a time", async () => {
-    await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(3));
-    expect(Array.from(container!.querySelectorAll('[role="tab"]')).map((element) => element.textContent)).toEqual(["Interface", "Archive", "Access"]);
-    expect(tab("Interface").getAttribute("aria-selected")).toBe("true");
-    expect(panel("interface").hidden).toBe(false);
-    expect(panel("archive").hidden).toBe(true);
-    expect(panel("access").hidden).toBe(true);
+  const ADMIN_SECTIONS = ["Account", "Processing", "Document intake", "Document types", "Connections", "Users"];
+
+  it("groups settings into sections by task, one visible at a time", async () => {
+    await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(6));
+    expect(Array.from(container!.querySelectorAll('[role="tab"]')).map((element) => element.textContent)).toEqual(ADMIN_SECTIONS);
+    expect(tab("Account").getAttribute("aria-selected")).toBe("true");
+    expect(panel("account").hidden).toBe(false);
+    expect(panel("processing").hidden).toBe(true);
+    expect(panel("connections").hidden).toBe(true);
     // Personal preferences live apart from the statistics and the access lists.
-    expect(panel("interface").textContent).toContain("Color theme");
-    expect(panel("interface").textContent).not.toContain("LLM spend this month");
-    expect(panel("interface").textContent).not.toContain("Reading device");
+    expect(panel("account").textContent).toContain("Color theme");
+    expect(panel("account").textContent).toContain("Passkeys");
+    expect(panel("account").textContent).not.toContain("LLM spend this month");
+    expect(panel("account").textContent).not.toContain("Reading device");
 
-    await click(tab("Access"));
-    expect(tab("Access").getAttribute("aria-selected")).toBe("true");
-    expect(panel("access").hidden).toBe(false);
-    expect(panel("interface").hidden).toBe(true);
-    expect(panel("access").getAttribute("aria-labelledby")).toBe(tab("Access").id);
-    expect(tab("Access").getAttribute("aria-controls")).toBe(panel("access").id);
+    await click(tab("Connections"));
+    expect(tab("Connections").getAttribute("aria-selected")).toBe("true");
+    expect(panel("connections").hidden).toBe(false);
+    expect(panel("account").hidden).toBe(true);
+    expect(panel("connections").getAttribute("aria-labelledby")).toBe(tab("Connections").id);
+    expect(tab("Connections").getAttribute("aria-controls")).toBe(panel("connections").id);
+    // The section is remembered for the rest of the browser session.
+    expect(window.sessionStorage.getItem("paperjam:settings-section")).toBe("connections");
   });
 
-  it("moves between tabs with the arrow, Home and End keys", async () => {
-    await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(3));
+  it("opens on the section chosen last and falls back for someone who may not see it", async () => {
+    window.sessionStorage.setItem("paperjam:settings-section", "users");
+    server.use(http.get("/api/v1/users", () => HttpResponse.json({ code: "forbidden", message: "Administrators only" }, { status: 403 })));
+    await render(<SettingsPage />, () => expect(tab("Account")).not.toBeNull());
+    expect(Array.from(container!.querySelectorAll('[role="tab"]')).map((element) => element.textContent)).toEqual(["Account", "Processing", "Document types", "Connections"]);
+    expect(tab("Account").getAttribute("aria-selected")).toBe("true");
+    window.sessionStorage.clear();
+  });
+
+  it("moves between sections with the arrow, Home and End keys", async () => {
+    await render(<SettingsPage />, () => expect(container?.querySelectorAll('[role="tab"]').length).toBe(6));
     // Only the selected tab is in the Tab order.
-    expect(tab("Interface").tabIndex).toBe(0);
-    expect(tab("Archive").tabIndex).toBe(-1);
+    expect(tab("Account").tabIndex).toBe(0);
+    expect(tab("Processing").tabIndex).toBe(-1);
 
-    tab("Interface").focus();
-    await key(tab("Interface"), "ArrowRight");
-    expect(tab("Archive").getAttribute("aria-selected")).toBe("true");
-    expect(document.activeElement).toBe(tab("Archive"));
-    await key(tab("Archive"), "End");
-    expect(tab("Access").getAttribute("aria-selected")).toBe("true");
-    await key(tab("Access"), "ArrowRight");
-    expect(tab("Interface").getAttribute("aria-selected")).toBe("true");
-    await key(tab("Interface"), "ArrowLeft");
-    expect(tab("Access").getAttribute("aria-selected")).toBe("true");
-    await key(tab("Access"), "Home");
-    expect(tab("Interface").getAttribute("aria-selected")).toBe("true");
-    expect(document.activeElement).toBe(tab("Interface"));
+    tab("Account").focus();
+    await key(tab("Account"), "ArrowDown");
+    expect(tab("Processing").getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tab("Processing"));
+    await key(tab("Processing"), "ArrowRight");
+    expect(tab("Document intake").getAttribute("aria-selected")).toBe("true");
+    await key(tab("Document intake"), "End");
+    expect(tab("Users").getAttribute("aria-selected")).toBe("true");
+    await key(tab("Users"), "ArrowDown");
+    expect(tab("Account").getAttribute("aria-selected")).toBe("true");
+    await key(tab("Account"), "ArrowUp");
+    expect(tab("Users").getAttribute("aria-selected")).toBe("true");
+    await key(tab("Users"), "Home");
+    expect(tab("Account").getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tab("Account"));
   });
 
-  it("shows archive statistics under the archive tab", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
-    await eventually(() => expect(panel("archive").textContent).toContain("$0.04"));
-    expect(panel("archive").textContent).toContain("Processing queue");
+  it("shows archive statistics under processing", async () => {
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Processing"));
+    await eventually(() => expect(panel("processing").textContent).toContain("$0.04"));
+    expect(panel("processing").textContent).toContain("Processing queue");
   });
 
   it("shows document types as a compact read-only list until customization is requested", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Document types"));
     await eventually(() => expect(byLabel("Customize fields for Receipt")).not.toBeNull());
 
-    expect(panel("archive").textContent).toContain("Document types");
-    expect(panel("archive").textContent).toContain("In use");
-    expect(panel("archive").textContent).toContain("All");
-    expect(panel("archive").textContent).toContain("2 fields");
+    expect(panel("types").textContent).toContain("Document types");
+    expect(panel("types").textContent).toContain("In use");
+    expect(panel("types").textContent).toContain("All");
+    expect(panel("types").textContent).toContain("2 fields");
     expect(byLabel("Field key 1")).toBeNull();
-    expect(Array.from(panel("archive").querySelectorAll("button")).some((element) => element.textContent === "Add field")).toBe(false);
+    expect(Array.from(panel("types").querySelectorAll("button")).some((element) => element.textContent === "Add field")).toBe(false);
   });
 
   it("opens schema editing as a separate view and hides technical details until expert mode", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Document types"));
     await eventually(() => expect(byLabel("Customize fields for Receipt")).not.toBeNull());
     await click(byLabel("Customize fields for Receipt")!);
 
@@ -250,7 +266,7 @@ describe("SettingsPage", () => {
     expect(byLabel<HTMLButtonElement>("Save Receipt")?.disabled).toBe(true);
 
     await change(byLabel("English field label 1")!, "Seller");
-    expect(panel("archive").textContent).toContain("Unsaved changes");
+    expect(panel("types").textContent).toContain("Unsaved changes");
     expect(byLabel<HTMLButtonElement>("Save Receipt")?.disabled).toBe(false);
 
     await click(byLabel("Expert mode")!);
@@ -267,8 +283,8 @@ describe("SettingsPage", () => {
   });
 
   it("adds a localized required field through the advanced schema editor", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Document types"));
     await eventually(() => expect(byLabel("Customize fields for Receipt")).not.toBeNull());
     await click(byLabel("Customize fields for Receipt")!);
     await click(button("Add field"));
@@ -288,8 +304,8 @@ describe("SettingsPage", () => {
   });
 
   it("marks a text field as the issuer and saves the flag, but offers no issuer flag for other kinds", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Document types"));
     await eventually(() => expect(byLabel("Customize fields for Receipt")).not.toBeNull());
     await click(byLabel("Customize fields for Receipt")!);
 
@@ -308,8 +324,8 @@ describe("SettingsPage", () => {
   });
 
   it("creates a custom type without showing field definitions and filters unused types", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Document types"));
     await eventually(() => expect(byLabel("Customize fields for Receipt")).not.toBeNull());
     await click(button("Add document type"));
 
@@ -329,21 +345,21 @@ describe("SettingsPage", () => {
 
   it("keeps schema edits dirty when saving fails", async () => {
     server.use(http.patch("/api/v1/types/type-receipt", () => HttpResponse.json({ code: "network", message: "Synthetic failure" }, { status: 500 })));
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Document types"));
     await eventually(() => expect(byLabel("Customize fields for Receipt")).not.toBeNull());
     await click(byLabel("Customize fields for Receipt")!);
     await change(byLabel("English field label 1")!, "Shop");
     await click(byLabel("Save Receipt")!);
 
-    await eventually(() => expect(panel("archive").querySelector('[role="alert"]')?.textContent).toContain("The server could not be reached"));
+    await eventually(() => expect(panel("types").querySelector('[role="alert"]')?.textContent).toContain("The server could not be reached"));
     expect(byLabel<HTMLInputElement>("English field label 1")?.value).toBe("Shop");
-    expect(panel("archive").textContent).toContain("Unsaved changes");
+    expect(panel("types").textContent).toContain("Unsaved changes");
   });
 
   it("lets an administrator choose a format check on identifier fields and clears it when the kind changes", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Document types"));
     await eventually(() => expect(byLabel("Customize fields for Passport")).not.toBeNull());
     await click(byLabel("Customize fields for Passport")!);
 
@@ -377,9 +393,9 @@ describe("SettingsPage", () => {
   });
 
   it("keeps the user form closed until its button is pressed, then creates a user", async () => {
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Demo user"));
+    await render(<SettingsPage />, () => expect(tab("Users")).not.toBeNull());
+    await click(tab("Users"));
+    await eventually(() => expect(panel("users").textContent).toContain("Demo user"));
     expect(byLabel("New username")).toBeNull();
 
     await click(button("Add a user"));
@@ -399,25 +415,25 @@ describe("SettingsPage", () => {
     expect(byLabel("Delete Demo user")).toBeNull();
     vi.spyOn(window, "confirm").mockReturnValue(true);
     await click(byLabel("Disable Sam Example")!);
-    await eventually(() => expect(panel("access").textContent).toContain("Disabled"));
+    await eventually(() => expect(panel("users").textContent).toContain("Disabled"));
 
     await click(byLabel("Enable Sam Example")!);
-    await eventually(() => expect(panel("access").textContent).not.toContain("Disabled"));
+    await eventually(() => expect(panel("users").textContent).not.toContain("Disabled"));
 
     await click(byLabel("Reset password for Sam Example")!);
-    const resetInput = panel("access").querySelector<HTMLInputElement>("#reset-user-password")!;
+    const resetInput = panel("users").querySelector<HTMLInputElement>("#reset-user-password")!;
     await change(resetInput, "another secret 9");
     await click(button("Save password")!);
-    await eventually(() => expect(panel("access").querySelector("#settings-reset-password-form")).toBeNull());
+    await eventually(() => expect(panel("users").querySelector("#settings-reset-password-form")).toBeNull());
 
     await click(byLabel("Delete Sam Example")!);
-    await eventually(() => expect(panel("access").textContent).not.toContain("Sam Example"));
+    await eventually(() => expect(panel("users").textContent).not.toContain("Sam Example"));
   });
 
   it("edits another user's display name and administrator privileges inline", async () => {
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Demo user"));
+    await render(<SettingsPage />, () => expect(tab("Users")).not.toBeNull());
+    await click(tab("Users"));
+    await eventually(() => expect(panel("users").textContent).toContain("Demo user"));
     expect(byLabel("Edit Demo user")).toBeNull();
 
     await click(button("Add a user"));
@@ -425,10 +441,10 @@ describe("SettingsPage", () => {
     await change(byLabel("New display name")!, "Pat Sample");
     await change(byLabel("New password")!, "correct horse");
     await click(button("Create user"));
-    await eventually(() => expect(panel("access").textContent).toContain("Pat Sample"));
+    await eventually(() => expect(panel("users").textContent).toContain("Pat Sample"));
 
     await click(byLabel("Edit Pat Sample")!);
-    const form = panel("access").querySelector("#settings-edit-user-form");
+    const form = panel("users").querySelector("#settings-edit-user-form");
     expect(form).not.toBeNull();
     const nameInput = byLabel<HTMLInputElement>("Display name for Pat Sample")!;
     const adminBox = byLabel<HTMLInputElement>("Administrator access for Pat Sample")!;
@@ -437,32 +453,31 @@ describe("SettingsPage", () => {
 
     // Opening password reset closes the edit form, and re-opening edit closes password reset.
     await click(byLabel("Reset password for Pat Sample")!);
-    expect(panel("access").querySelector("#settings-edit-user-form")).toBeNull();
-    expect(panel("access").querySelector("#settings-reset-password-form")).not.toBeNull();
+    expect(panel("users").querySelector("#settings-edit-user-form")).toBeNull();
+    expect(panel("users").querySelector("#settings-reset-password-form")).not.toBeNull();
     await click(byLabel("Edit Pat Sample")!);
-    expect(panel("access").querySelector("#settings-reset-password-form")).toBeNull();
-    expect(panel("access").querySelector("#settings-edit-user-form")).not.toBeNull();
+    expect(panel("users").querySelector("#settings-reset-password-form")).toBeNull();
+    expect(panel("users").querySelector("#settings-edit-user-form")).not.toBeNull();
 
     await change(byLabel("Display name for Pat Sample")!, "Pat Admin");
     await click(byLabel("Administrator access for Pat Sample")!);
     await click(button("Save user"));
 
-    await eventually(() => expect(panel("access").querySelector("#settings-edit-user-form")).toBeNull());
-    expect(panel("access").textContent).toContain("Pat Admin");
+    await eventually(() => expect(panel("users").querySelector("#settings-edit-user-form")).toBeNull());
+    expect(panel("users").textContent).toContain("Pat Admin");
     const updated = (await api.users()).find((user) => user.username === "pat");
     expect(updated).toMatchObject({ display_name: "Pat Admin", is_admin: true });
 
     vi.spyOn(window, "confirm").mockReturnValue(true);
     await click(byLabel("Delete Pat Admin")!);
-    await eventually(() => expect(panel("access").textContent).not.toContain("Pat Admin"));
+    await eventually(() => expect(panel("users").textContent).not.toContain("Pat Admin"));
   });
 
   it("lets any signed-in user change their own password", async () => {
     server.use(http.get("/api/v1/users", () => HttpResponse.json({ code: "forbidden", message: "Administrators only" }, { status: 403 })));
     const changePassword = vi.spyOn(api, "changePassword");
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Change password"));
+    await render(<SettingsPage />, () => expect(tab("Account")).not.toBeNull());
+    await eventually(() => expect(panel("account").textContent).toContain("Change password"));
 
     await click(button("Change password"));
     await change(byLabel("Current password")!, "old password 1");
@@ -479,12 +494,12 @@ describe("SettingsPage", () => {
   });
 
   it("cancels the user form without creating anyone and returns focus to its button", async () => {
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Demo user"));
+    await render(<SettingsPage />, () => expect(tab("Users")).not.toBeNull());
+    await click(tab("Users"));
+    await eventually(() => expect(panel("users").textContent).toContain("Demo user"));
     await click(button("Add a user"));
     await change(byLabel("New username")!, "draft");
-    await click(Array.from(panel("access").querySelectorAll("#settings-user-form button")).find((element) => element.textContent === "Cancel")!);
+    await click(Array.from(panel("users").querySelectorAll("#settings-user-form button")).find((element) => element.textContent === "Cancel")!);
 
     expect(byLabel("New username")).toBeNull();
     expect(document.activeElement).toBe(button("Add a user"));
@@ -492,8 +507,8 @@ describe("SettingsPage", () => {
   });
 
   it("reveals a new token once and revokes it", async () => {
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
+    await render(<SettingsPage />, () => expect(tab("Connections")).not.toBeNull());
+    await click(tab("Connections"));
     await eventually(() => expect(container?.textContent).toContain("Reading device"));
     expect(byLabel("New token name")).toBeNull();
 
@@ -505,9 +520,9 @@ describe("SettingsPage", () => {
     expect(container?.textContent).toContain("Copy it now");
     expect(byLabel("New token name")).toBeNull();
 
-    // Switching tabs does not lose a secret that is shown only once.
-    await click(tab("Interface"));
-    await click(tab("Access"));
+    // Switching sections does not lose a secret that is shown only once.
+    await click(tab("Account"));
+    await click(tab("Connections"));
     expect(byLabel<HTMLInputElement>("New token secret")?.value).toMatch(/^pj_/);
 
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -517,17 +532,17 @@ describe("SettingsPage", () => {
   });
 
   it("shows the calendar link once, rotates it and revokes it", async () => {
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Calendar subscription"));
-    expect(panel("access").textContent).toContain("Google Calendar fetches the link from Google's servers");
+    await render(<SettingsPage />, () => expect(tab("Connections")).not.toBeNull());
+    await click(tab("Connections"));
+    await eventually(() => expect(panel("connections").textContent).toContain("Calendar subscription"));
+    expect(panel("connections").textContent).toContain("Google Calendar fetches the link from Google's servers");
     expect(byLabel("Calendar link")).toBeNull();
 
     await eventually(() => expect(button("Create link")).not.toBeNull());
     await click(button("Create link"));
     await eventually(() => expect(byLabel<HTMLInputElement>("Calendar link")?.value).toMatch(/\/calendar\/pjc_[0-9a-f]{32}\.ics$/));
     const first = byLabel<HTMLInputElement>("Calendar link")!.value;
-    await eventually(() => expect(panel("access").textContent).toContain("Link active"));
+    await eventually(() => expect(panel("connections").textContent).toContain("Link active"));
 
     vi.spyOn(window, "confirm").mockReturnValue(true);
     await click(button("New link"));
@@ -540,14 +555,13 @@ describe("SettingsPage", () => {
     expect(button("Create link")).not.toBeNull();
   });
 
-  it("keeps connected apps and passkeys under access and disconnects an app after confirmation", async () => {
+  it("keeps connected apps under connections and disconnects an app after confirmation", async () => {
     const disconnect = vi.spyOn(api, "disconnect");
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Assistant"));
-    expect(panel("access").textContent).toContain("Connected apps");
-    await eventually(() => expect(panel("access").textContent).toContain("Demo phone"));
-    expect(panel("access").textContent).toContain("Passkeys");
+    await render(<SettingsPage />, () => expect(tab("Connections")).not.toBeNull());
+    await click(tab("Connections"));
+    await eventually(() => expect(panel("connections").textContent).toContain("Assistant"));
+    expect(panel("connections").textContent).toContain("Connected apps");
+    await eventually(() => expect(panel("account").textContent).toContain("Demo phone"));
 
     vi.spyOn(window, "confirm").mockReturnValue(true);
     await click(byLabel("Disconnect Assistant")!);
@@ -555,16 +569,17 @@ describe("SettingsPage", () => {
     await eventually(() => expect(container?.textContent).toContain("Nothing is connected yet."));
   });
 
-  it("shows access without the user list to someone who is not an administrator", async () => {
+  it("shows no user list or intake to someone who is not an administrator", async () => {
     server.use(http.get("/api/v1/users", () => HttpResponse.json({ code: "forbidden", message: "Administrators only" }, { status: 403 })));
-    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Reading device"));
-    expect(panel("access").textContent).not.toContain("Add a user");
-    expect(panel("access").querySelector("#settings-users")).toBeNull();
-    expect(panel("access").textContent).toContain("API tokens");
-    expect(panel("access").textContent).toContain("Connected apps");
-    expect(panel("access").textContent).toContain("Passkeys");
+    await render(<SettingsPage />, () => expect(tab("Connections")).not.toBeNull());
+    await click(tab("Connections"));
+    await eventually(() => expect(panel("connections").textContent).toContain("Reading device"));
+    expect(panel("connections").textContent).not.toContain("Add a user");
+    expect(container!.querySelector("#settings-users")).toBeNull();
+    expect(container!.querySelector("#settings-email-intake")).toBeNull();
+    expect(panel("connections").textContent).toContain("API tokens");
+    expect(panel("connections").textContent).toContain("Connected apps");
+    expect(panel("account").textContent).toContain("Passkeys");
   });
 
   it("changes and remembers the interface language", async () => {
@@ -572,23 +587,25 @@ describe("SettingsPage", () => {
     await render(<SettingsPage />, () => expect(byLabel("Settings interface language")).not.toBeNull());
     await change(byLabel("Settings interface language")!, "ru");
 
-    await eventually(() => expect(container?.textContent).toContain("Доступ"));
+    await eventually(() => expect(container?.textContent).toContain("Подключения"));
     expect(window.localStorage.getItem("paperjam:language")).toBe("ru");
     expect(document.documentElement.lang).toBe("ru");
     // The account keeps it too: summaries of new documents follow it.
     await eventually(() => expect(setLocale).toHaveBeenCalledWith("ru"));
   });
 
-  it("shows spend against budget, OCR languages, and admin LLM/Inbox sections under Archive for administrators", async () => {
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
-    await eventually(() => expect(panel("archive").textContent).toContain("$0.04 / $5.00"));
-    expect(panel("archive").textContent).toContain("eng+rus+ron");
-    expect(panel("archive").textContent).toContain("LLM enrichment");
-    expect(panel("archive").textContent).toContain("Watched inbox folder");
+  it("shows spend against budget, OCR languages and the LLM under processing, and intake apart, for administrators", async () => {
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Processing"));
+    await eventually(() => expect(panel("processing").textContent).toContain("$0.04 / $5.00"));
+    expect(panel("processing").textContent).toContain("eng+rus+ron");
+    expect(panel("processing").textContent).toContain("LLM enrichment");
+    await click(tab("Document intake"));
+    expect(panel("intake").textContent).toContain("Watched inbox folder");
+    expect(panel("intake").textContent).toContain("Email intake");
 
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Reminder lead time (days)"));
+    await click(tab("Connections"));
+    await eventually(() => expect(panel("connections").textContent).toContain("Reminder lead time (days)"));
   });
 
   it("hides admin LLM, Inbox, and calendar lead editor for non-administrators while showing budget and paused hint", async () => {
@@ -607,16 +624,17 @@ describe("SettingsPage", () => {
         inbox_paused: false,
       })),
     );
-    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
-    await click(tab("Archive"));
-    await eventually(() => expect(panel("archive").textContent).toContain("$0.04 / $5.00"));
-    expect(panel("archive").textContent).toContain("LLM enrichment is paused.");
-    expect(panel("archive").querySelector("#settings-llm")).toBeNull();
-    expect(panel("archive").querySelector("#settings-inbox")).toBeNull();
+    await render(<SettingsPage />, () => expect(tab("Document types")).not.toBeNull());
+    await click(tab("Processing"));
+    await eventually(() => expect(panel("processing").textContent).toContain("$0.04 / $5.00"));
+    expect(panel("processing").textContent).toContain("LLM enrichment is paused.");
+    expect(panel("processing").querySelector("#settings-llm")).toBeNull();
+    expect(container!.querySelector("#settings-inbox")).toBeNull();
+    expect(Array.from(container!.querySelectorAll('[role="tab"]')).some((element) => element.textContent === "Document intake")).toBe(false);
 
-    await click(tab("Access"));
-    await eventually(() => expect(panel("access").textContent).toContain("Calendar subscription"));
-    expect(panel("access").textContent).toContain("60 days before each due date");
+    await click(tab("Connections"));
+    await eventually(() => expect(panel("connections").textContent).toContain("Calendar subscription"));
+    expect(panel("connections").textContent).toContain("60 days before each due date");
     expect(byLabel("Reminder lead time (days)")).toBeNull();
   });
 });

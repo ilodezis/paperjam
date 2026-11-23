@@ -31,7 +31,7 @@ curl -s -H "Authorization: Bearer pj_…" \
 
 ## 1. Create a token for the phone
 
-Use a token of its own, so that you can revoke the phone without touching your laptop. In the web app, open Settings → Access → API tokens, create a token named `iphone-shortcut` and copy it. On the server, the equivalent is:
+Use a token of its own, so that you can revoke the phone without touching your laptop. In the web app, open Settings → Connections → API tokens, create a token named `iphone-shortcut` and copy it. On the server, the equivalent is:
 
 ```bash
 docker compose exec paperjam paperjam token create --user alice iphone-shortcut
@@ -78,7 +78,7 @@ The order of the rows in the form is the order they are sent in, and a field bel
 
 The token is stored inside the shortcut, and it is a full API token, not an upload-only one. Whoever has it can search, read, edit and trash documents as you. Do not share the shortcut, and revoke the token if the phone is lost or the shortcut leaks.
 
-Revoke it in Settings → Access → API tokens, where the list shows the token names. It stops working immediately.
+Revoke it in Settings → Connections → API tokens, where the list shows the token names. It stops working immediately.
 
 If you would rather not keep a full token on the phone, the other iPhone route is the web app itself. Upload from there, pick **Files**, and scan with the Files app (**⋯ → Scan Documents**).
 

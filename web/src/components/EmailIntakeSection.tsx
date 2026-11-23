@@ -217,7 +217,7 @@ export function EmailIntakeSection({
     <section className="settings-section" aria-labelledby="settings-email-intake">
       <div className="settings-section-heading">
         <div>
-          <h2 id="settings-email-intake">{t("settings.emailIntake")}</h2>
+          <h3 id="settings-email-intake">{t("settings.emailIntake")}</h3>
           <p>{t("settings.emailIntakeDescription")}</p>
         </div>
         {statusLabel ? <span className={statusClass}>{statusLabel}</span> : null}

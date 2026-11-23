@@ -141,7 +141,7 @@ export function CalendarFeedSection({
   return (
     <section className="settings-section" aria-labelledby="settings-calendar">
       <div className="settings-section-heading">
-        <div><h2 id="settings-calendar">{t("settings.calendar")}</h2><p>{t("settings.calendarDescription")}</p></div>
+        <div><h3 id="settings-calendar">{t("settings.calendar")}</h3><p>{t("settings.calendarDescription")}</p></div>
         {data && !feed ? <button type="button" className="button button--secondary" disabled={busy} onClick={() => void make(false)}><Plus aria-hidden="true" />{t("settings.calendarCreate")}</button> : null}
       </div>
       {link ? (

@@ -121,7 +121,7 @@ export function InboxSettingsSection({
     <section className="settings-section" aria-labelledby="settings-inbox">
       <div className="settings-section-heading">
         <div>
-          <h2 id="settings-inbox">{t("settings.inboxTitle")}</h2>
+          <h3 id="settings-inbox">{t("settings.inboxTitle")}</h3>
           <p>{t("settings.inboxDescription")}</p>
         </div>
         {statusLabel ? <span className={statusClass}>{statusLabel}</span> : null}
@@ -196,7 +196,7 @@ export function InboxSettingsSection({
           </form>
 
           <div className="inbox-failed-block">
-            <h3>{t("settings.inboxFailedTitle")}</h3>
+            <h4>{t("settings.inboxFailedTitle")}</h4>
             {inbox.failed_files.length === 0 ? (
               <p className="settings-note">{t("settings.inboxNoFailed")}</p>
             ) : (

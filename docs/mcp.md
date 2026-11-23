@@ -6,7 +6,7 @@ Every request needs `Authorization: Bearer <token>`. A request without one gets 
 
 Two kinds of bearer token work, and both carry the full access of the user they belong to. There are no scopes, so treat a token like a password.
 
-- **API tokens** (`pj_…`) are made in Settings → Access → API tokens, or with `paperjam token create`. The value is shown once and stored as a hash. They can be revoked at any time. The REST endpoint `POST /api/v1/tokens` needs a signed-in web session, so a token cannot create more tokens.
+- **API tokens** (`pj_…`) are made in Settings → Connections → API tokens, or with `paperjam token create`. The value is shown once and stored as a hash. They can be revoked at any time. The REST endpoint `POST /api/v1/tokens` needs a signed-in web session, so a token cannot create more tokens.
 - **OAuth access tokens** (`pjo_…`) go to MCP clients that signed in through the consent page. They expire after an hour and are renewed with a refresh token that lives 90 days and is rotated on every use. They work **only on `/mcp`**, not on the REST API.
 
 To check that a server and token work, list the tools:
@@ -25,7 +25,7 @@ Replace `https://paperjam.example.org` with the value of `PAPERJAM_PUBLIC_URL` i
 
 ### Claude.ai (OAuth)
 
-Add a custom connector with the URL `https://paperjam.example.org/mcp`. Claude registers itself and sends you to a consent page on your paperjam, where you sign in and approve it. Then it lists the tools. A client that nobody approved stays inert and is deleted after 24 hours. A client can revoke its own tokens, and Settings → Access → Connected apps lists every connected client so you can disconnect it.
+Add a custom connector with the URL `https://paperjam.example.org/mcp`. Claude registers itself and sends you to a consent page on your paperjam, where you sign in and approve it. Then it lists the tools. A client that nobody approved stays inert and is deleted after 24 hours. A client can revoke its own tokens, and Settings → Connections → Connected apps lists every connected client so you can disconnect it.
 
 Claude.ai calls your server from Anthropic's side, so the URL must be reachable from the internet. A paperjam that is open only on a LAN or VPN can still be used from Claude Code, which connects from your own machine.
 

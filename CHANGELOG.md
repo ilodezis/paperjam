@@ -8,7 +8,7 @@ to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - Database-backed runtime configuration (`app_settings` and `email_intake`) editable live from **Settings** in the web UI with environment-variable fallback and immediate reload (no restart required):
-  - **Inbound email intake** (**Settings → Access → Email intake**): generate, rotate, and revoke a one-time `pje_…` webhook secret (stored as a SHA-256 hash with a visible prefix), enable or pause intake, edit the sender allowlist, target user, auto-tag, body fallback, and local-only mode, and view the webhook endpoint URL and receipt stats.
+  - **Inbound email intake** (**Settings → Document intake → Email intake**): generate, rotate, and revoke a one-time `pje_…` webhook secret (stored as a SHA-256 hash with a visible prefix), enable or pause intake, edit the sender allowlist, target user, auto-tag, body fallback, and local-only mode, and view the webhook endpoint URL and receipt stats.
   - **LLM enrichment**: enable or disable LLM calls, store an API key (encrypted at rest in SQLite with AES-256-GCM derived from `PAPERJAM_SECRET_KEY`), choose classification/extraction and vision models, toggle and pick the handwriting re-read model, manage the allowed-models list for reprocessing, set the monthly USD budget, toggle automatic tag creation, set reasoning effort, edit the API base URL and provider dialect, configure custom model prices, and reset overrides back to environment defaults.
   - **Calendar reminder lead days**: override `PAPERJAM_CALENDAR_LEAD_DAYS` live from **Settings**.
   - **Watched inbox folder controls**: when `PAPERJAM_INBOX_DIR` is set, pause or resume polling, choose the owner account, adjust the scan interval, and inspect rejected files in `.failed/`.
@@ -16,11 +16,12 @@ to [Semantic Versioning](https://semver.org/).
 - Document activity history (`GET /api/v1/documents/{id}/events`) and an upload source line on document pages.
 - Per-model reprocess choices in the web UI.
 - Checksum validator selection (`personal_number`, `iban`, `mrz`, national IDs, or none) on identifier fields in document type settings.
-- Inline display-name and administrator role editing in **Settings → Access → Users**.
+- Inline display-name and administrator role editing in **Settings → Users**.
 - Manual person relink action ("Match documents again") in **People & organizations**.
 - `has:expiring` and `due:<…` filter hints in the archive search syntax sheet.
 
 ### Changed
+- **Settings** is reorganised by task: Account (appearance, language, password, passkeys), Processing (archive summary, LLM spend against the monthly budget, queue, LLM enrichment), Document intake (watched folder, email), Document types, Connections (connected apps, API tokens, calendar link) and Users. Sections sit in a side list on wide screens and wrap above the content on a phone; the last one opened is remembered for the browser session, and the handwriting model field shows only while handwriting re-reading is on.
 - Environment variables for LLM enrichment, inbound email intake, calendar lead days, and watched inbox polling (`PAPERJAM_INBOX_USER`, `PAPERJAM_INBOX_INTERVAL_SECS`) now serve as startup defaults and fallback values beneath SQLite overrides saved from **Settings** (`Web UI / SQLite override > environment variable > built-in default`).
 
 ### Security

@@ -155,7 +155,7 @@ export function PasskeysSection() {
 
   return (
     <section className="settings-section" aria-labelledby="settings-passkeys">
-      <div className="settings-section-heading"><div><h2 id="settings-passkeys">{t("settings.passkeys")}</h2><p>{t("settings.passkeysDescription")}</p></div></div>
+      <div className="settings-section-heading"><div><h3 id="settings-passkeys">{t("settings.passkeys")}</h3><p>{t("settings.passkeysDescription")}</p></div></div>
       {adder}
       {passkeys.length === 0 ? (
         data?.available ? <p className="settings-note">{t("settings.passkeysEmpty")}</p> : null

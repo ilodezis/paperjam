@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Ban, Check, ChevronRight, Copy, KeyRound, Lock, Monitor, Moon, Pencil, Plus, RotateCcw, SlidersHorizontal, Sun, Trash2, Unplug, UserPlus } from "lucide-react";
-import { useEffect, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent } from "react";
+import { Ban, Check, ChevronRight, Copy, Cpu, FileStack, Inbox, KeyRound, Lock, Monitor, Moon, Pencil, Plug, Plus, RotateCcw, Sun, Trash2, Unplug, UserPlus, UserRound, Users } from "lucide-react";
+import { useEffect, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ApiError, api, type Connection, type ManagedUser, type TokenView } from "../api";
@@ -18,15 +18,34 @@ import { hrefOf, ScreenLink } from "../shell/navigation";
 import { TopBar } from "../shell/PageHead";
 import { setThemePreference, useThemePreference } from "../theme";
 
-type TabId = "interface" | "archive" | "access";
+type SectionId = "account" | "processing" | "intake" | "types" | "connections" | "users";
 type ReportError = (code: string | null) => void;
 type Confirm = ReturnType<typeof useConfirm>["confirm"];
 
-const TABS: { id: TabId; icon: ComponentType<{ "aria-hidden"?: boolean | "true" | "false" }> }[] = [
-  { id: "interface", icon: SlidersHorizontal },
-  { id: "archive", icon: Archive },
-  { id: "access", icon: KeyRound },
+/**
+ * The settings, by what a person comes here to do. `adminOnly` sections are left out of the
+ * navigation for everyone else. `ownHeading` sections are a single list whose own heading (with its
+ * add button) names the pane, so the pane prints no title above it.
+ */
+const SECTIONS: { id: SectionId; icon: ComponentType<{ "aria-hidden"?: boolean | "true" | "false" }>; adminOnly?: boolean; ownHeading?: boolean }[] = [
+  { id: "account", icon: UserRound },
+  { id: "processing", icon: Cpu },
+  { id: "intake", icon: Inbox, adminOnly: true },
+  { id: "types", icon: FileStack, ownHeading: true },
+  { id: "connections", icon: Plug },
+  { id: "users", icon: Users, adminOnly: true, ownHeading: true },
 ];
+
+const SECTION_KEY = "paperjam:settings-section";
+
+function rememberedSection(): SectionId {
+  try {
+    const value = window.sessionStorage.getItem(SECTION_KEY);
+    return SECTIONS.some(({ id }) => id === value) ? (value as SectionId) : "account";
+  } catch {
+    return "account";
+  }
+}
 
 function formatDate(value: string | null, language: string, never: string): string {
   return value ? new Intl.DateTimeFormat(language, { dateStyle: "medium" }).format(new Date(value)) : never;
@@ -48,24 +67,52 @@ function useRestoreFocus(open: boolean, target: { current: HTMLElement | null })
 export function SettingsPage() {
   const { t } = useTranslation();
   const { confirm, dialogElement } = useConfirm();
+  // The user list answers only to administrators: its success is what marks one.
   const { data: users } = useQuery(usersQuery);
-  const [tab, setTab] = useState<TabId>("interface");
+  const admin = Boolean(users);
+  const [chosen, setChosen] = useState<SectionId>(rememberedSection);
   const [error, setError] = useState<string | null>(null);
-  const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ interface: null, archive: null, access: null });
+  const tabRefs = useRef<Partial<Record<SectionId, HTMLButtonElement | null>>>({});
 
-  // Arrow keys move between tabs and select as they go, as the tab pattern prescribes.
+  const visible = SECTIONS.filter((section) => admin || !section.adminOnly);
+  // A remembered administrator section falls back to the first one for anyone else.
+  const current = visible.some(({ id }) => id === chosen) ? chosen : visible[0].id;
+
+  function select(id: SectionId) {
+    setChosen(id);
+    setError(null);
+    try {
+      window.sessionStorage.setItem(SECTION_KEY, id);
+    } catch {
+      // Private windows may refuse storage; the section is only a convenience.
+    }
+  }
+
+  // Arrow keys move between sections and select as they go, as the tab pattern prescribes. The list
+  // is vertical on a wide screen and wraps on a phone, so both arrow pairs work.
   function onTabKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    const index = TABS.findIndex(({ id }) => id === tab);
-    const next = event.key === "ArrowRight" ? (index + 1) % TABS.length
-      : event.key === "ArrowLeft" ? (index + TABS.length - 1) % TABS.length
+    const index = visible.findIndex(({ id }) => id === current);
+    const forward = event.key === "ArrowDown" || event.key === "ArrowRight";
+    const backward = event.key === "ArrowUp" || event.key === "ArrowLeft";
+    const next = forward ? (index + 1) % visible.length
+      : backward ? (index + visible.length - 1) % visible.length
       : event.key === "Home" ? 0
-      : event.key === "End" ? TABS.length - 1
+      : event.key === "End" ? visible.length - 1
       : null;
     if (next === null) return;
     event.preventDefault();
-    setTab(TABS[next].id);
-    tabRefs.current[TABS[next].id]?.focus();
+    select(visible[next].id);
+    tabRefs.current[visible[next].id]?.focus();
   }
+
+  const panes: Record<SectionId, ReactNode> = {
+    account: <AccountSettings onError={setError} />,
+    processing: <ProcessingSettings admin={admin} confirm={confirm} onError={setError} />,
+    intake: admin ? <IntakeSettings confirm={confirm} onError={setError} /> : null,
+    types: <DocumentTypesSettings />,
+    connections: <ConnectionsSettings admin={admin} confirm={confirm} onError={setError} />,
+    users: admin ? <UsersSection confirm={confirm} onError={setError} /> : null,
+  };
 
   return (
     <div className="settings-page">
@@ -74,44 +121,63 @@ export function SettingsPage() {
       <ScreenLink to={hrefOf("trash")} className="settings-trash-link">
         <Trash2 aria-hidden="true" /><span>{t("nav.trash")}</span><ChevronRight aria-hidden="true" />
       </ScreenLink>
-      {error ? <div className="settings-error" role="alert">{t(`errors.${error}`, { defaultValue: t("errors.settings") })}<button type="button" className="quiet-button" onClick={() => setError(null)}>{t("common.dismiss")}</button></div> : null}
 
-      <div className="settings-tabs" role="tablist" aria-label={t("settings.sections")} onKeyDown={onTabKeyDown}>
-        {TABS.map(({ id, icon: Icon }) => (
-          <button
-            key={id}
-            ref={(node) => { tabRefs.current[id] = node; }}
-            type="button"
-            role="tab"
-            id={`settings-tab-${id}`}
-            aria-selected={tab === id}
-            aria-controls={`settings-panel-${id}`}
-            tabIndex={tab === id ? 0 : -1}
-            className={tab === id ? "settings-tab settings-tab--active" : "settings-tab"}
-            onClick={() => setTab(id)}
-          >
-            <Icon aria-hidden="true" />{t(`settings.tabs.${id}`)}
-          </button>
-        ))}
-      </div>
+      <div className="settings-layout">
+        <div className="settings-nav" role="tablist" aria-label={t("settings.sections")} aria-orientation="vertical" onKeyDown={onTabKeyDown}>
+          {visible.map(({ id, icon: Icon }) => (
+            <button
+              key={id}
+              ref={(node) => { tabRefs.current[id] = node; }}
+              type="button"
+              role="tab"
+              id={`settings-tab-${id}`}
+              aria-selected={current === id}
+              aria-controls={`settings-panel-${id}`}
+              tabIndex={current === id ? 0 : -1}
+              className={current === id ? "settings-nav-item settings-nav-item--active" : "settings-nav-item"}
+              onClick={() => select(id)}
+            >
+              <Icon aria-hidden="true" /><span>{t(`settings.nav.${id}`)}</span>
+            </button>
+          ))}
+        </div>
 
-      {/* Every panel stays mounted: a token secret that is shown only once, or a half-filled form, must survive a switch of tab. */}
-      <div role="tabpanel" id="settings-panel-interface" aria-labelledby="settings-tab-interface" className="settings-panel" hidden={tab !== "interface"}>
-        <InterfaceSettings onError={setError} />
-      </div>
-      <div role="tabpanel" id="settings-panel-archive" aria-labelledby="settings-tab-archive" className="settings-panel" hidden={tab !== "archive"}>
-        <ArchiveSettings admin={Boolean(users)} confirm={confirm} onError={setError} />
-      </div>
-      <div role="tabpanel" id="settings-panel-access" aria-labelledby="settings-tab-access" className="settings-panel" hidden={tab !== "access"}>
-        <AccessSettings admin={Boolean(users)} confirm={confirm} onError={setError} />
+        <div className="settings-content">
+          {error ? <div className="settings-error" role="alert">{t(`errors.${error}`, { defaultValue: t("errors.settings") })}<button type="button" className="quiet-button" onClick={() => setError(null)}>{t("common.dismiss")}</button></div> : null}
+          {/* Every pane stays mounted: a token secret that is shown only once, or a half-filled form, must survive a switch of section. */}
+          {visible.map(({ id, ownHeading }) => (
+            <div key={id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`} className="settings-panel" hidden={current !== id}>
+              {ownHeading ? null : (
+                <header className="settings-pane-head">
+                  <h2 className="settings-pane-title">{t(`settings.nav.${id}`)}</h2>
+                  <p>{t(`settings.navHint.${id}`)}</p>
+                </header>
+              )}
+              {panes[id]}
+            </div>
+          ))}
+        </div>
       </div>
       {dialogElement}
     </div>
   );
 }
 
-/** Personal to this person and device: theme and language. Nothing administrative here. */
-function InterfaceSettings({ onError }: { onError: ReportError }) {
+/** One setting on a line: what it is and what it does on the left, the control on the right. */
+function SettingRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="settings-row">
+      <div className="settings-row-text">
+        <span className="settings-row-label">{label}</span>
+        {hint ? <span className="settings-row-hint">{hint}</span> : null}
+      </div>
+      <div className="settings-row-control">{children}</div>
+    </div>
+  );
+}
+
+/** Personal to this person: how the app looks, the language it speaks, and how they sign in. */
+function AccountSettings({ onError }: { onError: ReportError }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const theme = useThemePreference();
@@ -129,86 +195,107 @@ function InterfaceSettings({ onError }: { onError: ReportError }) {
   }
 
   return (
-    <section className="settings-section settings-interface" aria-labelledby="settings-tab-interface">
-      <div className="settings-interface-grid">
-        <div className="settings-control-group">
-          <span className="control-group-label">{t("preferences.theme")}</span>
-          <SegmentedControl
-            value={theme}
-            onChange={setThemePreference}
-            ariaLabel={t("preferences.theme")}
-            options={[
-              { value: "system", label: t("preferences.system"), icon: Monitor },
-              { value: "light", label: t("preferences.light"), icon: Sun },
-              { value: "dark", label: t("preferences.dark"), icon: Moon },
-            ]}
-          />
+    <>
+      <section className="settings-section" aria-labelledby="settings-appearance">
+        <div className="settings-section-heading"><div><h3 id="settings-appearance">{t("settings.appearance")}</h3></div></div>
+        <div className="settings-rows">
+          <SettingRow label={t("preferences.theme")} hint={t("settings.themeHint")}>
+            <SegmentedControl
+              value={theme}
+              onChange={setThemePreference}
+              ariaLabel={t("preferences.theme")}
+              options={[
+                { value: "system", label: t("preferences.system"), icon: Monitor },
+                { value: "light", label: t("preferences.light"), icon: Sun },
+                { value: "dark", label: t("preferences.dark"), icon: Moon },
+              ]}
+            />
+          </SettingRow>
+          <SettingRow label={t("preferences.language")} hint={t("settings.languageDescription")}>
+            <SegmentedControl<string>
+              value={language}
+              onChange={changeLanguage}
+              ariaLabel={t("settings.interfaceLanguage")}
+              options={[
+                { value: "ru", label: "Русский" },
+                { value: "en", label: "English" },
+              ]}
+            />
+          </SettingRow>
         </div>
-        <div className="settings-control-group">
-          <span className="control-group-label">{t("preferences.language")}</span>
-          <SegmentedControl<string>
-            value={language}
-            onChange={changeLanguage}
-            ariaLabel={t("settings.interfaceLanguage")}
-            options={[
-              { value: "ru", label: "Русский" },
-              { value: "en", label: "English" },
-            ]}
-          />
-        </div>
-      </div>
-      <p className="settings-note">{t("settings.languageDescription")}</p>
-    </section>
+      </section>
+      <PasswordSection onError={onError} />
+      <PasskeysSection />
+    </>
   );
 }
 
-/** Archive usage, enrichment/inbox settings (administrators only), and the document schemas. */
-function ArchiveSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
+/** How documents are read and enriched: the archive's state, the queue, and the LLM (administrators configure it). */
+function ProcessingSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
   const { t, i18n } = useTranslation();
   const { data: stats } = useQuery(statsQuery);
   const { data: settingsSummary } = useQuery(settingsSummaryQuery);
   const { data: adminSettings } = useQuery({ ...adminSettingsQuery, enabled: admin });
   const language = i18n.resolvedLanguage ?? "en";
   const formatUsd = (amount: string) => new Intl.NumberFormat(language, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(amount));
+  const spent = Number(stats?.llm_month_usd ?? "0");
   const spend = formatUsd(stats?.llm_month_usd ?? "0");
+  const budgetAmount = settingsSummary?.llm_monthly_budget_usd ? Number(settingsSummary.llm_monthly_budget_usd) : null;
   const budget = settingsSummary?.llm_monthly_budget_usd ? formatUsd(settingsSummary.llm_monthly_budget_usd) : null;
+  const share = budgetAmount && budgetAmount > 0 ? Math.min(spent / budgetAmount, 1) : null;
+  const queue = stats?.queue;
+  const failed = queue?.dead ?? 0;
 
   return (
     <>
       <section className="settings-section settings-usage" aria-labelledby="settings-usage">
-        <div className="settings-section-heading"><div><h2 id="settings-usage">{t("settings.processing")}</h2></div></div>
-        <dl className="usage-list">
-          <div><dt>{t("settings.monthSpend")}</dt><dd>{budget ? `${spend} / ${budget}` : spend}</dd></div>
+        <div className="settings-section-heading"><div><h3 id="settings-usage">{t("settings.overview")}</h3></div></div>
+        <div className="usage-spend">
+          <span className="usage-spend-label">{t("settings.monthSpend")}</span>
+          <strong className="usage-spend-value">{budget ? `${spend} / ${budget}` : spend}</strong>
+          {share !== null ? (
+            <meter className="usage-meter" min={0} max={1} low={0.75} high={0.9} optimum={0} value={share} aria-label={t("settings.budgetUsed", { percent: Math.round(share * 100) })} />
+          ) : null}
+          {settingsSummary && !settingsSummary.llm_configured ? (
+            <p className="settings-note settings-usage-note">{t("settings.llmUsageNotConfigured")}</p>
+          ) : settingsSummary && !settingsSummary.llm_enabled ? (
+            <p className="settings-note settings-usage-note">{t("settings.llmUsagePaused")}</p>
+          ) : null}
+        </div>
+        <dl className="usage-grid">
           <div><dt>{t("settings.documents")}</dt><dd>{stats?.documents ?? "—"}</dd></div>
           <div><dt>{t("settings.attention")}</dt><dd>{stats?.attention ?? "—"}</dd></div>
           {adminSettings?.ocr_langs ? <div><dt>{t("settings.ocrLanguages")}</dt><dd><code>{adminSettings.ocr_langs}</code></dd></div> : null}
         </dl>
-        {settingsSummary && !settingsSummary.llm_configured ? (
-          <p className="settings-note settings-usage-note">{t("settings.llmUsageNotConfigured")}</p>
-        ) : settingsSummary && !settingsSummary.llm_enabled ? (
-          <p className="settings-note settings-usage-note">{t("settings.llmUsagePaused")}</p>
-        ) : null}
-        <h3>{t("settings.queue")}</h3>
-        <dl className="queue-list"><div><dt>{t("settings.queued")}</dt><dd>{stats?.queue.queued ?? "—"}</dd></div><div><dt>{t("settings.running")}</dt><dd>{stats?.queue.running ?? "—"}</dd></div><div><dt>{t("settings.dead")}</dt><dd>{stats?.queue.dead ?? "—"}</dd></div></dl>
+        <h4>{t("settings.queue")}</h4>
+        <dl className="usage-grid">
+          <div><dt>{t("settings.queued")}</dt><dd>{queue?.queued ?? "—"}</dd></div>
+          <div><dt>{t("settings.running")}</dt><dd>{queue?.running ?? "—"}</dd></div>
+          <div className={failed > 0 ? "usage-failed" : undefined}><dt>{t("settings.dead")}</dt><dd>{queue?.dead ?? "—"}</dd></div>
+        </dl>
       </section>
       {admin ? <LlmSettingsSection confirm={confirm} onError={onError} /> : null}
-      {admin ? <InboxSettingsSection onError={onError} /> : null}
-      <DocumentTypesSettings />
     </>
   );
 }
 
-/** Who and what can get in: users (administrators only), password, API tokens, the calendar link, email intake (administrators only), connected apps, passkeys. */
-function AccessSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
+/** The ways documents arrive without the upload page: a watched folder and email. Administrators only. */
+function IntakeSettings({ confirm, onError }: { confirm: Confirm; onError: ReportError }) {
   return (
     <>
-      {admin ? <UsersSection confirm={confirm} onError={onError} /> : null}
-      <PasswordSection onError={onError} />
+      <InboxSettingsSection onError={onError} />
+      <EmailIntakeSection confirm={confirm} onError={onError} />
+    </>
+  );
+}
+
+/** Everything outside the web app that reads the archive: connected apps, API tokens, the calendar link. */
+function ConnectionsSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
+  return (
+    <>
+      <ConnectionsSection confirm={confirm} onError={onError} />
       <TokensSection confirm={confirm} onError={onError} />
       <CalendarFeedSection admin={admin} confirm={confirm} onError={onError} />
-      {admin ? <EmailIntakeSection confirm={confirm} onError={onError} /> : null}
-      <ConnectionsSection confirm={confirm} onError={onError} />
-      <PasskeysSection />
     </>
   );
 }
@@ -370,7 +457,7 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
   return (
     <section className="settings-section" aria-labelledby="settings-users">
       <div className="settings-section-heading">
-        <div><h2 id="settings-users">{t("settings.users")}</h2></div>
+        <div><h2 id="settings-users" className="settings-pane-title">{t("settings.users")}</h2><p>{t("settings.navHint.users")}</p></div>
         {open ? null : <button ref={opener} type="button" className="button button--secondary" aria-expanded="false" aria-controls="settings-user-form" onClick={() => { closeReset(); closeEdit(); setOpen(true); }}><UserPlus aria-hidden="true" />{t("settings.addUser")}</button>}
       </div>
       {open ? (
@@ -510,7 +597,7 @@ function PasswordSection({ onError }: { onError: ReportError }) {
     <section className="settings-section" aria-labelledby="settings-password">
       <div className="settings-section-heading">
         <div>
-          <h2 id="settings-password">{t("settings.passwordSection")}</h2>
+          <h3 id="settings-password">{t("settings.passwordSection")}</h3>
           <p>{t("settings.passwordDescription")}</p>
         </div>
         {open ? null : <button ref={opener} type="button" className="button button--secondary" aria-expanded="false" aria-controls="settings-password-form" onClick={() => setOpen(true)}><Lock aria-hidden="true" />{t("settings.changePassword")}</button>}
@@ -611,7 +698,7 @@ function TokensSection({ confirm, onError }: { confirm: Confirm; onError: Report
   return (
     <section className="settings-section" aria-labelledby="settings-tokens">
       <div className="settings-section-heading">
-        <div><h2 id="settings-tokens">{t("settings.tokens")}</h2><p>{t("settings.tokensDescription")}</p></div>
+        <div><h3 id="settings-tokens">{t("settings.tokens")}</h3><p>{t("settings.tokensDescription")}</p></div>
         {open ? null : <button ref={opener} type="button" className="button button--secondary" aria-expanded="false" aria-controls="settings-token-form" onClick={() => setOpen(true)}><Plus aria-hidden="true" />{t("settings.newToken")}</button>}
       </div>
       {secret ? <div className="token-secret" role="status"><div><strong>{t("settings.secretTitle")}</strong><p>{t("settings.secretDescription")}</p></div><div className="token-secret-row"><input ref={secretInput} readOnly value={secret} aria-label={t("settings.newSecret")} onFocus={(event) => event.currentTarget.select()} /><button type="button" className="button button--secondary" onClick={() => void copySecret()}>{copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}{copied ? t("document.copied") : t("settings.copySecret")}</button></div></div> : null}
@@ -661,7 +748,7 @@ function ConnectionsSection({ confirm, onError }: { confirm: Confirm; onError: R
 
   return (
     <section className="settings-section" aria-labelledby="settings-connections">
-      <div className="settings-section-heading"><div><h2 id="settings-connections">{t("settings.connections")}</h2><p>{t("settings.connectionsDescription")}</p></div></div>
+      <div className="settings-section-heading"><div><h3 id="settings-connections">{t("settings.connections")}</h3><p>{t("settings.connectionsDescription")}</p></div></div>
       {connections && connections.length === 0 ? <p className="settings-note">{t("settings.noConnections")}</p> : null}
       {connections && connections.length > 0 ? (
         <ul className="settings-records token-records">

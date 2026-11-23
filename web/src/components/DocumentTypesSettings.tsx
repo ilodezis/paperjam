@@ -81,7 +81,7 @@ export function DocumentTypesSettings() {
   return (
     <section className="settings-section document-types" aria-labelledby="document-types-heading">
       <div className="settings-section-heading">
-        <div><h2 id="document-types-heading">{t("documentTypes.title")}</h2><p>{t("documentTypes.description")}</p></div>
+        <div><h2 id="document-types-heading" className="settings-pane-title">{t("documentTypes.title")}</h2><p>{t("documentTypes.description")}</p></div>
         {!creating && !selected ? <button type="button" className="button button--secondary" disabled={!taxonomy} onClick={() => setCreating(true)}><Plus aria-hidden="true" />{t("taxonomy.add.types")}</button> : null}
       </div>
 

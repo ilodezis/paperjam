@@ -283,7 +283,7 @@ export function LlmSettingsSection({
     <section className="settings-section" aria-labelledby="settings-llm">
       <div className="settings-section-heading">
         <div>
-          <h2 id="settings-llm">{t("settings.llmTitle")}</h2>
+          <h3 id="settings-llm">{t("settings.llmTitle")}</h3>
           <p>{t("settings.llmDescription")}</p>
         </div>
         {statusLabel ? <span className={statusClass}>{statusLabel}</span> : null}
@@ -386,20 +386,23 @@ export function LlmSettingsSection({
             />
           </label>
 
-          <label className="field-label" htmlFor={handwritingModelId}>
-            <span>{t("settings.llmHandwritingModel")}</span>
-            <input
-              id={handwritingModelId}
-              type="text"
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="none"
-              spellCheck={false}
-              value={handwritingModel}
-              onChange={(event) => setHandwritingModel(event.target.value)}
-              aria-label={t("settings.llmHandwritingModel")}
-            />
-          </label>
+          {/* The model only matters while handwriting is re-read; hidden otherwise, kept in the draft. */}
+          {handwritingEnabled ? (
+            <label className="field-label settings-dependent-field" htmlFor={handwritingModelId}>
+              <span>{t("settings.llmHandwritingModel")}</span>
+              <input
+                id={handwritingModelId}
+                type="text"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                value={handwritingModel}
+                onChange={(event) => setHandwritingModel(event.target.value)}
+                aria-label={t("settings.llmHandwritingModel")}
+              />
+            </label>
+          ) : null}
 
           <label className="toggle-row">
             <span className="toggle-row-text">

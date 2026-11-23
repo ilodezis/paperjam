@@ -25,7 +25,7 @@ paperjam splits configuration between startup environment variables (for network
 
 **Operational settings (web UI Settings, applied live without restarting):**
 
-- **Inbound email intake** (**Settings → Access**): generate, rotate, or revoke the webhook secret; turn intake on or pause it; set allowed senders, target user, auto-tag, body fallback, and local-only mode.
+- **Inbound email intake** (**Settings → Document intake**): generate, rotate, or revoke the webhook secret; turn intake on or pause it; set allowed senders, target user, auto-tag, body fallback, and local-only mode.
 - **LLM enrichment** (**Settings**): turn LLM enrichment on or off, set or replace the API key, choose models (classification/extraction, vision, handwriting re-read toggle and model, allowed models list for reprocessing), set the monthly USD budget, toggle automatic tag creation, set reasoning effort, change the endpoint base URL and provider dialect, configure custom model prices, and reset overrides back to environment defaults.
 - **Calendar feed** (**Settings**): change renewal reminder lead days (`PAPERJAM_CALENDAR_LEAD_DAYS`).
 - **Watched inbox behavior** (**Settings**, when `PAPERJAM_INBOX_DIR` is set): pause or resume scanning, pick the owner account, change the scan interval, and inspect rejected files in `.failed/`.
@@ -108,7 +108,7 @@ How the scanner treats files:
 
 ## Email intake (optional)
 
-Inbound email can be enabled live from **Settings → Access → Email intake** in the web app, or via `.env` variables below (which serve as fallback defaults when no database override exists). `POST /api/v1/ingest/email` accepts a raw RFC 5322 email (`message/rfc822`), skips inline signature logos and non-document attachments (such as `.ics`, `.vcf`, `.p7s` and `winmail.dat`), keeps iPhone inline photos and forwarded `.eml` attachments, and hands each file to the normal upload path. See the [Email intake guide](email-intake.md) for the web UI setup, Cloudflare Email Worker script, and troubleshooting.
+Inbound email can be enabled live from **Settings → Document intake → Email intake** in the web app, or via `.env` variables below (which serve as fallback defaults when no database override exists). `POST /api/v1/ingest/email` accepts a raw RFC 5322 email (`message/rfc822`), skips inline signature logos and non-document attachments (such as `.ics`, `.vcf`, `.p7s` and `winmail.dat`), keeps iPhone inline photos and forwarded `.eml` attachments, and hands each file to the normal upload path. See the [Email intake guide](email-intake.md) for the web UI setup, Cloudflare Email Worker script, and troubleshooting.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -134,7 +134,7 @@ Why a document is parsed in a separate process is explained in [architecture](ar
 
 ## Calendar feed
 
-Settings → Access → *Calendar subscription* makes a private link of the form `/calendar/<secret>.ics`. Subscribe to it in a calendar app and every document with a due date (see `has:expiring` in the [search syntax](mcp.md#due-dates)) shows up as an all-day event, plus a "renew" event `PAPERJAM_CALENDAR_LEAD_DAYS` days earlier (60 by default; `0` turns it off; also editable live in **Settings**).
+Settings → Connections → *Calendar subscription* makes a private link of the form `/calendar/<secret>.ics`. Subscribe to it in a calendar app and every document with a due date (see `has:expiring` in the [search syntax](mcp.md#due-dates)) shows up as an all-day event, plus a "renew" event `PAPERJAM_CALENDAR_LEAD_DAYS` days earlier (60 by default; `0` turns it off; also editable live in **Settings**).
 
 The feed carries titles and dates only (and a link to the document when `PAPERJAM_PUBLIC_URL` is set), never a field value such as a document number, and leaves out documents marked *Never send to the cloud*. The secret opens this feed and nothing else, is stored hashed and is shown once; rotate it to get a new link, or revoke it. It is part of the URL, so it appears in reverse-proxy access logs. Google Calendar fetches the feed from Google's servers, so it cannot reach a paperjam that is only open over a VPN; Apple Calendar fetches it from the device and can.
 

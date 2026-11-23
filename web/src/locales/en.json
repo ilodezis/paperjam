@@ -617,7 +617,7 @@
   },
   "documentTypes": {
     "title": "Document types",
-    "description": "Advanced schemas for structured document fields.",
+    "description": "Kinds of documents and the fields filled in for each.",
     "views": "Document type views",
     "inUse": "In use",
     "all": "All",
@@ -656,11 +656,6 @@
   "settings": {
     "title": "Settings",
     "sections": "Settings sections",
-    "tabs": {
-      "interface": "Interface",
-      "archive": "Archive",
-      "access": "Access"
-    },
     "newToken": "New token",
     "users": "Users",
     "administrator": "Administrator",
@@ -720,7 +715,6 @@
     "revokeFor": "Revoke {{name}}",
     "revokeConfirm": "Revoke {{name}}? Clients using this token will immediately lose access.",
     "revoked": "Revoked",
-    "processing": "Processing",
     "monthSpend": "LLM spend this month",
     "documents": "Active documents",
     "attention": "Needs attention",
@@ -912,7 +906,27 @@
     "inboxSave": "Save inbox settings",
     "inboxSavedToast": "Inbox settings saved",
     "inboxFailedTitle": "Rejected files (.failed/)",
-    "inboxNoFailed": "No rejected files."
+    "inboxNoFailed": "No rejected files.",
+    "nav": {
+      "account": "Account",
+      "processing": "Processing",
+      "intake": "Document intake",
+      "types": "Document types",
+      "connections": "Connections",
+      "users": "Users"
+    },
+    "navHint": {
+      "account": "How the app looks and how you sign in.",
+      "processing": "How documents are read and enriched, and what that costs.",
+      "intake": "Ways documents arrive without the upload page: a watched folder and email.",
+      "types": "Kinds of documents and the fields filled in for each.",
+      "connections": "Apps, tokens and calendar links that read the archive from outside.",
+      "users": "Who can sign in to this archive and what they may change."
+    },
+    "appearance": "Appearance and language",
+    "themeHint": "Applies to this device only.",
+    "overview": "Overview",
+    "budgetUsed": "{{percent}}% of the monthly budget used"
   },
   "notFound": {
     "title": "Page not found",
