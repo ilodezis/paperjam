@@ -71,6 +71,19 @@ export const calendarFeedQuery = queryOptions({
   staleTime: 5 * 60_000,
 });
 
+export const emailSettingsQuery = queryOptions({
+  queryKey: ["email-settings"],
+  queryFn: async () => {
+    try {
+      return await api.emailSettings();
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 403) return null;
+      throw cause;
+    }
+  },
+  staleTime: 60_000,
+});
+
 export const passkeysQuery = queryOptions({
   queryKey: ["passkeys"],
   queryFn: api.passkeys,

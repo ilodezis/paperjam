@@ -69,5 +69,6 @@ describe("what leaves memory", () => {
     expect(shouldPersist(queryFor(["tokens"], []))).toBe(false);
     expect(shouldPersist(queryFor(["users"], []))).toBe(false);
     expect(shouldPersist(queryFor(["passkeys"], {}))).toBe(false);
+    expect(shouldPersist(queryFor(["email-settings"], {}))).toBe(false);
   });
 });

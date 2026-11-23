@@ -61,6 +61,10 @@ pub fn build() -> OpenApi {
                 .description(Some("Dashboard numbers and statistics"))
                 .build(),
             TagBuilder::new()
+                .name("settings")
+                .description(Some("Instance configuration and runtime settings"))
+                .build(),
+            TagBuilder::new()
                 .name("system")
                 .description(Some("System endpoints"))
                 .build(),

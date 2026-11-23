@@ -119,6 +119,36 @@ export interface CreatedCalendarFeed {
   url: string | null;
 }
 
+export interface EmailSettingsView {
+  enabled: boolean;
+  source: "none" | "env" | "database";
+  has_secret: boolean;
+  secret_source: "none" | "env" | "database";
+  secret_prefix: string | null;
+  endpoint_url: string;
+  user_id: string | null;
+  allowed_senders: string[];
+  body_fallback: boolean;
+  local_only: boolean;
+  tag: string | null;
+  last_received_at: string | null;
+  received_count: number;
+}
+
+export interface EmailSettingsPatch {
+  enabled?: boolean;
+  user_id?: string | null;
+  allowed_senders?: string[];
+  body_fallback?: boolean;
+  local_only?: boolean;
+  tag?: string | null;
+}
+
+export interface CreatedEmailSecret {
+  settings: EmailSettingsView;
+  secret: string;
+}
+
 export interface PasskeyView {
   id: string;
   credential_id: string;
@@ -460,6 +490,10 @@ export const api = {
   calendarFeed: () => call<CalendarFeedState>("/calendar-feed"),
   createCalendarFeed: () => call<CreatedCalendarFeed>("/calendar-feed", { method: "POST" }),
   revokeCalendarFeed: () => call<void>("/calendar-feed", { method: "DELETE" }),
+  emailSettings: () => call<EmailSettingsView>("/settings/email"),
+  updateEmailSettings: (patch: EmailSettingsPatch) => call<EmailSettingsView>("/settings/email", json(patch, "PATCH")),
+  rotateEmailSecret: () => call<CreatedEmailSecret>("/settings/email/secret", { method: "POST" }),
+  revokeEmailSecret: () => call<EmailSettingsView>("/settings/email/secret", { method: "DELETE" }),
   connections: () => call<Connection[]>("/connections"),
   disconnect: (id: string) => call<void>(`/connections/${id}`, { method: "DELETE" }),
   stats: () => call<Stats>("/stats"),

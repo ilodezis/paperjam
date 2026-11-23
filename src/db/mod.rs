@@ -131,6 +131,8 @@ mod tests {
             "oauth_grants",
             "upload_links",
             "passkeys",
+            "app_settings",
+            "email_intake",
         ] {
             assert!(names.contains(&expected), "missing table {expected}");
         }

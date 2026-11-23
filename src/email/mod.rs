@@ -7,9 +7,10 @@ use std::io::Cursor;
 
 use serde::Serialize;
 
-use crate::config::{EmailIntakeConfig, SenderRule};
+use crate::config::SenderRule;
 use crate::error::{ErrorKind, Result, ServiceError};
 use crate::ids::{DocumentId, TagId, UserId};
+use crate::service::settings::{EmailRuntimeConfig, EmailUserTarget};
 use crate::service::upload::{UploadInput, UploadOutcome, upload};
 use crate::service::{Actor, App, Ctx, Via, taxonomy, users};
 
@@ -95,10 +96,27 @@ pub fn check_sender(
     Ok(())
 }
 
-async fn resolve_user(app: &App, configured: Option<&str>) -> Result<UserId> {
+async fn resolve_user(app: &App, target: Option<&EmailUserTarget>) -> Result<UserId> {
     let ctx = app.ctx(Actor::system());
-    match configured {
-        Some(name) => {
+    match target {
+        Some(EmailUserTarget::UserId(id)) => {
+            let user = users::get_user(&ctx, *id).await.map_err(|e| {
+                tracing::error!(code = e.code, "configured email user lookup failed");
+                ServiceError::unavailable(
+                    "email_user_unavailable",
+                    "configured email intake user could not be resolved",
+                )
+            })?;
+            if user.disabled_at.is_some() {
+                tracing::error!("configured email intake user points to a disabled account");
+                return Err(ServiceError::unavailable(
+                    "email_user_unavailable",
+                    "configured email intake user account is disabled",
+                ));
+            }
+            Ok(user.id)
+        }
+        Some(EmailUserTarget::Username(name)) => {
             let user = users::find_user_by_username(&ctx, name)
                 .await
                 .map_err(|e| {
@@ -131,11 +149,11 @@ async fn resolve_user(app: &App, configured: Option<&str>) -> Result<UserId> {
                 }
                 (Some(_), Some(_)) => {
                     tracing::error!(
-                        "email intake is unconfigured for multiple users: set PAPERJAM_EMAIL_USER"
+                        "email intake is unconfigured for multiple users: select a target user"
                     );
                     Err(ServiceError::unavailable(
                         "email_user_unconfigured",
-                        "multiple users exist; set PAPERJAM_EMAIL_USER",
+                        "multiple users exist; configure a target user for email intake",
                     ))
                 }
             }
@@ -168,7 +186,7 @@ async fn resolve_tag(ctx: &Ctx<'_>, name: &str) -> Result<TagId> {
 /// eligible file through the normal upload pipeline.
 pub async fn ingest(
     app: &App,
-    config: &EmailIntakeConfig,
+    config: &EmailRuntimeConfig,
     raw: &[u8],
     envelope_from: Option<&str>,
 ) -> Result<EmailIngestReport> {
@@ -182,7 +200,7 @@ pub async fn ingest(
         &parsed.from_addresses,
     )?;
 
-    let user_id = resolve_user(app, config.user.as_deref()).await?;
+    let user_id = resolve_user(app, config.user.as_ref()).await?;
     let ctx = app.ctx(Actor::user(user_id, Via::Email));
     let tag_id = match (&config.tag, parsed.candidates.is_empty()) {
         (Some(name), false) => Some(resolve_tag(&ctx, name).await?),

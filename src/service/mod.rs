@@ -10,6 +10,7 @@ pub mod links;
 pub mod naming;
 pub mod paperless;
 pub mod passkeys;
+pub mod settings;
 pub mod setup;
 pub mod shares;
 pub mod stats;
@@ -122,6 +123,8 @@ pub struct App {
     pub passkeys: passkeys::Passkeys,
     /// Coordinates background OCR runs with LLM steps on the same document.
     pub ocr_trackers: Arc<crate::pipeline::OcrTrackers>,
+    /// Runtime-mutable settings loaded from SQLite + env defaults.
+    pub runtime: Arc<std::sync::RwLock<settings::RuntimeSettings>>,
 }
 
 impl App {
@@ -129,6 +132,7 @@ impl App {
     pub async fn open(config: Config) -> anyhow::Result<App> {
         std::fs::create_dir_all(&config.data_dir)?;
         let db = Db::open(&config.data_dir.join("paperjam.db")).await?;
+        let runtime = Arc::new(std::sync::RwLock::new(settings::load(&config, &db).await?));
         let files = FileStore::open(&config.data_dir)?;
         let config_dir = config.data_dir.clone();
         let index = SearchIndex::open(&config_dir.join("index"), &config.ocr_langs)?;
@@ -143,12 +147,29 @@ impl App {
             llm,
             passkeys,
             ocr_trackers: Arc::new(crate::pipeline::OcrTrackers::default()),
+            runtime,
             db,
         })
     }
 
     pub fn ctx(&self, actor: Actor) -> Ctx<'_> {
         Ctx { app: self, actor }
+    }
+
+    /// Returns a cloned snapshot of the current runtime settings.
+    pub fn runtime_settings(&self) -> settings::RuntimeSettings {
+        self.runtime
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Reloads runtime settings from SQLite and updates the cached snapshot.
+    pub async fn reload_settings(&self) -> Result<()> {
+        let fresh = settings::load(&self.config, &self.db).await?;
+        let mut guard = self.runtime.write().unwrap_or_else(|e| e.into_inner());
+        *guard = fresh;
+        Ok(())
     }
 }
 

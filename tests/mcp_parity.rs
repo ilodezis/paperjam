@@ -55,6 +55,10 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("DELETE", "/tokens/{id}"),
     ("GET", "/connections"),
     ("DELETE", "/connections/{id}"),
+    ("GET", "/settings/email"),
+    ("PATCH", "/settings/email"),
+    ("POST", "/settings/email/secret"),
+    ("DELETE", "/settings/email/secret"),
     // Passkeys are a web sign-in: managed from a cookie session only, like purge.
     ("GET", "/passkeys"),
     ("POST", "/passkeys"),

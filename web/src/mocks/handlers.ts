@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 
-import type { Connection, DocumentEvent, DocumentOrganization, DocumentPatch, DocumentView, ManagedUser, PasskeyView, Share, ShareTtl, TokenView } from "../api";
+import type { Connection, DocumentEvent, DocumentOrganization, DocumentPatch, DocumentView, EmailSettingsPatch, EmailSettingsView, ManagedUser, PasskeyView, Share, ShareTtl, TokenView } from "../api";
 import { attentionDocuments, documentTags, documentViews, expiringDocuments, hits, mockUser, taxonomy } from "./data";
 
 let signedIn = true;
@@ -10,6 +10,21 @@ const users: ManagedUser[] = [{ ...mockUser, person_id: "person-alex", created_a
 const passkeys: PasskeyView[] = [{ id: "passkey-phone", credential_id: "cGhvbmU", label: "Demo phone", created_at: "2026-02-03T09:00:00Z", last_used_at: "2026-02-14T07:45:00Z" }];
 let ceremonies = 0;
 let calendarFeed: { created_at: string; last_used_at: string | null } | null = null;
+let emailSettings: EmailSettingsView = {
+  enabled: false,
+  source: "none",
+  has_secret: false,
+  secret_source: "none",
+  secret_prefix: null,
+  endpoint_url: "http://localhost/api/v1/ingest/email",
+  user_id: null,
+  allowed_senders: [],
+  body_fallback: true,
+  local_only: false,
+  tag: null,
+  last_received_at: null,
+  received_count: 0,
+};
 const connections: Connection[] = [{ id: "grant-assistant", client_id: "client-assistant", client_name: "Assistant", created_at: "2026-02-03T10:00:00Z", last_used_at: "2026-02-12T07:45:00Z" }];
 const tokens: TokenView[] = [{ id: "token-reader", user_id: mockUser.id, name: "Reading device", prefix: "pj_demo_read", created_at: "2026-02-01T09:00:00Z", last_used_at: "2026-02-12T08:30:00Z", revoked_at: null }];
 
@@ -528,6 +543,69 @@ export const handlers = [
     if (!calendarFeed) return HttpResponse.json({ code: "calendar_feed_not_found", message: "No feed" }, { status: 404 });
     calendarFeed = null;
     return new HttpResponse(null, { status: 204 });
+  }),
+  http.get("/api/v1/settings/email", ({ request }) => HttpResponse.json({
+    ...emailSettings,
+    endpoint_url: new URL("/api/v1/ingest/email", request.url).toString(),
+  })),
+  http.patch("/api/v1/settings/email", async ({ request }) => {
+    const patch = await request.json() as EmailSettingsPatch;
+    if (patch.enabled === true && !emailSettings.has_secret) {
+      return HttpResponse.json({ code: "email_secret_required", message: "Generate an email secret before enabling intake" }, { status: 422 });
+    }
+    if (patch.allowed_senders !== undefined) {
+      for (const entry of patch.allowed_senders) {
+        if (!entry.includes("@") || /\s/.test(entry)) {
+          return HttpResponse.json({ code: "invalid_sender_rule", message: "Sender rules must be email addresses or @domains without spaces" }, { status: 422 });
+        }
+      }
+      emailSettings.allowed_senders = [...patch.allowed_senders];
+    }
+    if (patch.enabled !== undefined) emailSettings.enabled = patch.enabled;
+    if ("user_id" in patch) emailSettings.user_id = patch.user_id ?? null;
+    if (patch.body_fallback !== undefined) emailSettings.body_fallback = patch.body_fallback;
+    if (patch.local_only !== undefined) emailSettings.local_only = patch.local_only;
+    if ("tag" in patch) {
+      const trimmed = patch.tag?.trim() ?? "";
+      emailSettings.tag = trimmed || null;
+    }
+    emailSettings.source = "database";
+    return HttpResponse.json({
+      ...emailSettings,
+      endpoint_url: new URL("/api/v1/ingest/email", request.url).toString(),
+    });
+  }),
+  http.post("/api/v1/settings/email/secret", ({ request }) => {
+    const secret = `pje_${crypto.randomUUID().replaceAll("-", "")}`;
+    const wasMissingSecret = !emailSettings.has_secret;
+    emailSettings = {
+      ...emailSettings,
+      enabled: wasMissingSecret ? true : emailSettings.enabled,
+      source: "database",
+      has_secret: true,
+      secret_source: "database",
+      secret_prefix: secret.slice(0, 12),
+    };
+    return HttpResponse.json({
+      settings: {
+        ...emailSettings,
+        endpoint_url: new URL("/api/v1/ingest/email", request.url).toString(),
+      },
+      secret,
+    }, { status: 201 });
+  }),
+  http.delete("/api/v1/settings/email/secret", ({ request }) => {
+    emailSettings = {
+      ...emailSettings,
+      enabled: false,
+      has_secret: false,
+      secret_source: "none",
+      secret_prefix: null,
+    };
+    return HttpResponse.json({
+      ...emailSettings,
+      endpoint_url: new URL("/api/v1/ingest/email", request.url).toString(),
+    });
   }),
   http.get("/api/v1/tokens", () => HttpResponse.json(tokens)),
   http.post("/api/v1/tokens", async ({ request }) => {

@@ -15,7 +15,7 @@ const KEY = "paperjam-query-cache";
 export const PERSIST_THROTTLE_MS = 1000;
 
 /** Queries that never leave memory: credentials' metadata and the administrators' lists. */
-const MEMORY_ONLY = new Set(["tokens", "users", "passkeys"]);
+const MEMORY_ONLY = new Set(["tokens", "users", "passkeys", "email-settings"]);
 
 export const shouldPersist = (query: Query): boolean =>
   query.state.status === "success" && !MEMORY_ONLY.has(String(query.queryKey[0]));

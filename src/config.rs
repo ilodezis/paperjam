@@ -329,7 +329,7 @@ fn inbox_settings(
     ))
 }
 
-const MAX_EMAIL_TAG_CHARS: usize = 64;
+pub(crate) const MAX_EMAIL_TAG_CHARS: usize = 64;
 
 /// Who may submit documents over the inbound email webhook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +339,12 @@ pub enum SenderRule {
 }
 
 impl SenderRule {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SenderRule::Exact(s) | SenderRule::Domain(s) => s,
+        }
+    }
+
     pub fn matches(&self, addr: &str) -> bool {
         let norm = addr.trim().to_ascii_lowercase();
         match self {
@@ -369,7 +375,7 @@ fn valid_domain_part(domain: &str) -> bool {
         && !domain.ends_with('.')
 }
 
-fn parse_sender_rule(entry: &str) -> Result<SenderRule, ConfigError> {
+pub(crate) fn parse_sender_rule(entry: &str) -> Result<SenderRule, ConfigError> {
     const VAR: &str = "PAPERJAM_EMAIL_ALLOWED_SENDERS";
     let item = entry.trim().to_ascii_lowercase();
     if item.is_empty() || item.chars().any(char::is_whitespace) {

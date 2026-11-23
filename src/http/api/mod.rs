@@ -134,5 +134,7 @@ pub fn router(upload_limit: usize) -> OpenApiRouter<HttpState> {
         .routes(routes!(passkeys::challenge))
         .routes(routes!(passkeys::revoke))
         .routes(routes!(stats::get))
+        .routes(routes!(email::get_settings, email::patch_settings))
+        .routes(routes!(email::rotate_secret, email::revoke_secret))
         .routes(routes!(openapi::document))
 }

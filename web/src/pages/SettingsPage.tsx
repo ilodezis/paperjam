@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { ApiError, api, type Connection, type ManagedUser, type TokenView } from "../api";
 import { DocumentTypesSettings } from "../components/DocumentTypesSettings";
 import { CalendarFeedSection } from "../components/CalendarFeedSection";
+import { EmailIntakeSection } from "../components/EmailIntakeSection";
 import { PasskeysSection } from "../components/PasskeysSection";
 import { useConfirm } from "../components/controls/ConfirmDialog";
 import { SegmentedControl } from "../components/controls/SegmentedControl";
@@ -179,7 +180,7 @@ function ArchiveSettings() {
   );
 }
 
-/** Who and what can get in: users (administrators only), password, API tokens, the calendar link, connected apps, passkeys. */
+/** Who and what can get in: users (administrators only), password, API tokens, the calendar link, email intake (administrators only), connected apps, passkeys. */
 function AccessSettings({ admin, confirm, onError }: { admin: boolean; confirm: Confirm; onError: ReportError }) {
   return (
     <>
@@ -187,6 +188,7 @@ function AccessSettings({ admin, confirm, onError }: { admin: boolean; confirm: 
       <PasswordSection onError={onError} />
       <TokensSection confirm={confirm} onError={onError} />
       <CalendarFeedSection confirm={confirm} onError={onError} />
+      {admin ? <EmailIntakeSection confirm={confirm} onError={onError} /> : null}
       <ConnectionsSection confirm={confirm} onError={onError} />
       <PasskeysSection />
     </>

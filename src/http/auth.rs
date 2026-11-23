@@ -54,6 +54,13 @@ impl Principal {
         }
     }
 
+    /// Requires an administrator acting through a signed-in web session (or CLI).
+    pub fn require_admin_session(&self) -> Result<(), ServiceError> {
+        self.require_admin()?;
+        self.actor.require_session_or_cli()?;
+        Ok(())
+    }
+
     /// Purging is a web-UI action: agents and tokens never get it.
     pub fn require_session(&self) -> Result<(), ServiceError> {
         if self.actor.via == Via::Web {

@@ -586,3 +586,605 @@ async fn oversize_email_body_is_rejected_with_413() {
         "file_too_large"
     );
 }
+
+#[tokio::test]
+async fn settings_lifecycle_generate_ingest_rotate_patch_revoke() {
+    let env = TestEnv::new();
+    add_user(&env, "alice", true);
+    add_user(&env, "bob", false);
+    add_user(&env, "carol", false);
+    let out = env.run(&["user", "disable", "carol"]);
+    assert!(out.status.success(), "disable carol: {}", stderr(&out));
+
+    let server = env.serve();
+    let alice = login(&server, "alice").await;
+    let bob = login(&server, "bob").await;
+
+    let users: Vec<Value> = alice
+        .get(server.url("/api/v1/users"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let alice_id = users.iter().find(|u| u["username"] == "alice").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bob_id = users.iter().find(|u| u["username"] == "bob").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let carol_id = users.iter().find(|u| u["username"] == "carol").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 1. Default unconfigured state.
+    let initial: Value = alice
+        .get(server.url("/api/v1/settings/email"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(initial["enabled"], false);
+    assert_eq!(initial["source"], "none");
+    assert_eq!(initial["has_secret"], false);
+    assert_eq!(initial["secret_source"], "none");
+    assert!(initial["secret_prefix"].is_null());
+    assert!(
+        initial["endpoint_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/api/v1/ingest/email")
+    );
+    assert_eq!(initial["allowed_senders"], json!([]));
+    assert_eq!(initial["body_fallback"], true);
+    assert_eq!(initial["local_only"], false);
+    assert!(initial["tag"].is_null());
+    assert_eq!(initial["received_count"], 0);
+
+    // Enabling without any secret returns 422 email_secret_required.
+    let enable_no_secret = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"enabled": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(enable_no_secret.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        enable_no_secret.json::<Value>().await.unwrap()["code"],
+        "email_secret_required"
+    );
+
+    // 2. Generate DB secret via POST /settings/email/secret.
+    let gen_resp = alice
+        .post(server.url("/api/v1/settings/email/secret"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gen_resp.status(), StatusCode::CREATED);
+    let created: Value = gen_resp.json().await.unwrap();
+    let secret1 = created["secret"].as_str().unwrap().to_string();
+    assert!(secret1.starts_with("pje_"), "{secret1}");
+    assert_eq!(secret1.len(), 44);
+    assert_eq!(created["settings"]["enabled"], true);
+    assert_eq!(created["settings"]["source"], "database");
+    assert_eq!(created["settings"]["has_secret"], true);
+    assert_eq!(created["settings"]["secret_source"], "database");
+    assert_eq!(created["settings"]["secret_prefix"], &secret1[..12]);
+
+    // Subsequent GET does not reveal the secret.
+    let after_gen_resp = alice
+        .get(server.url("/api/v1/settings/email"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after_gen_resp.status(), StatusCode::OK);
+    let after_gen_text = after_gen_resp.text().await.unwrap();
+    assert!(!after_gen_text.contains(&secret1));
+    let after_gen: Value = serde_json::from_str(&after_gen_text).unwrap();
+    assert!(after_gen.get("secret").is_none());
+    assert_eq!(after_gen["secret_prefix"], &secret1[..12]);
+
+    // 3. Multi-user requires selecting a user; once set, ingest succeeds and updates counters.
+    let http = Client::new();
+    let missing_target = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret1)
+        .body(sample_mixed_email("alice@example.org", "db-no-user"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_target.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        missing_target.json::<Value>().await.unwrap()["code"],
+        "email_user_unconfigured"
+    );
+
+    let set_alice = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"user_id": alice_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set_alice.status(), StatusCode::OK);
+
+    let ingest1 = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret1)
+        .body(sample_mixed_email("alice@example.org", "db-1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ingest1.status(), StatusCode::OK);
+
+    let stats_view: Value = alice
+        .get(server.url("/api/v1/settings/email"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stats_view["received_count"], 1);
+    assert!(stats_view["last_received_at"].is_string());
+
+    // 4. Validation errors on PATCH /settings/email.
+    let bad_sender = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"allowed_senders": ["not-a-valid-rule"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_sender.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        bad_sender.json::<Value>().await.unwrap()["code"],
+        "invalid_sender_rule"
+    );
+
+    let bad_tag = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"tag": "x".repeat(65)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_tag.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        bad_tag.json::<Value>().await.unwrap()["code"],
+        "invalid_tag"
+    );
+
+    let missing_user = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"user_id": "0190d3a0-0000-7000-8000-000000000000"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_user.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        missing_user.json::<Value>().await.unwrap()["code"],
+        "user_not_found"
+    );
+
+    let disabled_user = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"user_id": carol_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disabled_user.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        disabled_user.json::<Value>().await.unwrap()["code"],
+        "invalid_email_user"
+    );
+
+    // 5. Live update via PATCH /settings/email takes effect immediately without restart.
+    let patched: Value = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({
+            "allowed_senders": ["Trusted@Example.com", "@partner.example"],
+            "tag": "  mail-in  ",
+            "body_fallback": false,
+            "local_only": true,
+            "user_id": bob_id,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        patched["allowed_senders"],
+        json!(["trusted@example.com", "@partner.example"])
+    );
+    assert_eq!(patched["tag"], "mail-in");
+    assert_eq!(patched["body_fallback"], false);
+    assert_eq!(patched["local_only"], true);
+    assert_eq!(patched["user_id"], bob_id);
+
+    // Disallowed sender rejected at once.
+    let blocked = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret1)
+        .body(sample_mixed_email("stranger@other.example", "db-blocked"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        blocked.json::<Value>().await.unwrap()["code"],
+        "sender_not_allowed"
+    );
+
+    // Body fallback disabled takes effect at once.
+    let no_body_doc: Value = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret1)
+        .body(html_receipt_email(
+            "trusted@example.com",
+            "Receipt",
+            "Should be ignored when body_fallback is false",
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(no_body_doc["used_body_fallback"], false);
+    assert!(no_body_doc["documents"].as_array().unwrap().is_empty());
+
+    // Allowed domain sender ingests attributed to Bob, local_only=true, tag="mail-in".
+    let allowed_ingest: Value = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret1)
+        .body(sample_mixed_email("billing@partner.example", "db-bob"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let doc_id = allowed_ingest["documents"][0]["id"].as_str().unwrap();
+    let doc: Value = bob
+        .get(server.url(&format!("/api/v1/documents/{doc_id}")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(doc["added_by"], bob_id);
+    assert_eq!(doc["local_only"], true);
+    assert_eq!(doc["tags"][0]["name"], "mail-in");
+
+    // 6. Rotate secret: old secret fails 401, new secret succeeds, settings preserved.
+    let rotated_resp = alice
+        .post(server.url("/api/v1/settings/email/secret"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rotated_resp.status(), StatusCode::CREATED);
+    let rotated: Value = rotated_resp.json().await.unwrap();
+    let secret2 = rotated["secret"].as_str().unwrap().to_string();
+    assert_ne!(secret1, secret2);
+    assert!(secret2.starts_with("pje_"));
+    assert_eq!(
+        rotated["settings"]["allowed_senders"],
+        json!(["trusted@example.com", "@partner.example"])
+    );
+    assert_eq!(rotated["settings"]["tag"], "mail-in");
+    assert_eq!(rotated["settings"]["local_only"], true);
+    assert_eq!(rotated["settings"]["secret_prefix"], &secret2[..12]);
+
+    let old_secret_resp = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret1)
+        .body(sample_mixed_email("trusted@example.com", "db-old-sec"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old_secret_resp.status(), StatusCode::UNAUTHORIZED);
+
+    let new_secret_resp = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret2)
+        .body(sample_mixed_email("trusted@example.com", "db-new-sec"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(new_secret_resp.status(), StatusCode::OK);
+
+    // Clearing tag and user_id via null / empty string works.
+    let cleared: Value = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"tag": null, "user_id": ""}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(cleared["tag"].is_null());
+    assert!(cleared["user_id"].is_null());
+
+    // 7. Revoke secret disables intake and re-enabling without secret fails 422.
+    let revoked: Value = alice
+        .delete(server.url("/api/v1/settings/email/secret"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(revoked["enabled"], false);
+    assert_eq!(revoked["has_secret"], false);
+    assert_eq!(revoked["secret_source"], "none");
+    assert!(revoked["secret_prefix"].is_null());
+
+    let after_revoke = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(&secret2)
+        .body(sample_mixed_email("trusted@example.com", "db-revoked"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after_revoke.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        after_revoke.json::<Value>().await.unwrap()["code"],
+        "email_not_configured"
+    );
+
+    let reenable_no_secret = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"enabled": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        reenable_no_secret.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        reenable_no_secret.json::<Value>().await.unwrap()["code"],
+        "email_secret_required"
+    );
+}
+
+#[tokio::test]
+async fn env_config_can_be_overridden_and_revoked_from_db() {
+    let env = TestEnv::new();
+    add_user(&env, "alice", true);
+    add_user(&env, "bob", false);
+
+    let vars = [
+        ("PAPERJAM_EMAIL_SECRET", EMAIL_SECRET),
+        ("PAPERJAM_EMAIL_USER", "bob"),
+        ("PAPERJAM_EMAIL_TAG", "env-tag"),
+    ];
+    let server = env.serve_with(&vars);
+    let alice = login(&server, "alice").await;
+    let users: Vec<Value> = alice
+        .get(server.url("/api/v1/users"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bob_id = users.iter().find(|u| u["username"] == "bob").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let view: Value = alice
+        .get(server.url("/api/v1/settings/email"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(view["enabled"], true);
+    assert_eq!(view["source"], "env");
+    assert_eq!(view["has_secret"], true);
+    assert_eq!(view["secret_source"], "env");
+    assert_eq!(view["user_id"], bob_id);
+    assert_eq!(view["tag"], "env-tag");
+
+    // Patching non-secret settings seeds DB row while keeping env secret active.
+    let patched: Value = alice
+        .patch(server.url("/api/v1/settings/email"))
+        .json(&json!({"local_only": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(patched["source"], "database");
+    assert_eq!(patched["secret_source"], "env");
+    assert_eq!(patched["local_only"], true);
+    assert_eq!(patched["user_id"], bob_id);
+    assert_eq!(patched["tag"], "env-tag");
+
+    let http = Client::new();
+    let ok = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(EMAIL_SECRET)
+        .body(sample_mixed_email("alice@example.org", "env-patched"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    // Revoking disables intake even though PAPERJAM_EMAIL_SECRET is set in env.
+    let revoked = alice
+        .delete(server.url("/api/v1/settings/email/secret"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+    let revoked_view: Value = revoked.json().await.unwrap();
+    assert_eq!(revoked_view["enabled"], false);
+    assert_eq!(revoked_view["has_secret"], false);
+
+    let blocked = http
+        .post(server.url("/api/v1/ingest/email"))
+        .bearer_auth(EMAIL_SECRET)
+        .body(sample_mixed_email("alice@example.org", "env-revoked"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        blocked.json::<Value>().await.unwrap()["code"],
+        "email_not_configured"
+    );
+
+    // Remains disabled across server restart even with the env var still present.
+    drop(server);
+    let server2 = env.serve_with(&vars);
+    let blocked_after_restart = http
+        .post(server2.url("/api/v1/ingest/email"))
+        .bearer_auth(EMAIL_SECRET)
+        .body(sample_mixed_email("alice@example.org", "env-restarted"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked_after_restart.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn email_settings_endpoints_enforce_admin_and_session_gates() {
+    let env = TestEnv::new();
+    add_user(&env, "alice", true);
+    add_user(&env, "bob", false);
+    let out = env.run(&["token", "create", "--user", "alice", "admin-tok"]);
+    assert!(out.status.success(), "alice token: {}", stderr(&out));
+    let alice_token = stdout(&out).trim().to_string();
+    let out = env.run(&["token", "create", "--user", "bob", "bob-tok"]);
+    assert!(out.status.success(), "bob token: {}", stderr(&out));
+    let bob_token = stdout(&out).trim().to_string();
+
+    let server = env.serve();
+    let bob_session = login(&server, "bob").await;
+    let anon = Client::new();
+
+    // Unauthenticated callers get 401 on every settings endpoint.
+    for resp in [
+        anon.get(server.url("/api/v1/settings/email"))
+            .send()
+            .await
+            .unwrap(),
+        anon.patch(server.url("/api/v1/settings/email"))
+            .json(&json!({"local_only": true}))
+            .send()
+            .await
+            .unwrap(),
+        anon.post(server.url("/api/v1/settings/email/secret"))
+            .send()
+            .await
+            .unwrap(),
+        anon.delete(server.url("/api/v1/settings/email/secret"))
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // Non-admin user (both web session and bearer token) gets 403 admin_required.
+    for resp in [
+        bob_session
+            .get(server.url("/api/v1/settings/email"))
+            .send()
+            .await
+            .unwrap(),
+        bob_session
+            .patch(server.url("/api/v1/settings/email"))
+            .json(&json!({"local_only": true}))
+            .send()
+            .await
+            .unwrap(),
+        bob_session
+            .post(server.url("/api/v1/settings/email/secret"))
+            .send()
+            .await
+            .unwrap(),
+        bob_session
+            .delete(server.url("/api/v1/settings/email/secret"))
+            .send()
+            .await
+            .unwrap(),
+        anon.get(server.url("/api/v1/settings/email"))
+            .bearer_auth(&bob_token)
+            .send()
+            .await
+            .unwrap(),
+        anon.patch(server.url("/api/v1/settings/email"))
+            .bearer_auth(&bob_token)
+            .json(&json!({"local_only": true}))
+            .send()
+            .await
+            .unwrap(),
+        anon.post(server.url("/api/v1/settings/email/secret"))
+            .bearer_auth(&bob_token)
+            .send()
+            .await
+            .unwrap(),
+        anon.delete(server.url("/api/v1/settings/email/secret"))
+            .bearer_auth(&bob_token)
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.json::<Value>().await.unwrap()["code"],
+            "admin_required"
+        );
+    }
+
+    // Admin API Bearer token gets 200 on GET and 403 session_required on writes.
+    let token_get = anon
+        .get(server.url("/api/v1/settings/email"))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(token_get.status(), StatusCode::OK);
+
+    for resp in [
+        anon.patch(server.url("/api/v1/settings/email"))
+            .bearer_auth(&alice_token)
+            .json(&json!({"local_only": true}))
+            .send()
+            .await
+            .unwrap(),
+        anon.post(server.url("/api/v1/settings/email/secret"))
+            .bearer_auth(&alice_token)
+            .send()
+            .await
+            .unwrap(),
+        anon.delete(server.url("/api/v1/settings/email/secret"))
+            .bearer_auth(&alice_token)
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.json::<Value>().await.unwrap()["code"],
+            "session_required"
+        );
+    }
+}

@@ -3,6 +3,7 @@
 pub mod alloc;
 pub mod cli;
 pub mod config;
+pub mod crypto;
 pub mod db;
 pub mod email;
 pub mod error;
