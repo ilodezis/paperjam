@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Ban, Check, ChevronRight, Copy, KeyRound, Lock, Monitor, Moon, Plus, RotateCcw, SlidersHorizontal, Sun, Trash2, Unplug, UserPlus } from "lucide-react";
+import { Archive, Ban, Check, ChevronRight, Copy, KeyRound, Lock, Monitor, Moon, Pencil, Plus, RotateCcw, SlidersHorizontal, Sun, Trash2, Unplug, UserPlus } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -208,6 +208,9 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
   const [admin, setAdmin] = useState(false);
   const [resetTarget, setResetTarget] = useState<ManagedUser | null>(null);
   const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [editTarget, setEditTarget] = useState<ManagedUser | null>(null);
+  const [editDisplayName, setEditDisplayName] = useState("");
+  const [editAdmin, setEditAdmin] = useState(false);
   const opener = useRef<HTMLButtonElement>(null);
   useRestoreFocus(open, opener);
 
@@ -221,6 +224,27 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
 
   function closeReset() {
     setResetTarget(null);
+    setResetPasswordValue("");
+  }
+
+  function closeEdit() {
+    setEditTarget(null);
+    setEditDisplayName("");
+    setEditAdmin(false);
+  }
+
+  function startEdit(user: ManagedUser) {
+    close();
+    closeReset();
+    setEditTarget(user);
+    setEditDisplayName(user.display_name);
+    setEditAdmin(user.is_admin);
+  }
+
+  function startReset(user: ManagedUser) {
+    close();
+    closeEdit();
+    setResetTarget(user);
     setResetPasswordValue("");
   }
 
@@ -280,6 +304,7 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
     try {
       await api.deleteUser(user.id);
       if (resetTarget?.id === user.id) closeReset();
+      if (editTarget?.id === user.id) closeEdit();
       await queryClient.invalidateQueries({ queryKey: ["users"] });
       toast(t("settings.userDeletedToast"), { icon: "check" });
     } catch (cause) {
@@ -305,11 +330,28 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
     }
   }
 
+  async function submitEditUser(event: FormEvent) {
+    event.preventDefault();
+    if (!editTarget) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.updateUser(editTarget.id, { display_name: editDisplayName.trim(), is_admin: editAdmin });
+      await queryClient.invalidateQueries({ queryKey: ["users"] });
+      closeEdit();
+      toast(t("settings.userUpdatedToast"), { icon: "check" });
+    } catch (cause) {
+      onError(errorCode(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="settings-section" aria-labelledby="settings-users">
       <div className="settings-section-heading">
         <div><h2 id="settings-users">{t("settings.users")}</h2></div>
-        {open ? null : <button ref={opener} type="button" className="button button--secondary" aria-expanded="false" aria-controls="settings-user-form" onClick={() => setOpen(true)}><UserPlus aria-hidden="true" />{t("settings.addUser")}</button>}
+        {open ? null : <button ref={opener} type="button" className="button button--secondary" aria-expanded="false" aria-controls="settings-user-form" onClick={() => { closeReset(); closeEdit(); setOpen(true); }}><UserPlus aria-hidden="true" />{t("settings.addUser")}</button>}
       </div>
       {open ? (
         <form id="settings-user-form" className="settings-create-form" onSubmit={createUser}>
@@ -323,6 +365,38 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
             <div className="settings-form-actions">
               <button type="button" className="button button--secondary" onClick={close}>{t("common.cancel")}</button>
               <button type="submit" className="button button--primary" disabled={busy}><Plus aria-hidden="true" />{t("settings.createUser")}</button>
+            </div>
+          </div>
+        </form>
+      ) : null}
+      {editTarget ? (
+        <form id="settings-edit-user-form" className="settings-create-form settings-inline-panel" onSubmit={submitEditUser}>
+          <div className="settings-form-grid">
+            <label className="field-label">
+              <span>{t("settings.displayName")}</span>
+              <input
+                required
+                autoFocus
+                maxLength={100}
+                value={editDisplayName}
+                onChange={(event) => setEditDisplayName(event.target.value)}
+                aria-label={t("settings.editDisplayNameFor", { name: editTarget.display_name })}
+              />
+            </label>
+          </div>
+          <div className="settings-form-footer">
+            <label className="required-control">
+              <input
+                type="checkbox"
+                checked={editAdmin}
+                onChange={(event) => setEditAdmin(event.target.checked)}
+                aria-label={t("settings.editAdminFor", { name: editTarget.display_name })}
+              />
+              <span>{t("settings.makeAdmin")}</span>
+            </label>
+            <div className="settings-form-actions">
+              <button type="button" className="button button--secondary" onClick={closeEdit}>{t("common.cancel")}</button>
+              <button type="submit" className="button button--primary" disabled={busy || !editDisplayName.trim()}>{t("settings.saveUser")}</button>
             </div>
           </div>
         </form>
@@ -361,7 +435,8 @@ function UsersSection({ confirm, onError }: { confirm: Confirm; onError: ReportE
                 <span className={user.is_admin ? "settings-badge" : "settings-badge settings-badge--plain"}>{user.is_admin ? t("settings.administrator") : t("settings.member")}</span>
                 {isSelf ? null : (
                   <>
-                    <button type="button" className="quiet-button" disabled={busy} onClick={() => { setResetTarget(user); setResetPasswordValue(""); }} aria-label={t("settings.resetPasswordFor", { name: user.display_name })}><KeyRound aria-hidden="true" />{t("settings.resetPassword")}</button>
+                    <button type="button" className="quiet-button" disabled={busy} onClick={() => startEdit(user)} aria-label={t("settings.editUserFor", { name: user.display_name })}><Pencil aria-hidden="true" />{t("settings.editUser")}</button>
+                    <button type="button" className="quiet-button" disabled={busy} onClick={() => startReset(user)} aria-label={t("settings.resetPasswordFor", { name: user.display_name })}><KeyRound aria-hidden="true" />{t("settings.resetPassword")}</button>
                     <button type="button" className="quiet-button" disabled={busy} onClick={() => void toggleDisabled(user)} aria-label={t(disabled ? "settings.enableUserFor" : "settings.disableUserFor", { name: user.display_name })}>{disabled ? <RotateCcw aria-hidden="true" /> : <Ban aria-hidden="true" />}{t(disabled ? "settings.enableUser" : "settings.disableUser")}</button>
                     <button type="button" className="quiet-button settings-action-danger" disabled={busy} onClick={() => void removeUser(user)} aria-label={t("settings.deleteUserFor", { name: user.display_name })}><Trash2 aria-hidden="true" />{t("settings.deleteUser")}</button>
                   </>

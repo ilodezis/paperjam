@@ -341,6 +341,41 @@ describe("SettingsPage", () => {
     expect(panel("archive").textContent).toContain("Unsaved changes");
   });
 
+  it("lets an administrator choose a format check on identifier fields and clears it when the kind changes", async () => {
+    await render(<SettingsPage />, () => expect(tab("Archive")).not.toBeNull());
+    await click(tab("Archive"));
+    await eventually(() => expect(byLabel("Customize fields for Passport")).not.toBeNull());
+    await click(byLabel("Customize fields for Passport")!);
+
+    // Validator is visible directly on identifier fields without turning on expert mode.
+    expect(byLabel("Field key 1")).toBeNull();
+    const validatorTrigger = byLabel("Field format check 1")!;
+    expect(validatorTrigger).not.toBeNull();
+    expect(validatorTrigger.querySelector(".select-dropdown-value")?.textContent).toBe("None");
+
+    await click(validatorTrigger);
+    await click(Array.from(container?.querySelectorAll<HTMLElement>('[role="option"]') ?? []).find((node) => node.textContent === "IBAN (bank account)")!);
+    expect(byLabel<HTMLButtonElement>("Save Passport")?.disabled).toBe(false);
+    await click(byLabel("Save Passport")!);
+
+    await eventually(async () => {
+      const passport = (await api.taxonomy()).types.find((type) => type.id === "type-passport");
+      expect(passport?.fields[0]).toMatchObject({ key: "number", kind: "identifier", validator: "iban" });
+    });
+
+    // Changing the field kind away from identifier removes the validator control and clears it on save.
+    await click(byLabel("Expert mode")!);
+    await click(byLabel("Field kind 1")!);
+    await click(Array.from(container?.querySelectorAll<HTMLElement>('[role="option"]') ?? []).find((node) => node.textContent === "Text")!);
+    expect(byLabel("Field format check 1")).toBeNull();
+    await click(byLabel("Save Passport")!);
+
+    await eventually(async () => {
+      const passport = (await api.taxonomy()).types.find((type) => type.id === "type-passport");
+      expect(passport?.fields[0]).toMatchObject({ key: "number", kind: "text", validator: null });
+    });
+  });
+
   it("keeps the user form closed until its button is pressed, then creates a user", async () => {
     await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
     await click(tab("Access"));
@@ -377,6 +412,49 @@ describe("SettingsPage", () => {
 
     await click(byLabel("Delete Sam Example")!);
     await eventually(() => expect(panel("access").textContent).not.toContain("Sam Example"));
+  });
+
+  it("edits another user's display name and administrator privileges inline", async () => {
+    await render(<SettingsPage />, () => expect(tab("Access")).not.toBeNull());
+    await click(tab("Access"));
+    await eventually(() => expect(panel("access").textContent).toContain("Demo user"));
+    expect(byLabel("Edit Demo user")).toBeNull();
+
+    await click(button("Add a user"));
+    await change(byLabel("New username")!, "pat");
+    await change(byLabel("New display name")!, "Pat Sample");
+    await change(byLabel("New password")!, "correct horse");
+    await click(button("Create user"));
+    await eventually(() => expect(panel("access").textContent).toContain("Pat Sample"));
+
+    await click(byLabel("Edit Pat Sample")!);
+    const form = panel("access").querySelector("#settings-edit-user-form");
+    expect(form).not.toBeNull();
+    const nameInput = byLabel<HTMLInputElement>("Display name for Pat Sample")!;
+    const adminBox = byLabel<HTMLInputElement>("Administrator access for Pat Sample")!;
+    expect(nameInput.value).toBe("Pat Sample");
+    expect(adminBox.checked).toBe(false);
+
+    // Opening password reset closes the edit form, and re-opening edit closes password reset.
+    await click(byLabel("Reset password for Pat Sample")!);
+    expect(panel("access").querySelector("#settings-edit-user-form")).toBeNull();
+    expect(panel("access").querySelector("#settings-reset-password-form")).not.toBeNull();
+    await click(byLabel("Edit Pat Sample")!);
+    expect(panel("access").querySelector("#settings-reset-password-form")).toBeNull();
+    expect(panel("access").querySelector("#settings-edit-user-form")).not.toBeNull();
+
+    await change(byLabel("Display name for Pat Sample")!, "Pat Admin");
+    await click(byLabel("Administrator access for Pat Sample")!);
+    await click(button("Save user"));
+
+    await eventually(() => expect(panel("access").querySelector("#settings-edit-user-form")).toBeNull());
+    expect(panel("access").textContent).toContain("Pat Admin");
+    const updated = (await api.users()).find((user) => user.username === "pat");
+    expect(updated).toMatchObject({ display_name: "Pat Admin", is_admin: true });
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await click(byLabel("Delete Pat Admin")!);
+    await eventually(() => expect(panel("access").textContent).not.toContain("Pat Admin"));
   });
 
   it("lets any signed-in user change their own password", async () => {

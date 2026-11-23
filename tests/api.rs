@@ -899,6 +899,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("post", "/upload-links"),
     ("get", "/documents/{id}/pages/{file}"),
     ("get", "/documents/{id}/thumbnail.webp"),
+    ("get", "/documents/{id}/events"),
     ("post", "/documents/{id}/reprocess"),
     ("post", "/documents/{id}/trash"),
     ("post", "/documents/{id}/restore"),
@@ -1511,4 +1512,83 @@ async fn an_http_public_url_gets_cookies_that_work_without_tls() {
     let cookie = ok.headers()["set-cookie"].to_str().unwrap().to_string();
     assert!(cookie.starts_with("pj_session="), "{cookie}");
     assert!(!cookie.contains("Secure"), "{cookie}");
+}
+
+#[tokio::test]
+async fn document_events_endpoint_returns_newest_first_history() {
+    let (_env, server) = start();
+    let missing_id = "0190d3a0-0000-7000-8000-000000000000";
+
+    let anon = Client::new()
+        .get(server.url(&format!("/api/v1/documents/{missing_id}/events")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let client = browser();
+    login(&server, &client).await;
+
+    let missing = client
+        .get(server.url(&format!("/api/v1/documents/{missing_id}/events")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing_body: Value = missing.json().await.unwrap();
+    assert_eq!(missing_body["code"], "document_not_found");
+
+    let created = upload_fixture(&server, &client, "contract_ru_digital.pdf", "lease.pdf").await;
+    let id = created["id"].as_str().unwrap();
+    wait_until_ready(&server, &client, id).await;
+
+    let patched = client
+        .patch(server.url(&format!("/api/v1/documents/{id}")))
+        .json(&json!({"title": "Updated lease"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+
+    let resp = client
+        .get(server.url(&format!("/api/v1/documents/{id}/events")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let events: Vec<Value> = resp.json().await.unwrap();
+    assert!(events.len() >= 2, "{events:?}");
+    assert!(
+        events
+            .windows(2)
+            .all(|w| w[0]["id"].as_i64().unwrap() > w[1]["id"].as_i64().unwrap()),
+        "expected newest-first ordering: {events:?}"
+    );
+
+    let update_idx = events
+        .iter()
+        .position(|e| e["action"] == "document.update")
+        .expect("document.update event present");
+    let upload_idx = events
+        .iter()
+        .position(|e| e["action"] == "document.upload")
+        .expect("document.upload event present");
+    assert!(
+        update_idx < upload_idx,
+        "events not newest first: {events:?}"
+    );
+    assert_eq!(events[update_idx]["via"], "web");
+    assert_eq!(events[update_idx]["actor_name"], "alice");
+    assert_eq!(events[upload_idx]["via"], "web");
+    assert_eq!(events[upload_idx]["actor_name"], "alice");
+
+    let limited = client
+        .get(server.url(&format!("/api/v1/documents/{id}/events?limit=1")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::OK);
+    let limited_events: Vec<Value> = limited.json().await.unwrap();
+    assert_eq!(limited_events.len(), 1);
+    assert_eq!(limited_events[0]["id"], events[0]["id"]);
 }

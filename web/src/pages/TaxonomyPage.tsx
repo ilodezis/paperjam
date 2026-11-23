@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useBlocker } from "@tanstack/react-router";
-import { ArrowLeft, Building2, ChevronRight, FileText, LoaderCircle, Plus, Tags, Trash2, UsersRound, X } from "lucide-react";
+import { ArrowLeft, Building2, ChevronRight, FileText, LoaderCircle, Plus, RefreshCw, Tags, Trash2, UsersRound, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -177,6 +177,28 @@ function NamedEditor({ kind, item, allItems, busy, onRun, onDirtyChange }: {
           </form>
         </div>
       </section>
+
+      {kind === "people" ? (
+        <section className="taxonomy-secondary taxonomy-relink" aria-labelledby={`relink-title-${item.id}`}>
+          <h3 id={`relink-title-${item.id}`} className="taxonomy-secondary-title">{t("taxonomy.relinkTitle")}</h3>
+          <div className="taxonomy-secondary-body">
+            <p className="taxonomy-relink-hint">{t("taxonomy.relinkHint")}</p>
+            <button
+              type="button"
+              className="button button--secondary"
+              disabled={busy}
+              onClick={() => void onRun(async () => {
+                await api.relinkPerson(item.id);
+                toast(t("taxonomy.relinkQueuedToast"), { icon: "check" });
+                return item.id;
+              })}
+              aria-label={t("taxonomy.relinkFor", { name: item.name })}
+            >
+              <RefreshCw aria-hidden="true" />{t("taxonomy.relinkAction")}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {duplicates.length > 0 ? (
         <section className="taxonomy-secondary taxonomy-merge" aria-labelledby={`merge-title-${item.id}`}>

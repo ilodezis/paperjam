@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 
-import type { Connection, DocumentOrganization, DocumentPatch, DocumentView, ManagedUser, PasskeyView, Share, ShareTtl, TokenView } from "../api";
+import type { Connection, DocumentEvent, DocumentOrganization, DocumentPatch, DocumentView, ManagedUser, PasskeyView, Share, ShareTtl, TokenView } from "../api";
 import { attentionDocuments, documentTags, documentViews, expiringDocuments, hits, mockUser, taxonomy } from "./data";
 
 let signedIn = true;
@@ -121,6 +121,11 @@ export const handlers = [
     target.aliases = [...new Set([...target.aliases, ...source.aliases, source.name])];
     target.document_count += source.document_count;
     return HttpResponse.json(target);
+  }),
+  http.post("/api/v1/people/:id/relink", ({ params }) => {
+    const person = taxonomy.people.find((item) => item.id === params.id);
+    if (!person) return HttpResponse.json({ code: "not_found", message: "Person not found" }, { status: 404 });
+    return HttpResponse.json(person, { status: 202 });
   }),
   http.delete("/api/v1/people/:id", ({ params }) => {
     const index = taxonomy.people.findIndex((item) => item.id === params.id);
@@ -283,6 +288,24 @@ export const handlers = [
       text: textPage === 2 ? "Second synthetic passport page.\nEmergency contact and renewal notes.\nNo real personal data." : document.text.text,
     } : null;
     return HttpResponse.json({ ...document, text });
+  }),
+  http.get("/api/v1/documents/:id/events", ({ params }) => {
+    const id = String(params.id);
+    const document = documentViews[id];
+    if (!document) return HttpResponse.json({ code: "not_found", message: "Document not found" }, { status: 404 });
+    const events: DocumentEvent[] = [
+      { id: 3, action: "document.update", via: "web", at: document.updated_at, actor_name: mockUser.display_name, diff: { title: document.title } },
+      { id: 2, action: "document.process", via: "system", at: document.created_at, actor_name: null, diff: {} },
+      {
+        id: 1,
+        action: "document.upload",
+        via: id === "doc-receipt" ? "email" : "web",
+        at: document.created_at,
+        actor_name: id === "doc-receipt" ? null : mockUser.display_name,
+        diff: {},
+      },
+    ];
+    return HttpResponse.json(events);
   }),
   http.patch("/api/v1/documents/:id", async ({ params, request }) => {
     const id = String(params.id);
@@ -479,7 +502,11 @@ export const handlers = [
       user.disabled_at = body.disabled ? new Date().toISOString() : null;
     }
     if (body.is_admin !== undefined) user.is_admin = body.is_admin;
-    if (body.display_name !== undefined) user.display_name = body.display_name;
+    if (body.display_name !== undefined) {
+      const trimmed = body.display_name.trim();
+      if (!trimmed) return HttpResponse.json({ code: "invalid_display_name", message: "Display name cannot be empty" }, { status: 422 });
+      user.display_name = trimmed;
+    }
     return HttpResponse.json(user);
   }),
   http.delete("/api/v1/users/:id", ({ params }) => {

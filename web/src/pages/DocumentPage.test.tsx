@@ -852,3 +852,39 @@ describe("DocumentPage due date", () => {
     expect(container?.querySelector(".due-date")?.classList.contains("due-date--soon")).toBe(false);
   });
 });
+
+describe("DocumentPage source and history", () => {
+  it("shows how a web-uploaded document entered the archive and lists its event history on demand", async () => {
+    await render("doc-rental", () => expect(container?.querySelector(".document-source-line")).not.toBeNull());
+
+    expect(container?.querySelector(".document-source-line")?.textContent).toContain("Added via web interface");
+    const history = container?.querySelector<HTMLDetailsElement>(".document-history");
+    expect(history).not.toBeNull();
+    expect(history?.open).toBe(false);
+    expect(history?.textContent).toContain("History");
+    expect(history?.textContent).toContain("3 events");
+
+    await click(history!.querySelector("summary")!);
+    expect(history?.open).toBe(true);
+    const items = Array.from(history?.querySelectorAll(".document-history-list li") ?? []).map((item) => item.textContent);
+    expect(items).toHaveLength(3);
+    expect(items[0]).toContain("Updated");
+    expect(items[0]).toContain("Web");
+    expect(items[0]).toContain("Demo user");
+    expect(items[1]).toContain("Processed");
+    expect(items[1]).toContain("System");
+    expect(items[2]).toContain("Uploaded");
+  });
+
+  it("shows email ingestion source and localizes history in Russian", async () => {
+    await render("doc-receipt", () => expect(container?.querySelector(".document-source-line")).not.toBeNull(), "ru");
+
+    expect(container?.querySelector(".document-source-line")?.textContent).toContain("Добавлен по почте");
+    const history = container?.querySelector<HTMLDetailsElement>(".document-history");
+    expect(history?.textContent).toContain("История");
+    expect(history?.textContent).toContain("3 события");
+    await click(history!.querySelector("summary")!);
+    expect(history?.textContent).toContain("Загружен");
+    expect(history?.textContent).toContain("Почта");
+  });
+});

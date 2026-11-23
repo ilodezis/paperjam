@@ -76,6 +76,7 @@ pub fn router(upload_limit: usize) -> OpenApiRouter<HttpState> {
         .routes(routes!(documents::download))
         .routes(routes!(documents::page_image))
         .routes(routes!(documents::thumbnail))
+        .routes(routes!(documents::events))
         .routes(routes!(documents::reprocess))
         .routes(routes!(documents::trash))
         .routes(routes!(documents::restore))

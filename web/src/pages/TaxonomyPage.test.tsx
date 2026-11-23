@@ -330,4 +330,20 @@ describe("TaxonomyPage", () => {
     expect(container?.querySelector(".taxonomy-empty button")).toBeNull();
     expect(Array.from(container?.querySelectorAll("button") ?? []).filter((element) => element.textContent === "Add person")).toHaveLength(1);
   });
+
+  it("queues manual document matching for a person and hides it for organizations", async () => {
+    const relinkPerson = vi.spyOn(api, "relinkPerson");
+    await renderPage();
+
+    const relinkButton = byLabel("Match documents again for Alex Example");
+    expect(relinkButton).not.toBeNull();
+    await click(relinkButton!);
+
+    await eventually(() => expect(relinkPerson).toHaveBeenCalledWith("person-alex"));
+    expect(container?.querySelector(".taxonomy-error")).toBeNull();
+
+    await click(button("Organizations"));
+    await eventually(() => expect(byLabel("Name for North Bank")).not.toBeNull());
+    expect(container?.querySelector(".taxonomy-relink")).toBeNull();
+  });
 });

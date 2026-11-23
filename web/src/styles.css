@@ -599,6 +599,11 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .processing-details dl > div { display: grid; grid-template-columns: minmax(84px, auto) minmax(0, 1fr); gap: 10px; font-size: var(--text-meta); line-height: 1.5; }
 .processing-details dt { min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
 .processing-details dd { margin: 0; overflow-wrap: anywhere; color: var(--ink); }
+.document-source-line { margin: 14px 0 0; color: var(--muted); font-size: var(--text-meta); line-height: 1.5; }
+.document-history-list { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+.document-history-list li { display: grid; gap: 2px; font-size: var(--text-meta); line-height: 1.45; }
+.document-history-list strong { color: var(--ink); font-weight: 500; }
+.document-history-list span { color: var(--muted); overflow-wrap: anywhere; }
 .attention-section h2 { display: flex; align-items: center; gap: 8px; color: var(--danger); }
 .attention-section h2 svg { width: 17px; height: 17px; }
 .attention-section ul { margin: 13px 0 0; padding-left: 20px; color: var(--muted); font-size: var(--text-secondary); line-height: 1.6; }
@@ -741,6 +746,7 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .alias-form > input, .merge-form > select { flex: 1; min-width: 0; height: var(--control-h); padding: 7px 10px; color: var(--ink); background: var(--paper-raised); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font-size: var(--text-control); }
 .alias-form > .button, .merge-form > .button { padding: 7px 11px; }
 .taxonomy-empty-inline { margin: 0 0 14px; color: var(--faint); font-size: var(--text-secondary); }
+.taxonomy-relink-hint { margin: 0 0 12px; color: var(--muted); font-size: var(--text-secondary); line-height: 1.5; }
 .tag-color-line { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: var(--text-secondary); }
 .tag-color-swatch { width: 18px; height: 18px; border: 1px solid var(--line); border-radius: 50%; }
 .type-key-line { display: flex; align-items: center; gap: 10px; margin-bottom: 19px; }
@@ -752,6 +758,7 @@ svg { width: 20px; height: 20px; stroke-width: 1.7; flex: 0 0 auto; }
 .field-definition:first-child { padding-top: 4px; border-top: 0; }
 .field-definition legend { padding: 0 8px 0 0; color: var(--muted); font-size: var(--text-secondary); font-weight: 600; }
 .field-definition-key { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 13px; margin-bottom: 13px; }
+.field-definition-validator { margin-top: 13px; }
 .field-definition .field-label input, .field-definition .field-label select { width: 100%; min-width: 0; height: var(--control-h); padding: 7px 9px; color: var(--ink); background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: var(--text-control); }
 .field-definition-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 13px; }
 .required-control { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--text-secondary); cursor: pointer; }

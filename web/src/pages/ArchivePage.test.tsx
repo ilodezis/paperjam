@@ -352,6 +352,28 @@ describe("ArchivePage toolbar", () => {
     });
     expect(document.querySelector("[role=dialog]")).toBeNull();
   });
+
+  it("shows expiring and due date examples in the syntax help and inserts them on click", async () => {
+    await render("q=passport");
+    await click(button("Filters"));
+    const dialog = await vi.waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[role=dialog]");
+      if (!found) throw new Error("no dialog");
+      return found;
+    });
+    const examples = Array.from(dialog.querySelectorAll<HTMLButtonElement>(".syntax-example"));
+    expect(examples.some((item) => item.textContent?.includes("has:expiring"))).toBe(true);
+    const dueExample = examples.find((item) => item.textContent?.includes("due:<2027-06"));
+    expect(dueExample).toBeTruthy();
+
+    await click(dueExample!);
+    await vi.waitFor(() => {
+      const input = container?.querySelector<HTMLInputElement>(".search-form input");
+      expect(input?.value).toBe("passport due:<2027-06");
+      expect(document.activeElement).toBe(input);
+    });
+    expect(document.querySelector("[role=dialog]")).toBeNull();
+  });
 });
 
 describe("ArchivePage selection state", () => {

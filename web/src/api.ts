@@ -301,6 +301,15 @@ export interface DocumentPatch {
   dismiss_attention?: string[];
 }
 
+export interface DocumentEvent {
+  id: number;
+  action: string;
+  via: string;
+  at: string;
+  actor_name: string | null;
+  diff: Record<string, unknown>;
+}
+
 export interface DownloadLink {
   url: string;
   expires_at: string;
@@ -415,6 +424,7 @@ export const api = {
   addPersonAlias: (id: string, alias: string) => call<PersonView>(`/people/${id}/aliases`, json({ alias })),
   removePersonAlias: (id: string, alias: string) => call<PersonView>(`/people/${id}/aliases?alias=${encodeURIComponent(alias)}`, { method: "DELETE" }),
   mergePeople: (id: string, from: string) => call<PersonView>(`/people/${id}/merge`, json({ from })),
+  relinkPerson: (id: string) => call<PersonView>(`/people/${id}/relink`, { method: "POST" }),
   deletePerson: (id: string) => call<void>(`/people/${id}`, { method: "DELETE" }),
   createCorrespondent: (input: NewCorrespondent) => call<CorrespondentView>("/correspondents", json(input)),
   updateCorrespondent: (id: string, patch: { name?: string }) => call<CorrespondentView>(`/correspondents/${id}`, json(patch, "PATCH")),
@@ -428,6 +438,7 @@ export const api = {
   createType: (input: NewType) => call<TypeView>("/types", json(input)),
   updateType: (id: string, patch: { labels?: Record<string, string>; fields?: FieldDef[] }) => call<TypeView>(`/types/${id}`, json(patch, "PATCH")),
   document: (id: string, textPage?: number) => call<DocumentView>(`/documents/${id}${textPage ? `?text_page=${textPage}` : ""}`),
+  documentEvents: (id: string) => call<DocumentEvent[]>(`/documents/${id}/events`),
   patchDocument: (id: string, patch: DocumentPatch) => call<DocumentView>(`/documents/${id}`, json(patch, "PATCH")),
   reprocess: (id: string, llm: boolean) => call<{ id: string; status: DocumentStatus }>(`/documents/${id}/reprocess`, json({ local: true, llm })),
   createDownloadLink: (id: string) => call<DownloadLink>(`/documents/${id}/download-link`, { method: "POST" }),

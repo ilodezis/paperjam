@@ -83,7 +83,7 @@ export const passkeysQuery = queryOptions({
  *  fetched again at once; the rest is fetched when it is next opened. Resolves when the taxonomy
  *  is fresh again, which is what a screen that selects what it just created waits for. */
 export function invalidateArchive(client: QueryClient): Promise<void> {
-  for (const key of ["search", "stats", "trash", "document"]) {
+  for (const key of ["search", "stats", "trash", "document", "document-events"]) {
     void client.invalidateQueries({ queryKey: [key] });
   }
   return client.invalidateQueries({ queryKey: ["taxonomy"] });
@@ -163,4 +163,11 @@ export const documentQuery = (id: string, page: number) =>
       const status = query.state.data?.status;
       return status === "queued" || status === "processing" ? 1500 : false;
     },
+  });
+
+export const documentEventsQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["document-events", id],
+    queryFn: () => api.documentEvents(id),
+    staleTime: 30_000,
   });

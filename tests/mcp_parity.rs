@@ -62,6 +62,8 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("DELETE", "/passkeys/{id}"),
     // A UI-only derivative; models look at `get_page_image`.
     ("GET", "/documents/{id}/thumbnail.webp"),
+    // Event audit history is read-only metadata for people in the web UI.
+    ("GET", "/documents/{id}/events"),
 ];
 
 fn contract_tool_names() -> BTreeSet<String> {

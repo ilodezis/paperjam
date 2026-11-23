@@ -21,6 +21,7 @@ use crate::ids::{DocumentId, PersonId, TagId, TypeId};
 use crate::jobs::queue::ProcessOptions;
 use crate::model::document::{DocumentPatch, DocumentView, GetOptions};
 use crate::service::documents;
+use crate::service::events::{self, DocumentEvent};
 use crate::service::upload::{UploadInput, UploadOutcome, upload};
 
 #[derive(utoipa::ToSchema)]
@@ -497,6 +498,46 @@ pub async fn thumbnail(
     request: HeaderMap,
 ) -> ApiResult<Response> {
     derived_image(&state, id, "thumbnail.webp", &request).await
+}
+
+#[derive(Deserialize, Default)]
+pub struct EventsQuery {
+    pub limit: Option<i64>,
+}
+
+/// Recent audit events of a document.
+#[utoipa::path(
+    get,
+    path = "/documents/{id}/events",
+    tag = "documents",
+    summary = "Recent audit events of a document.",
+    security(
+        ("session_cookie" = []),
+        ("bearer_auth" = [])
+    ),
+    params(
+        ("id" = String, Path, description = "Document ID"),
+        ("limit" = Option<i64>, Query, description = "Maximum events to return (1-100, default 50)"),
+    ),
+    responses(
+        (status = 200, description = "Document events, newest first", body = Vec<crate::service::events::DocumentEvent>),
+        (status = 401, description = "Authentication required", body = crate::http::ErrorResponse),
+        (status = 404, description = "Document not found", body = crate::http::ErrorResponse),
+    )
+)]
+pub async fn events(
+    State(state): State<HttpState>,
+    principal: Principal,
+    ApiPath(id): ApiPath<DocumentId>,
+    ApiQuery(query): ApiQuery<EventsQuery>,
+) -> ApiResult<Json<Vec<DocumentEvent>>> {
+    let list = events::list_for_document(
+        &state.app.ctx(principal.actor),
+        id,
+        query.limit.unwrap_or(50),
+    )
+    .await?;
+    Ok(Json(list))
 }
 
 #[derive(Deserialize, Default, utoipa::ToSchema)]

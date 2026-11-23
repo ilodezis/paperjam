@@ -10,7 +10,7 @@ import { SelectDropdown } from "../components/controls/SelectDropdown";
 import { toast } from "../components/controls/toast";
 import { fieldFromInput, hasPageImages, toggleId } from "../document";
 import { dueState, formatFileSize, formatIsoDate } from "../format";
-import { documentQuery, invalidateArchive, taxonomyQuery } from "../queries";
+import { documentEventsQuery, documentQuery, invalidateArchive, taxonomyQuery } from "../queries";
 import { documentIdOf } from "../shell/nav";
 import { ScreenLink, hrefOf, useGo, useScreenBack } from "../shell/navigation";
 import { TopBar } from "../shell/PageHead";
@@ -37,6 +37,10 @@ export function failureReasonKey(code: string): string {
 
 function definitionLabel(definition: FieldDef | undefined, language: string): string | undefined {
   return definition?.labels[language] ?? definition?.labels.en;
+}
+
+function formatEventTime(iso: string, language: string): string {
+  return new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso));
 }
 
 function PageReference({ page, onOpen }: { page: number; onOpen: () => void }) {
@@ -535,6 +539,7 @@ export function DocumentPage() {
   const language = i18n.resolvedLanguage ?? "en";
 
   const { data: document, error: queryError, isPending } = useQuery({ ...documentQuery(id, page), placeholderData: keepPreviousData });
+  const { data: events } = useQuery(documentEventsQuery(id));
   const { data: taxonomy } = useQuery(taxonomyQuery);
   const error = queryError instanceof ApiError ? queryError.code : queryError ? "network" : null;
 
@@ -551,6 +556,7 @@ export function DocumentPage() {
       // Only the newest answer is kept; an older one arriving late would put an old value back.
       if (version === saveVersion.current) queryClient.setQueryData(documentQuery(id, page).queryKey, updated);
       void queryClient.invalidateQueries({ queryKey: ["document", id], refetchType: "none" });
+      void queryClient.invalidateQueries({ queryKey: ["document-events", id] });
       void queryClient.invalidateQueries({ queryKey: ["search"] });
       void queryClient.invalidateQueries({ queryKey: ["taxonomy"] });
       void queryClient.invalidateQueries({ queryKey: ["stats"] });
@@ -566,6 +572,7 @@ export function DocumentPage() {
         current ? { ...current, status: "queued", status_reason: null } : current
       ));
       void queryClient.invalidateQueries({ queryKey: ["document", id] });
+      void queryClient.invalidateQueries({ queryKey: ["document-events", id] });
       void queryClient.invalidateQueries({ queryKey: ["search"] });
       void queryClient.invalidateQueries({ queryKey: ["stats"] });
       toast(t("document.reprocessQueuedToast"), { icon: "check" });
@@ -723,6 +730,7 @@ export function DocumentPage() {
   document.fields.forEach((entry) => addProvenance(entry.provenance, fieldLabel(entry.key)));
   visibleFacts.forEach((fact) => addProvenance(fact.provenance, factLabel(fact)));
   const provenanceDetails = Array.from(provenanceGroups, ([source, labels]) => ({ source, labels: Array.from(labels) }));
+  const uploadEvent = events?.find((event) => event.action === "document.upload");
 
   // Turning the page is a view setting only; the stored scan stays as it is.
   const rotation = rotations[currentPage] ?? 0;
@@ -878,6 +886,14 @@ export function DocumentPage() {
               </span>
               <input type="checkbox" role="switch" className="switch" checked={document.local_only} onChange={(event) => safeSave({ local_only: event.target.checked })} aria-label={t("document.localOnly")} />
             </label>
+            {uploadEvent ? (
+              <p className="document-source-line">
+                {t("document.addedViaLine", {
+                  via: t(`document.addedVia.${uploadEvent.via}`, { defaultValue: uploadEvent.via }),
+                  date: formatEventTime(uploadEvent.at, language),
+                })}
+              </p>
+            ) : null}
             {provenanceDetails.length > 0 ? (
               <details className="processing-details">
                 <summary><span>{t("document.automaticExtraction")}</span><span>{t("document.processingDetails")}<ChevronDown className="disclosure-chevron" aria-hidden="true" /></span></summary>
@@ -889,6 +905,26 @@ export function DocumentPage() {
                     </div>
                   ))}
                 </dl>
+              </details>
+            ) : null}
+            {events && events.length > 0 ? (
+              <details className="processing-details document-history">
+                <summary aria-label={t("document.history")}>
+                  <span>{t("document.history")}</span>
+                  <span>{t("document.historyCount", { count: events.length })}<ChevronDown className="disclosure-chevron" aria-hidden="true" /></span>
+                </summary>
+                <ul className="document-history-list">
+                  {events.map((event) => {
+                    const viaLabel = t(`document.eventVia.${event.via}`, { defaultValue: event.via });
+                    const meta = [formatEventTime(event.at, language), viaLabel, event.actor_name].filter(Boolean).join(" · ");
+                    return (
+                      <li key={event.id}>
+                        <strong>{t(`document.eventActions.${event.action}`, { defaultValue: event.action })}</strong>
+                        <span>{meta}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
               </details>
             ) : null}
           </section>

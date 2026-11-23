@@ -9,8 +9,36 @@ import { SelectDropdown } from "./controls/SelectDropdown";
 import { toast } from "./controls/toast";
 
 const fieldKinds: FieldKind[] = ["text", "date", "money", "number", "identifier", "list"];
+const KNOWN_VALIDATORS = [
+  "personal_number",
+  "iban",
+  "mrz",
+  "inn",
+  "snils",
+  "cnp",
+  "idnp",
+  "pesel",
+  "bsn",
+  "nir",
+  "steuer_id",
+  "dni_nie",
+  "cpf",
+  "aadhaar",
+  "nhs",
+] as const;
 
 type TypeFilter = "used" | "all";
+
+function normalizeFields(list: FieldDef[]): FieldDef[] {
+  return list.map((field) => ({
+    key: field.key,
+    labels: { en: field.labels.en ?? "", ru: field.labels.ru ?? "" },
+    kind: field.kind,
+    validator: field.kind === "identifier" ? (field.validator || null) : null,
+    required: field.required,
+    ...(field.kind === "text" && field.issuer ? { issuer: true } : {}),
+  }));
+}
 
 function typeName(item: TypeView, language: string): string {
   return item.labels[language] ?? item.labels.en ?? item.key;
@@ -144,8 +172,8 @@ function TypeEditor({ item, language, onBack }: { item: TypeView; language: stri
   const [expert, setExpert] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [baseline, setBaseline] = useState(() => JSON.stringify({ labels: item.labels, fields: item.fields }));
-  const payload = { labels: { en: english, ru: russian }, fields };
+  const [baseline, setBaseline] = useState(() => JSON.stringify({ labels: { en: item.labels.en ?? "", ru: item.labels.ru ?? "" }, fields: normalizeFields(item.fields) }));
+  const payload = { labels: { en: english, ru: russian }, fields: normalizeFields(fields) };
   const dirty = JSON.stringify(payload) !== baseline;
   const name = typeName(item, language);
 
@@ -160,7 +188,7 @@ function TypeEditor({ item, language, onBack }: { item: TypeView; language: stri
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    const saving = { labels: { en: english, ru: russian }, fields };
+    const saving = { labels: { en: english, ru: russian }, fields: normalizeFields(fields) };
     setBusy(true);
     setError(null);
     try {
@@ -195,13 +223,27 @@ function TypeEditor({ item, language, onBack }: { item: TypeView; language: stri
                 {expert ? (
                   <div className="field-definition-key">
                     <label className="field-label"><span>{t("taxonomy.fieldKey")}</span><input required pattern="[a-z][a-z0-9_]*" value={field.key} onChange={(event) => updateField(index, { key: event.target.value })} aria-label={t("taxonomy.fieldKeyNumber", { number: index + 1 })} /></label>
-                    <div className="field-label"><span>{t("taxonomy.fieldKind")}</span><SelectDropdown value={field.kind} onChange={(kind) => updateField(index, kind === "text" ? { kind: kind as FieldKind } : { kind: kind as FieldKind, issuer: false })} aria-label={t("taxonomy.fieldKindNumber", { number: index + 1 })} options={fieldKinds.map((kind) => ({ value: kind, label: t(`taxonomy.kinds.${kind}`) }))} /></div>
+                    <div className="field-label"><span>{t("taxonomy.fieldKind")}</span><SelectDropdown value={field.kind} onChange={(kind) => updateField(index, { kind: kind as FieldKind, ...(kind === "text" ? {} : { issuer: false }), ...(kind === "identifier" ? {} : { validator: null }) })} aria-label={t("taxonomy.fieldKindNumber", { number: index + 1 })} options={fieldKinds.map((kind) => ({ value: kind, label: t(`taxonomy.kinds.${kind}`) }))} /></div>
                   </div>
                 ) : null}
                 <div className="taxonomy-label-grid">
                   <label className="field-label"><span>{t("taxonomy.englishLabel")}</span><input required value={field.labels.en ?? ""} onChange={(event) => updateLabel(index, "en", event.target.value)} aria-label={t("taxonomy.fieldEnglishNumber", { number: index + 1 })} /></label>
                   <label className="field-label"><span>{t("taxonomy.russianLabel")}</span><input required value={field.labels.ru ?? ""} onChange={(event) => updateLabel(index, "ru", event.target.value)} aria-label={t("taxonomy.fieldRussianNumber", { number: index + 1 })} /></label>
                 </div>
+                {field.kind === "identifier" ? (
+                  <div className="field-label field-definition-validator">
+                    <span>{t("taxonomy.fieldValidator")}</span>
+                    <SelectDropdown
+                      value={field.validator ?? ""}
+                      onChange={(validator) => updateField(index, { validator: validator || null })}
+                      aria-label={t("taxonomy.fieldValidatorNumber", { number: index + 1 })}
+                      options={[
+                        { value: "", label: t("taxonomy.validatorNone") },
+                        ...KNOWN_VALIDATORS.map((validatorName) => ({ value: validatorName, label: t(`taxonomy.validators.${validatorName}`) })),
+                      ]}
+                    />
+                  </div>
+                ) : null}
                 <div className="field-definition-footer">
                   <label className="required-control"><input type="checkbox" checked={field.required} onChange={(event) => updateField(index, { required: event.target.checked })} aria-label={t("taxonomy.fieldRequiredNumber", { number: index + 1 })} /><span>{t("taxonomy.required")}</span></label>
                   {field.kind === "text" ? <label className="required-control"><input type="checkbox" checked={field.issuer === true} onChange={(event) => updateField(index, { issuer: event.target.checked })} aria-label={t("taxonomy.fieldIssuerNumber", { number: index + 1 })} /><span>{t("taxonomy.issuer")}</span></label> : null}
