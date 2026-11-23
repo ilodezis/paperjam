@@ -46,16 +46,16 @@ export interface GoOptions {
 export function useGo() {
   const router = useRouter();
   return useCallback(
-    (href: string, options: GoOptions = {}) => {
+    (href: string, options: GoOptions = {}): Promise<void> => {
       const { path, query } = split(href);
       const mode = options.mode ?? "push";
       const here = router.state.location;
       if (here.pathname === path && here.searchStr === (query === "" ? "" : `?${query}`)) {
         scrollCurrentToTop();
-        return;
+        return Promise.resolve();
       }
       announceNavigation({ mode, shared: options.shared });
-      void router.navigate({ to: path as never, search: searchOf(query) as never, replace: options.replace ?? mode === "replace", resetScroll: false });
+      return router.navigate({ to: path as never, search: searchOf(query) as never, replace: options.replace ?? mode === "replace", resetScroll: false });
     },
     [router],
   );

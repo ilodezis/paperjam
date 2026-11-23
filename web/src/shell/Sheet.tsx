@@ -27,23 +27,59 @@ const FOCUSABLE = [
 const focusables = (root: HTMLElement): HTMLElement[] =>
   Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((node) => node.closest("[hidden], [inert]") === null);
 
+/** Ref-counts `inert` per background node so overlapping or consecutive sheets never lift `inert`
+ *  while another sheet still needs the background locked. */
+const inertCounts = new WeakMap<Element, number>();
+
+interface ActiveSheet {
+  panel: HTMLElement;
+  scrim: HTMLElement | null;
+  opener: HTMLElement | null;
+}
+
+/** Stack of currently open sheets (bottom to top), used for focus handoff and Escape routing. */
+const openSheets: ActiveSheet[] = [];
+
+/** Callbacks that immediately finish any sheet currently playing its closing animation. */
+const closingSheets = new Set<() => void>();
+
 /** Marks everything outside the dialog `inert` (no focus, no clicks, hidden from assistive
  *  technology) by walking up from the panel and marking each ancestor's other children. The scrim
- *  stays live: it is the click-outside-to-close target. Returns the undo, which leaves anything that
- *  was already inert exactly as it found it. */
+ *  stays live: it is the click-outside-to-close target. Returns the undo, which decrements each
+ *  node's ref-count and leaves anything that was already inert outside Sheet untouched. */
 function makeBackgroundInert(panel: HTMLElement, keep: HTMLElement | null): () => void {
   const marked: Element[] = [];
   for (let node: HTMLElement = panel; node.parentElement !== null; node = node.parentElement) {
     for (const sibling of Array.from(node.parentElement.children)) {
-      if (sibling === node || sibling === keep || sibling.hasAttribute("inert")) continue;
+      if (sibling === node || sibling === keep) continue;
       if (["HEAD", "SCRIPT", "STYLE", "LINK"].includes(sibling.tagName)) continue;
+      const count = inertCounts.get(sibling) ?? 0;
+      if (count === 0 && sibling.hasAttribute("inert")) continue;
+      inertCounts.set(sibling, count + 1);
       sibling.setAttribute("inert", "");
       marked.push(sibling);
     }
   }
   return () => {
-    for (const node of marked) node.removeAttribute("inert");
+    for (const node of marked) {
+      const next = (inertCounts.get(node) ?? 1) - 1;
+      if (next <= 0) {
+        inertCounts.delete(node);
+        node.removeAttribute("inert");
+      } else {
+        inertCounts.set(node, next);
+      }
+    }
   };
+}
+
+function resolveOpener(): HTMLElement | null {
+  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  if (active !== null) {
+    const hostSheet = openSheets.find((entry) => entry.panel.contains(active));
+    if (hostSheet) return hostSheet.opener;
+  }
+  return active;
 }
 
 /** A bottom sheet with a grab handle: on a phone it rises from the bottom edge and follows the
@@ -72,20 +108,76 @@ export function Sheet({ open, title, onClose, children, headerAction }: {
     const back = scrim.current;
     if (el === null || back === null) return;
     if (open) {
-      animate(el, [{ transform: closedTransform(desktop), opacity: desktop ? 0 : 1 }, { transform: "none", opacity: 1 }], { duration: 520 });
-      animate(back, [{ opacity: 0 }, { opacity: 1 }], { duration: 320 });
-      return;
+      let cancelled = false;
+      const handedOff = closingSheets.size > 0;
+      if (handedOff) {
+        for (const finish of Array.from(closingSheets)) finish();
+      }
+      settle(el, back);
+      const opening = [
+        animate(el, [{ transform: closedTransform(desktop), opacity: desktop ? 0 : 1 }, { transform: "none", opacity: 1 }], { duration: 260 }),
+      ];
+      if (!handedOff) {
+        opening.push(animate(back, [{ opacity: 0 }, { opacity: 1 }], { duration: 200 }));
+      }
+      void Promise.all(opening.map((a) => a.finished)).then(
+        () => {
+          if (!cancelled) settle(el, back);
+        },
+        () => {
+          /* cancelled by drag or close */
+        },
+      );
+      return () => {
+        cancelled = true;
+      };
     }
+
+    // Another sheet is already open (e.g. Actions -> Share): hide immediately without a second
+    // fading scrim overlapping the new sheet's scrim, then unmount on the next microtask.
+    if (openSheets.length > 0) {
+      let cancelled = false;
+      settle(el, back);
+      el.hidden = true;
+      back.hidden = true;
+      queueMicrotask(() => {
+        if (!cancelled) setPresent(false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     let cancelled = false;
+    const finishNow = () => {
+      if (cancelled) return;
+      cancelled = true;
+      closingSheets.delete(finishNow);
+      settle(el, back);
+      el.hidden = true;
+      back.hidden = true;
+      queueMicrotask(() => setPresent(false));
+    };
+    closingSheets.add(finishNow);
     const leaving = [
-      animate(el, [{ transform: el.style.transform || "none", opacity: 1 }, { transform: closedTransform(desktop), opacity: desktop ? 0 : 1 }], { duration: 320 }),
-      animate(back, [{ opacity: 1 }, { opacity: 0 }], { duration: 280 }),
+      animate(el, [{ transform: el.style.transform || "none", opacity: 1 }, { transform: closedTransform(desktop), opacity: desktop ? 0 : 1 }], { duration: 200 }),
+      animate(back, [{ opacity: 1 }, { opacity: 0 }], { duration: 180 }),
     ];
-    void Promise.all(leaving.map((a) => a.finished)).then(() => {
-      if (!cancelled) setPresent(false);
-    });
+    void Promise.all(leaving.map((a) => a.finished)).then(
+      () => {
+        closingSheets.delete(finishNow);
+        if (!cancelled) {
+          settle(el, back);
+          setPresent(false);
+        }
+      },
+      () => {
+        closingSheets.delete(finishNow);
+      },
+    );
     return () => {
       cancelled = true;
+      closingSheets.delete(finishNow);
     };
   }, [open, present, desktop]);
 
@@ -100,11 +192,16 @@ export function Sheet({ open, title, onClose, children, headerAction }: {
     if (!open) return;
     const el = panel.current;
     if (el === null) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const opener = resolveOpener();
+    const entry: ActiveSheet = { panel: el, scrim: scrim.current, opener };
+    openSheets.push(entry);
     const releaseBackground = makeBackgroundInert(el, scrim.current);
     el.focus();
 
+    const isTopmost = () => openSheets[openSheets.length - 1] === entry;
+
     function onKeyDown(event: KeyboardEvent) {
+      if (!isTopmost()) return;
       if (event.key === "Escape") {
         event.stopPropagation();
         close.current();
@@ -128,6 +225,7 @@ export function Sheet({ open, title, onClose, children, headerAction }: {
       }
     }
     function onFocusIn(event: FocusEvent) {
+      if (!isTopmost()) return;
       if (el !== null && event.target instanceof Node && !el.contains(event.target)) el.focus();
     }
     window.addEventListener("keydown", onKeyDown, true);
@@ -135,13 +233,18 @@ export function Sheet({ open, title, onClose, children, headerAction }: {
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("focusin", onFocusIn);
+      const index = openSheets.indexOf(entry);
+      if (index !== -1) openSheets.splice(index, 1);
       releaseBackground();
-      if (opener?.isConnected) opener.focus();
+      if (openSheets.length === 0 && opener?.isConnected && opener.closest("[inert]") === null) {
+        opener.focus();
+      }
     };
   }, [open]);
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    settle(panel.current, scrim.current);
     drag.current = { pointer: event.pointerId, y0: event.clientY, t0: performance.now(), dy: 0 };
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -171,7 +274,10 @@ export function Sheet({ open, title, onClose, children, headerAction }: {
     const from = d.dy;
     el.style.transform = "";
     settle(el);
-    animate(el, [{ transform: `translateY(${from}px)` }, { transform: "none" }], { duration: 360 });
+    void animate(el, [{ transform: `translateY(${from}px)` }, { transform: "none" }], { duration: 240 }).finished.then(
+      () => settle(el),
+      () => undefined,
+    );
   };
 
   if (!present) return null;

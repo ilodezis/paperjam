@@ -223,6 +223,7 @@ export function ArchivePage() {
     setSelected(new Set());
   }
   const searchRef = useRef<HTMLInputElement>(null);
+  const pendingExample = useRef<string | null>(null);
   const resultRefs = useRef<(HTMLAnchorElement | null)[]>([]);
   const setResultRef = useCallback((index: number, element: HTMLAnchorElement | null) => { resultRefs.current[index] = element; }, []);
   const typeByKey = useMemo(() => new Map((taxonomy?.types ?? []).map((type) => [type.key, type])), [taxonomy]);
@@ -308,21 +309,24 @@ export function ArchivePage() {
     }
   }
 
-  // The syntax popover's examples drop into the search field so they can be
-  // edited there before the query runs.
-  function insertExample(example: string) {
+  // Picking an example closes the modal filters sheet first; once Sheet's inert/focus cleanup has
+  // completed in the same commit, the effect below drops the example into the field and focuses it.
+  function pickExample(example: string) {
+    pendingExample.current = example;
+    setFiltersOpen(false);
+  }
+
+  useEffect(() => {
+    if (filtersOpen || pendingExample.current === null) return;
+    const example = pendingExample.current;
+    pendingExample.current = null;
     const input = searchRef.current;
     if (!input) return;
     const current = input.value.trim();
     input.value = [current, example].filter(Boolean).join(" ");
     input.focus();
-  }
-
-  // Picking an example closes the (modal) filters sheet first, so focus can land in the search field.
-  function pickExample(example: string) {
-    setFiltersOpen(false);
-    window.setTimeout(() => insertExample(example), 0);
-  }
+    input.setSelectionRange?.(input.value.length, input.value.length);
+  }, [filtersOpen]);
 
   const syntaxFilters = [
     { example: "type:passport", label: t("archive.syntaxType") },

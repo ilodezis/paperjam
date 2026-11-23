@@ -143,6 +143,26 @@ describe("DocumentPage share", () => {
     await eventually(() => expect(sheet()?.textContent).toContain("No live links."));
     expect(revokeShare).toHaveBeenCalledTimes(1);
   });
+
+  it("hands off cleanly from the mobile Actions sheet to Share without overlapping scrims or stealing focus", async () => {
+    await render("doc-rental", () => expect(byLabel("Actions")).not.toBeNull());
+    const actionsBtn = byLabel("Actions")!;
+    actionsBtn.focus();
+
+    await click(actionsBtn);
+    await eventually(() => expect(document.querySelector('[role="dialog"]')?.getAttribute("aria-label")).toBe("Actions"));
+
+    const shareBtn = Array.from(document.querySelectorAll<HTMLButtonElement>(".sheet-actions button"))
+      .find((el) => el.textContent?.trim() === "Share");
+    expect(shareBtn).toBeTruthy();
+
+    await click(shareBtn!);
+    await eventually(() => expect(inSheet("Create and copy link")).toBeTruthy());
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(document.querySelectorAll(".scrim")).toHaveLength(1);
+    expect(actionsBtn.closest("[inert]")).not.toBeNull();
+    expect(document.querySelector('[role="dialog"]')?.contains(document.activeElement)).toBe(true);
+  });
 });
 
 describe("DocumentPage download", () => {
@@ -467,6 +487,24 @@ describe("DocumentPage metadata", () => {
     await render("doc-rental", () => expect(byLabel("Go to page 1")).not.toBeNull());
 
     expect(byLabel("Go to page 1")?.textContent).toBe("p. 1");
+  });
+
+  it("scrolls the viewer into view when tapping a page reference while the viewer is off-screen", async () => {
+    await render("doc-rental", () => expect(byLabel("Go to page 2")).not.toBeNull());
+    const viewer = container!.querySelector<HTMLElement>(".document-viewer")!;
+    const scrollIntoView = vi.fn();
+    viewer.scrollIntoView = scrollIntoView;
+
+    // Simulate mobile scroll where the viewer is above the viewport.
+    viewer.getBoundingClientRect = () => ({ top: -400, bottom: -50, left: 0, right: 390, width: 390, height: 350, x: 0, y: -400, toJSON: () => ({}) }) as DOMRect;
+    await click(byLabel("Go to page 2")!);
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+
+    // When the viewer is already in view (e.g. sticky desktop column), do not jump scroll.
+    scrollIntoView.mockClear();
+    viewer.getBoundingClientRect = () => ({ top: 16, bottom: 600, left: 0, right: 600, width: 600, height: 584, x: 0, y: 16, toJSON: () => ({}) }) as DOMRect;
+    await click(byLabel("Go to page 1")!);
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
   it("leaves out page references on a one-page document", async () => {

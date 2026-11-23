@@ -1,5 +1,10 @@
 import { Check, ChevronDown } from "lucide-react";
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+
+const MENU_MAX_HEIGHT = 260;
+const MENU_GAP = 4;
+const VIEWPORT_MARGIN = 8;
+const MIN_MENU_HEIGHT = 80;
 
 export interface SelectOption {
   value: string;
@@ -21,6 +26,11 @@ export interface SelectDropdownProps {
   id?: string;
 }
 
+interface MenuPlacement {
+  up: boolean;
+  maxHeight: number;
+}
+
 /** A select-only combobox (ARIA 1.2): one button that owns the focus, names the control and
  *  announces the chosen value, and a listbox it points at with `aria-activedescendant`. There is
  *  no second, native select behind it; a `name` is serialized by a hidden input. */
@@ -37,6 +47,7 @@ export function SelectDropdown({
 }: SelectDropdownProps) {
   const [open, setOpen] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(-1);
+  const [placement, setPlacement] = useState<MenuPlacement>({ up: false, maxHeight: MENU_MAX_HEIGHT });
   const containerRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -44,6 +55,30 @@ export function SelectDropdown({
 
   const selectedOption = options.find((opt) => opt.value === value);
   const optionId = (index: number) => `${listId}-${index}`;
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const container = containerRef.current;
+      const trigger = buttonRef.current;
+      if (!container || !trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const insideSheet = container.closest(".sheet") !== null;
+      const bnav = !insideSheet ? document.querySelector<HTMLElement>(".bnav") : null;
+      const bnavRect = bnav?.getBoundingClientRect();
+      const bottomLimit = bnavRect && bnavRect.height > 0 ? Math.min(window.innerHeight, bnavRect.top) : window.innerHeight;
+      const spaceBelow = Math.max(0, bottomLimit - rect.bottom - MENU_GAP - VIEWPORT_MARGIN);
+      const spaceAbove = Math.max(0, rect.top - MENU_GAP - VIEWPORT_MARGIN);
+      const desired = Math.min(MENU_MAX_HEIGHT, listRef.current?.scrollHeight || options.length * 40 + 8);
+      const up = spaceBelow < desired && spaceAbove > spaceBelow;
+      const available = up ? spaceAbove : spaceBelow;
+      const maxHeight = Math.min(MENU_MAX_HEIGHT, Math.max(Math.min(MIN_MENU_HEIGHT, available || MIN_MENU_HEIGHT), Math.floor(available)));
+      setPlacement((prev) => (prev.up === up && prev.maxHeight === maxHeight ? prev : { up, maxHeight }));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [open, options.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -164,7 +199,14 @@ export function SelectDropdown({
       </button>
 
       {open ? (
-        <ul ref={listRef} id={listId} className="select-dropdown-menu" role="listbox" aria-label={ariaLabel}>
+        <ul
+          ref={listRef}
+          id={listId}
+          className={`select-dropdown-menu ${placement.up ? "select-dropdown-menu--up" : ""}`}
+          style={{ maxHeight: `${placement.maxHeight}px` }}
+          role="listbox"
+          aria-label={ariaLabel}
+        >
           {options.map((opt, index) => {
             const isSelected = opt.value === value;
             const isFocused = index === focusedIndex;

@@ -5,9 +5,9 @@ import { api } from "../api";
 import { hasPageImages } from "../document";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { preloadImage } from "../lib/preloadImage";
-import { documentQuery, ensureFresh, searchQuery, statsQuery, taxonomyQuery, tokensQuery, trashQuery, usersQuery } from "../queries";
+import { documentQuery, searchQuery, taxonomyQuery, trashQuery, usersQuery } from "../queries";
 import type { SearchSort } from "../queries";
-import { isScreenMounted, openScreen } from "../shell/screens";
+import { openScreen } from "../shell/screens";
 import { queryClient } from "./queryClient";
 import { Root } from "./Root";
 import { hasSessionHint } from "./session";
@@ -38,12 +38,9 @@ function stringifySearch(search: Record<string, unknown>): string {
  *  would only come back 401. */
 const reads = (...calls: Array<() => Promise<unknown>>): Promise<unknown>[] => (hasSessionHint() ? calls.map((call) => call()) : []);
 
-// The screens themselves are drawn by the stage; the routes hold the addresses and have each
-// screen's code and data ready before the navigation commits, so the motion never starts on an
-// empty screen. With the data already on the device (even an old copy) a route does not wait for
-// the network at all: the screen opens on it and the fresh copy replaces it as it arrives.
-/** How long a filter change waits for a fresh search before it shows the copy kept on the device. */
-const SEARCH_FRESH_WAIT_MS = 600;
+// The screens themselves are drawn by the stage; the routes hold the addresses and load each
+// screen's code while warming its queries in the background (`waitMs: 0`), so tab and screen
+// switches never wait on the network.
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: Root,
@@ -60,27 +57,13 @@ const archiveRoute = createRoute({
   }),
   loaderDeps: ({ search }) => ({ q: search.q ?? "", sort: (search.sort ?? "relevance") as SearchSort }),
   loader: async ({ context, deps }) => {
-    // The archive is already on the stage (back from a document, a filter chip): it keeps what it
-    // shows (`placeholderData`) while the new answer arrives, so nothing here holds the tap.
-    if (isScreenMounted("archive")) {
-      await openScreen(
-        "archive",
-        reads(
-          () => context.queryClient.ensureQueryData(taxonomyQuery),
-          () => context.queryClient.prefetchQuery(searchQuery(deps.q, deps.sort)),
-        ),
-        { waitMs: 0 },
-      );
-      return;
-    }
     await openScreen(
       "archive",
       reads(
         () => context.queryClient.ensureQueryData(taxonomyQuery),
-        // An old copy of a search kept from an earlier visit would draw first and be swapped a
-        // moment later (the list blinks); a short wait draws the current answer once.
-        () => ensureFresh(context.queryClient, searchQuery(deps.q, deps.sort), SEARCH_FRESH_WAIT_MS),
+        () => context.queryClient.prefetchQuery(searchQuery(deps.q, deps.sort)),
       ),
+      { waitMs: 0 },
     );
   },
 });
@@ -109,7 +92,7 @@ const uploadRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/upload",
   loader: async () => {
-    await openScreen("upload");
+    await openScreen("upload", [], { waitMs: 0 });
   },
 });
 
@@ -117,7 +100,7 @@ const taxonomyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/taxonomy",
   loader: async ({ context }) => {
-    await openScreen("taxonomy", reads(() => context.queryClient.ensureQueryData(taxonomyQuery)));
+    await openScreen("taxonomy", reads(() => context.queryClient.ensureQueryData(taxonomyQuery)), { waitMs: 0 });
   },
 });
 
@@ -125,7 +108,7 @@ const trashRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/trash",
   loader: async ({ context }) => {
-    await openScreen("trash", reads(() => context.queryClient.ensureQueryData(trashQuery)));
+    await openScreen("trash", reads(() => context.queryClient.ensureQueryData(trashQuery)), { waitMs: 0 });
   },
 });
 
@@ -135,11 +118,8 @@ const settingsRoute = createRoute({
   loader: async ({ context }) => {
     await openScreen(
       "settings",
-      reads(
-        () => context.queryClient.ensureQueryData(statsQuery),
-        () => context.queryClient.ensureQueryData(tokensQuery),
-        () => context.queryClient.ensureQueryData(usersQuery),
-      ),
+      reads(() => context.queryClient.ensureQueryData(usersQuery)),
+      { waitMs: 0 },
     );
   },
 });

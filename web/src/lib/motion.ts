@@ -40,7 +40,7 @@ export function animate(
 
 /** Release the fill of every animation on a node once its motion is over. */
 export function settle(...nodes: Array<Element | null | undefined>): void {
-  for (const node of nodes) node?.getAnimations().forEach((a) => a.cancel());
+  for (const node of nodes) node?.getAnimations?.().forEach((a) => a.cancel());
 }
 
 export const wait = (ms: number): Promise<void> =>

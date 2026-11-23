@@ -128,20 +128,37 @@ describe("stage motions and DOM order", () => {
     expect(keyframes).toEqual([{ transform: "translateX(400px)" }, { transform: "translateX(0px)" }]);
     expect(options.duration).toBe(SLIDE_MS);
     expect(options.delay ?? 0).toBe(0);
-    expect(SLIDE_MS).toBeLessThanOrEqual(380);
+    expect(SLIDE_MS).toBeLessThanOrEqual(280);
     expect(options.easing).toBe("cubic-bezier(.32,.72,0,1)");
     const [underKeyframes] = (a.animate as ReturnType<typeof vi.fn>).mock.calls[0] as [Keyframe[]];
     expect(underKeyframes[1]).toEqual({ transform: `translateX(${-PARALLAX * 400}px)` });
   });
 
-  it("fade keeps the whole handover within a phone-length budget", async () => {
+  it("fade runs crisply with no startup delay", async () => {
     const a = makeMockElement();
     const b = makeMockElement();
     await fade(a, b);
     for (const node of [a, b]) {
       const [, options] = (node.animate as ReturnType<typeof vi.fn>).mock.calls[0] as [Keyframe[], KeyframeAnimationOptions];
-      expect(Number(options.duration) + Number(options.delay ?? 0)).toBeLessThanOrEqual(380);
+      expect(options.delay ?? 0).toBe(0);
+      expect(Number(options.duration)).toBeLessThanOrEqual(150);
     }
+  });
+
+  it("cancels animations and leaves departing node visible when aborted", async () => {
+    const cancel = vi.fn();
+    const pending = new Promise<void>(() => undefined);
+    const a = makeMockElement();
+    const b = makeMockElement();
+    a.animate = vi.fn(() => ({ finished: pending, cancel })) as unknown as Element["animate"];
+    b.animate = vi.fn(() => ({ finished: pending, cancel })) as unknown as Element["animate"];
+    const controller = new AbortController();
+    const done = fade(a, b, controller.signal);
+    controller.abort();
+    await done;
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(a.hidden).toBe(false);
+    expect(a.style.display).not.toBe("none");
   });
 
   describe("sharedMorph", () => {
@@ -214,7 +231,7 @@ describe("stage motions and DOM order", () => {
       expect(style?.transformOrigin).toBe("0 0");
     });
 
-    it("stays within a phone-length budget: every duration plus delay is at most 380 ms", async () => {
+    it("stays crisp with no startup delay and every animation within 280 ms", async () => {
       const { a, b } = await morph();
       const calls = [
         ...flyerAnimate.mock.calls,
@@ -223,7 +240,8 @@ describe("stage motions and DOM order", () => {
       ] as unknown as Array<[Keyframe[], KeyframeAnimationOptions]>;
       expect(calls).toHaveLength(3);
       for (const [, options] of calls) {
-        expect(Number(options.duration) + Number(options.delay ?? 0)).toBeLessThanOrEqual(380);
+        expect(options.delay ?? 0).toBe(0);
+        expect(Number(options.duration)).toBeLessThanOrEqual(280);
       }
     });
   });

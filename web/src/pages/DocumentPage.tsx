@@ -10,6 +10,7 @@ import { SelectDropdown } from "../components/controls/SelectDropdown";
 import { toast } from "../components/controls/toast";
 import { fieldFromInput, hasPageImages, toggleId } from "../document";
 import { dueState, formatFileSize, formatIsoDate } from "../format";
+import { prefersReducedMotion } from "../lib/motion";
 import { documentEventsQuery, documentQuery, invalidateArchive, settingsSummaryQuery, taxonomyQuery } from "../queries";
 import { documentIdOf } from "../shell/nav";
 import { ScreenLink, hrefOf, useGo, useScreenBack } from "../shell/navigation";
@@ -536,6 +537,7 @@ export function DocumentPage() {
   const saveVersion = useRef(0);
   const actionMenu = useRef<HTMLDetailsElement>(null);
   const attentionSection = useRef<HTMLElement>(null);
+  const viewerSection = useRef<HTMLElement>(null);
   const language = i18n.resolvedLanguage ?? "en";
 
   const { data: document, error: queryError, isPending } = useQuery({ ...documentQuery(id, page), placeholderData: keepPreviousData });
@@ -641,6 +643,17 @@ export function DocumentPage() {
     actionMenu.current?.removeAttribute("open");
     setMenuOpen(false);
     setShareOpen(true);
+  }
+
+  function openPage(targetPage: number) {
+    setPage(targetPage);
+    const viewer = viewerSection.current;
+    if (!viewer) return;
+    const rect = viewer.getBoundingClientRect();
+    const outOfView = rect.top < 0 || rect.bottom <= 0 || rect.top >= window.innerHeight;
+    if (outOfView && typeof viewer.scrollIntoView === "function") {
+      viewer.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
+    }
   }
 
   function reprocessDocument(llm: boolean, model?: string) {
@@ -837,7 +850,7 @@ export function DocumentPage() {
 
 
       <div className="document-workspace">
-        <section className="document-viewer" aria-label={t("document.viewer")}>
+        <section ref={viewerSection} className="document-viewer" aria-label={t("document.viewer")}>
           {/* A file that could not be read has no pages to turn or rotate. */}
           {document.status !== "failed" ? <div className="page-controls">
             <button type="button" className="icon-button" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)} aria-label={t("document.previousPage")}><ChevronLeft /></button>
@@ -988,7 +1001,7 @@ export function DocumentPage() {
                       {entries.map((entry) => (
                         <div className="typed-field-wrap" key={`${entry.key}:${JSON.stringify(entry.value)}:${entry.provenance}`}>
                           <FieldValueInput entry={entry} definition={fieldDefinitions.get(entry.key)} onSave={savePatch} />
-                          {entry.page && pageCount > 1 ? <PageReference page={entry.page} onOpen={() => setPage(entry.page ?? 1)} /> : null}
+                          {entry.page && pageCount > 1 ? <PageReference page={entry.page} onOpen={() => openPage(entry.page ?? 1)} /> : null}
                         </div>
                       ))}
                     </section>
@@ -1005,7 +1018,7 @@ export function DocumentPage() {
                         <dt className="fact-dt"><span className="fact-key-name">{factLabel(fact)}</span></dt>
                         <dd className="fact-dd">
                           <span className="fact-value">{fact.value}</span>
-                          {fact.page && pageCount > 1 ? <PageReference page={fact.page} onOpen={() => setPage(fact.page ?? 1)} /> : null}
+                          {fact.page && pageCount > 1 ? <PageReference page={fact.page} onOpen={() => openPage(fact.page ?? 1)} /> : null}
                           {currentType && currentType.fields.length > 0 && !isRawMrzFact(fact) ? (
                             <SelectDropdown
                               className="fact-promote"

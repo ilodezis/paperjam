@@ -189,6 +189,32 @@ describe("Stage", () => {
     expect(documentPage.renders).toBe(0);
   });
 
+  it("interrupts an in-flight transition cleanly when a newer navigation arrives", async () => {
+    const { go, screens } = await mount("/");
+    let finishFirst: () => void = () => undefined;
+    const firstHeld = new Promise<void>((resolve) => { finishFirst = resolve; });
+    const firstCancel = vi.fn();
+    let batch = 0;
+    const animate = vi.mocked(Element.prototype.animate);
+    animate.mockImplementation(() => {
+      if (batch === 0) return { finished: firstHeld, cancel: firstCancel } as never;
+      return { finished: Promise.resolve(), cancel: vi.fn() } as never;
+    });
+    try {
+      await go("/documents/a", "push");
+      // First push is still running; immediately switch to settings tab.
+      batch = 1;
+      await go("/settings", "tab");
+      expect(firstCancel).toHaveBeenCalled();
+      expect(screens()).toEqual(["settings"]);
+      // Late settlement of the interrupted animation must not disturb the current screen.
+      await act(async () => finishFirst());
+      expect(screens()).toEqual(["settings"]);
+    } finally {
+      animate.mockImplementation(() => ({ finished: Promise.resolve(), cancel: vi.fn() }) as never);
+    }
+  });
+
   describe("swipe back from the left edge", () => {
     it("leaves a tap on the back button alone, so the address and the stack still agree", async () => {
       stubStandalone(true);

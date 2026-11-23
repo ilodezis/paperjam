@@ -1,7 +1,7 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { I18nextProvider } from "react-i18next";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createI18n } from "../i18n";
 import { Sheet } from "./Sheet";
@@ -11,12 +11,36 @@ import { Sheet } from "./Sheet";
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
+/** Tracks live animations per element so tests can verify `settle()` releases WAAPI fill. */
+const activeAnimations = new WeakMap<Element, Set<Animation>>();
+
+function installAnimationStub() {
+  Element.prototype.animate = (function (this: Element) {
+    let set = activeAnimations.get(this);
+    if (!set) {
+      set = new Set();
+      activeAnimations.set(this, set);
+    }
+    const anim = {
+      finished: Promise.resolve(),
+      cancel: vi.fn(() => {
+        set?.delete(anim as unknown as Animation);
+      }),
+    } as unknown as Animation;
+    set.add(anim);
+    return anim;
+  }) as unknown as Element["animate"];
+  Element.prototype.getAnimations = function (this: Element) {
+    return Array.from(activeAnimations.get(this) ?? []);
+  };
+}
+
 beforeAll(() => {
-  // jsdom has no Web Animations: a sheet that animates out is gone as soon as it resolves.
-  Element.prototype.animate = (() => ({ finished: Promise.resolve(), cancel: () => undefined })) as unknown as Element["animate"];
+  installAnimationStub();
 });
 
 afterEach(async () => {
+  installAnimationStub();
   if (root) await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -129,6 +153,119 @@ describe("Sheet", () => {
     await act(async () => {
       await Promise.resolve();
     });
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("settles the open WAAPI fill so dragging the grab handle moves and dismisses the sheet", async () => {
+    await mount();
+    // Wait for the open animation to settle.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const el = dialog()!;
+    const scrim = document.querySelector<HTMLElement>(".scrim")!;
+    expect(el.getAnimations()).toHaveLength(0);
+    expect(scrim.getAnimations()).toHaveLength(0);
+
+    // Simulate a lingering animation before pointerdown to verify defensive settle too.
+    el.animate([], { duration: 260, fill: "both" });
+    expect(el.getAnimations()).toHaveLength(1);
+
+    Object.defineProperty(el, "offsetHeight", { configurable: true, value: 400 });
+    const grab = el.querySelector<HTMLElement>(".sheet-grab")!;
+    grab.setPointerCapture = vi.fn();
+
+    await act(async () => {
+      grab.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 3, pointerType: "touch", clientY: 100 }));
+    });
+    expect(el.getAnimations()).toHaveLength(0);
+
+    await act(async () => {
+      grab.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 3, pointerType: "touch", clientY: 260 }));
+    });
+    expect(el.style.transform).toBe("translateY(160px)");
+
+    await act(async () => {
+      grab.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 3, pointerType: "touch", clientY: 260 }));
+      await Promise.resolve();
+    });
+    expect(dialog()).toBeNull();
+  });
+
+  it("hands off focus, inert background, and scrim cleanly across consecutive sheets", async () => {
+    function HandoffHarness() {
+      const [first, setFirst] = useState(false);
+      const [second, setSecond] = useState(false);
+      return (
+        <>
+          <main>
+            <button type="button" id="open-first" onClick={() => setFirst(true)}>Open actions</button>
+          </main>
+          <Sheet open={first} title="Actions" onClose={() => setFirst(false)}>
+            <button
+              type="button"
+              id="open-second"
+              onClick={() => {
+                setFirst(false);
+                setSecond(true);
+              }}
+            >
+              Share
+            </button>
+          </Sheet>
+          <Sheet open={second} title="Share" onClose={() => setSecond(false)}>
+            <button type="button" id="share-action">Create link</button>
+          </Sheet>
+        </>
+      );
+    }
+
+    // Hold exit animations to simulate a real 200ms close animation overlapping the second sheet.
+    const pendingExit = new Promise<void>(() => undefined);
+    let call = 0;
+    Element.prototype.animate = (function (this: Element) {
+      call += 1;
+      const anim = {
+        finished: call > 2 && call <= 4 ? pendingExit : Promise.resolve(),
+        cancel: vi.fn(),
+      } as unknown as Animation;
+      return anim;
+    }) as unknown as Element["animate"];
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<I18nextProvider i18n={createI18n("en")}><HandoffHarness /></I18nextProvider>);
+    });
+
+    const opener = document.getElementById("open-first") as HTMLButtonElement;
+    opener.focus();
+    await act(async () => {
+      opener.click();
+    });
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+
+    await act(async () => {
+      document.getElementById("open-second")?.click();
+    });
+
+    // Only Share sheet and one scrim remain; background stays inert and focus is in Share sheet.
+    const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"]');
+    expect(dialogs).toHaveLength(1);
+    expect(dialogs[0]?.getAttribute("aria-label")).toBe("Share");
+    expect(document.querySelectorAll(".scrim")).toHaveLength(1);
+    expect(opener.closest("[inert]")).not.toBeNull();
+    expect(dialogs[0]?.contains(document.activeElement)).toBe(true);
+
+    // Closing Share returns focus to the page opener and lifts inert.
+    installAnimationStub();
+    await press("Escape");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.querySelector("[inert]")).toBeNull();
     expect(document.activeElement).toBe(opener);
   });
 });

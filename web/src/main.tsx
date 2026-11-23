@@ -17,18 +17,7 @@ async function start() {
     void registerServiceWorker();
   }
 
-  // The faces the interface draws with, ready before the first paint: a late face swaps in for the
-  // fallback and moves the text by a pixel or two. Capped, so a slow font never holds the page.
-  if ("fonts" in document) {
-    const sample = "Aa Яя";
-    const faces = ['400 1em "Golos Text"', '500 1em "Golos Text"', '600 1em "Golos Text"', '700 1em "Golos Text"', '500 1em "Geologica"', '600 1em "Geologica"'];
-    await Promise.race([
-      Promise.all(faces.map((face) => document.fonts.load(face, sample).catch(() => []))),
-      new Promise((resolve) => window.setTimeout(resolve, 1500)),
-    ]);
-  }
-
-  const savedLanguage =window.localStorage.getItem("paperjam:language");
+  const savedLanguage = window.localStorage.getItem("paperjam:language");
   const i18n = createI18n(pickLanguage([savedLanguage ?? "", ...navigator.languages]));
   document.documentElement.lang = i18n.language;
   applyThemePreference(readThemePreference());

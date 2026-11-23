@@ -42,19 +42,20 @@ export function screenComponent(id: ScreenId): ComponentType {
   return component;
 }
 
-/** How long a tap waits for a screen's data, once its code is here, before the screen opens without it. */
-const DATA_WAIT_MS = 250;
+/** Default wait for a screen's data once its code is here: 0 opens immediately on cached data or
+ *  the screen's own loading state while reads warm in the background. */
+const DATA_WAIT_MS = 0;
 
 export interface OpenOptions {
   /** How long to wait for the reads once the code is here; 0 opens the screen on its own loading state. */
   waitMs?: number;
 }
 
-/** Everything a screen needs to open filled in: its code and its reads (`ensureQueryData` calls the
- *  route has already started). Data already on the device, even an old copy, is taken as it is and
- *  refreshed behind the screen; a slow read does not hold the tap past `waitMs` (`DATA_WAIT_MS`) —
- *  the screen opens and fills in when it arrives. With `waitMs: 0` only the code is awaited; the
- *  reads keep running (a failure is the screen's to show, not an unhandled rejection). */
+/** Everything a screen needs to open: its code and its reads (`ensureQueryData` / `prefetchQuery`
+ *  calls the route has started). By default (`waitMs: 0`) only the code is awaited so tab and
+ *  screen switches never block on the network; the reads keep running in the background (a failure
+ *  is the screen's to show, not an unhandled rejection). Callers may still pass a positive
+ *  `waitMs` budget when they want to race reads before committing. */
 export async function openScreen(id: ScreenId, reads: Promise<unknown>[] = [], { waitMs = DATA_WAIT_MS }: OpenOptions = {}): Promise<void> {
   const settled = Promise.allSettled(reads);
   await preloadScreen(id);

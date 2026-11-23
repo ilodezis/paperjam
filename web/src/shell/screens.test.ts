@@ -42,15 +42,13 @@ describe("openScreen", () => {
     expect(unhandled).not.toHaveBeenCalled();
   });
 
-  it("by default waits for a slow read, but no longer than 250 ms", async () => {
+  it("by default opens immediately on the code alone without waiting on a slow read", async () => {
     vi.useFakeTimers();
     let opened = false;
     void openScreen("archive", [never()]).then(() => {
       opened = true;
     });
-    await vi.advanceTimersByTimeAsync(249);
-    expect(opened).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
     expect(opened).toBe(true);
   });
 

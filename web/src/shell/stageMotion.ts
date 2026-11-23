@@ -1,6 +1,5 @@
-/* The ways one screen hands over to another, as Web Animations. Durations, easings, the 0.28
-   parallax and the 0.32 shade are Vitals' (components/shell/stageMotion.ts); under reduced
-   motion every one of them is a cut. */
+/* The ways one screen hands over to another, as Web Animations. Under reduced motion every one of
+   them is a cut. */
 
 import { animate, EASE_OUT, prefersReducedMotion, settle } from "../lib/motion";
 
@@ -8,10 +7,32 @@ import { animate, EASE_OUT, prefersReducedMotion, settle } from "../lib/motion";
 export const PARALLAX = 0.28;
 /** How dark the screen underneath goes at the end of a push. */
 export const SHADE = 0.32;
-/** Close to iOS's own push (about 350 ms): longer reads as a lag on a phone. */
-export const SLIDE_MS = 360;
+/** Snappy mobile push/pop slide duration. */
+export const SLIDE_MS = 270;
 
 const RAISED_EDGE = "-24px 0 48px -18px rgba(0,0,0,.55)";
+
+/** Wait for every animation to finish, resolving early if `signal` aborts. */
+async function awaitAnimations(animations: Animation[], signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) {
+    for (const animation of animations) animation.cancel();
+    return false;
+  }
+  let onAbort: (() => void) | undefined;
+  const aborted = signal
+    ? new Promise<void>((resolve) => {
+      onAbort = () => {
+        for (const animation of animations) animation.cancel();
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    })
+    : null;
+  const done = Promise.all(animations.map((animation) => animation.finished)).then(() => undefined, () => undefined);
+  await (aborted ? Promise.race([done, aborted]) : done);
+  if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  return !signal?.aborted;
+}
 
 /** A push (dir 1): `b` slides in from the right over `a`. A pop (dir −1): `a` leaves to the
  *  right and `b` comes back. `fromProgress` is how far a gesture already carried the top screen
@@ -23,6 +44,7 @@ export async function slide(
   width: number,
   dir: 1 | -1,
   fromProgress = 0,
+  signal?: AbortSignal,
 ): Promise<void> {
   const duration = SLIDE_MS * (1 - fromProgress);
   const top = dir > 0 ? b : a;
@@ -40,32 +62,36 @@ export async function slide(
   const u1 = dir > 0 ? -PARALLAX : 0;
   const s0 = dir > 0 ? 0 : SHADE * (1 - fromProgress);
   const s1 = dir > 0 ? SHADE : 0;
-  await Promise.all([
-    animate(top, [{ transform: `translateX(${p0 * width}px)` }, { transform: `translateX(${p1 * width}px)` }], { duration }).finished,
-    animate(under, [{ transform: `translateX(${u0 * width}px)` }, { transform: `translateX(${u1 * width}px)` }], { duration }).finished,
-    animate(shade, [{ opacity: s0 }, { opacity: s1 }], { duration }).finished,
-  ]);
-  a.hidden = true;
-  a.style.display = "none";
+  const completed = await awaitAnimations(
+    [
+      animate(top, [{ transform: `translateX(${p0 * width}px)` }, { transform: `translateX(${p1 * width}px)` }], { duration }),
+      animate(under, [{ transform: `translateX(${u0 * width}px)` }, { transform: `translateX(${u1 * width}px)` }], { duration }),
+      animate(shade, [{ opacity: s0 }, { opacity: s1 }], { duration }),
+    ],
+    signal,
+  );
+  if (completed) {
+    a.hidden = true;
+    a.style.display = "none";
+  }
   settle(top, under, shade);
   for (const n of [top, under, shade]) n.style.zIndex = "";
   top.style.boxShadow = "";
 }
 
 /** A tab, a section tab, any change on the desktop: the old screen leaves fast and linear, the new
- *  one fades in where it stands. It does not move: with its content drawn from the first frame, a
- *  rise from below reads as the page jumping down and coming back. */
-export async function fade(a: HTMLElement | null, b: HTMLElement): Promise<void> {
+ *  one fades in where it stands with no startup delay. */
+export async function fade(a: HTMLElement | null, b: HTMLElement, signal?: AbortSignal): Promise<void> {
   b.style.display = "";
   b.hidden = false;
   b.style.zIndex = "2";
   if (a !== null) a.style.zIndex = "1";
   const jobs = [
-    animate(b, [{ opacity: 0 }, { opacity: 1 }], { duration: 300, delay: 30, easing: EASE_OUT }).finished,
+    animate(b, [{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE_OUT }),
   ];
-  if (a !== null) jobs.push(animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "linear" }).finished);
-  await Promise.all(jobs);
-  if (a !== null) {
+  if (a !== null) jobs.push(animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 110, easing: "linear" }));
+  const completed = await awaitAnimations(jobs, signal);
+  if (completed && a !== null) {
     a.hidden = true;
     a.style.display = "none";
   }
@@ -78,11 +104,22 @@ export async function fade(a: HTMLElement | null, b: HTMLElement): Promise<void>
  *  the motion starts; this waits for it a frame or two (32 ms) instead of giving the motion up: the
  *  morph must never hold the navigation back for its target. Timers, not frames: a hidden page
  *  draws none, and the navigation must not hang on it. */
-export async function whenPresent<T>(find: () => T | null, timeoutMs = 32, stepMs = 16): Promise<T | null> {
+export async function whenPresent<T>(find: () => T | null, timeoutMs = 32, stepMs = 16, signal?: AbortSignal): Promise<T | null> {
   for (let waited = 0; ; waited += stepMs) {
+    if (signal?.aborted) return null;
     const found = find();
     if (found !== null || waited >= timeoutMs) return found;
-    await new Promise<void>((resolve) => setTimeout(resolve, stepMs));
+    await new Promise<void>((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, stepMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 }
 
@@ -114,12 +151,13 @@ export async function sharedMorph(
   source: HTMLElement,
   target: HTMLElement,
   host: HTMLElement,
+  signal?: AbortSignal,
 ): Promise<void> {
-  if (prefersReducedMotion()) return fade(a, b);
+  if (prefersReducedMotion()) return fade(a, b, signal);
   const root = host.getBoundingClientRect();
   const r0 = source.getBoundingClientRect();
   const canvas = target.getBoundingClientRect();
-  if (r0.width === 0 || r0.height === 0 || canvas.width === 0 || canvas.height === 0) return fade(a, b);
+  if (r0.width === 0 || r0.height === 0 || canvas.width === 0 || canvas.height === 0) return fade(a, b, signal);
   const r1 = landingRect(r0, target, canvas);
 
   const flyer = source.cloneNode(true) as HTMLElement;
@@ -140,25 +178,31 @@ export async function sharedMorph(
   a.style.zIndex = "1";
 
   const scale = r1.width / r0.width;
+  let completed = false;
   try {
-    await Promise.all([
-      animate(
-        flyer,
-        [
-          { transform: "none" },
-          { transform: `translate(${r1.left - r0.left}px, ${r1.top - r0.top}px) scale(${scale})` },
-        ],
-        { duration: 380 },
-      ).finished,
-      animate(b, [{ opacity: 0, transform: "scale(.985)" }, { opacity: 1, transform: "none" }], { duration: 300, delay: 40, easing: EASE_OUT }).finished,
-      animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: "linear" }).finished,
-    ]);
+    completed = await awaitAnimations(
+      [
+        animate(
+          flyer,
+          [
+            { transform: "none" },
+            { transform: `translate(${r1.left - r0.left}px, ${r1.top - r0.top}px) scale(${scale})` },
+          ],
+          { duration: 270 },
+        ),
+        animate(b, [{ opacity: 0, transform: "scale(.985)" }, { opacity: 1, transform: "none" }], { duration: 240, easing: EASE_OUT }),
+        animate(a, [{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: "linear" }),
+      ],
+      signal,
+    );
   } finally {
     target.style.visibility = "";
     source.style.visibility = "";
     flyer.remove();
-    a.hidden = true;
-    a.style.display = "none";
+    if (completed) {
+      a.hidden = true;
+      a.style.display = "none";
+    }
     settle(a, b);
     a.style.zIndex = "";
     b.style.zIndex = "";

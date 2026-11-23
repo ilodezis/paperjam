@@ -10,7 +10,7 @@ import { screenComponent, setMountedScreens } from "./screens";
 import { ScreenBoundary } from "./ScreenBoundary";
 import { ScreenFrame, ScreenProvider, type ScreenInfo } from "./ScreenFrame";
 import { initialStack, planGo, planPop, topOf, type Dest, type NavPlan, type StackEntry, type StackState } from "./stack";
-import { fade, sharedMorph, slide, swipeCommits, swipeFrame, whenPresent } from "./stageMotion";
+import { fade, sharedMorph, slide, SLIDE_MS, swipeCommits, swipeFrame, whenPresent } from "./stageMotion";
 
 /** What is mounted right now: the stack itself, plus screens that are leaving and still
  *  drawn until their motion is over; `moving` are the two the motion is running on. */
@@ -88,8 +88,7 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
   const shade = useRef<HTMLDivElement>(null);
   const busy = useRef(false);
   const job = useRef<Job | null>(null);
-  const pending = useRef<Dest | null>(null);
-  const [caughtUp, setCaughtUp] = useState(0);
+  const activeMotion = useRef<AbortController | null>(null);
   const candidate = useRef<Candidate | null>(null);
   const swipe = useRef<Swipe | null>(null);
 
@@ -109,7 +108,29 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     top?.scrollTo({ top: 0, behavior: prefersReducedMotion() ? "auto" : "smooth" });
   };
 
+  const abortMotion = () => {
+    if (activeMotion.current !== null) {
+      activeMotion.current.abort();
+      activeMotion.current = null;
+    }
+    for (const el of nodes.current.values()) {
+      settle(el);
+      el.style.zIndex = "";
+      el.style.boxShadow = "";
+      el.style.transform = "";
+    }
+    if (shade.current !== null) {
+      settle(shade.current);
+      shade.current.style.zIndex = "";
+      shade.current.style.opacity = "";
+    }
+    busy.current = false;
+  };
+
   const run = useEffectEvent(async ({ plan, shared }: Job) => {
+    const controller = new AbortController();
+    activeMotion.current = controller;
+    const { signal } = controller;
     const from = plan.from === null ? undefined : nodes.current.get(plan.from.key);
     const to = plan.to === null ? undefined : nodes.current.get(plan.to.key);
     const stageEl = stage.current;
@@ -117,44 +138,49 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     try {
       if (from !== undefined && to !== undefined && stageEl !== null && shadeEl !== null) {
         const target =
-          shared !== null && plan.motion !== "pop" ? await whenPresent(() => to.querySelector<HTMLElement>("[data-shared-target]")) : null;
+          shared !== null && plan.motion !== "pop"
+            ? await whenPresent(() => to.querySelector<HTMLElement>("[data-shared-target]"), 32, 16, signal)
+            : null;
+        if (signal.aborted) return;
         if (shared !== null && target !== null) {
-          await sharedMorph(from, to, shared, target, stageEl.parentElement ?? stageEl);
+          await sharedMorph(from, to, shared, target, stageEl.parentElement ?? stageEl, signal);
         } else if (plan.motion === "push") {
-          await slide(from, to, shadeEl, stageEl.offsetWidth, 1);
+          await slide(from, to, shadeEl, stageEl.offsetWidth, 1, 0, signal);
         } else if (plan.motion === "pop") {
-          await slide(from, to, shadeEl, stageEl.offsetWidth, -1);
+          await slide(from, to, shadeEl, stageEl.offsetWidth, -1, 0, signal);
         } else {
-          await fade(from, to);
+          await fade(from, to, signal);
         }
       }
     } finally {
-      commit({ logical: viewRef.current.logical, leaving: [], moving: [] });
-      release();
+      if (!signal.aborted) {
+        if (activeMotion.current === controller) activeMotion.current = null;
+        commit({ logical: viewRef.current.logical, leaving: [], moving: [] });
+        busy.current = false;
+      }
     }
   });
 
-  // Every motion ends here: the stage is free again, and an address it missed meanwhile catches up.
-  // A gesture's handlers are no effect, so the catching up is left to the effect below.
-  const release = () => {
-    busy.current = false;
-    if (pending.current !== null) setCaughtUp((n) => n + 1);
-  };
-
   const sync = useEffectEvent((dest: Dest) => {
-    // A change that arrives mid-motion waits its turn; the stack and the address must end up agreeing.
-    if (busy.current) {
-      pending.current = dest;
-      return;
+    // A navigation that arrives mid-motion interrupts the active animation cleanly so rapid taps
+    // never queue behind an outgoing transition.
+    const interrupted = busy.current;
+    if (interrupted) {
+      abortMotion();
+      const currentTop = nodes.current.get(topOf(viewRef.current.logical).key);
+      if (currentTop !== undefined) {
+        currentTop.hidden = false;
+        currentTop.style.display = "";
+      }
     }
     const intent = takeNavigationIntent();
     // Nobody announced it (the browser's back or forward, a pasted link): a screen already under
     // the top pops back to; anything else starts over.
     const plan = planGo(viewRef.current.logical, dest, { mode: intent?.mode ?? "tab", desktop });
     if (plan.motion === "none" || plan.from === null || plan.to === null) {
-      if (plan.state !== viewRef.current.logical) {
-        // Only the query string moved (the archive's search): the screen stays and redraws.
-        commit({ ...viewRef.current, logical: plan.state });
+      if (interrupted || plan.state !== viewRef.current.logical) {
+        // Only the query string moved, or an interrupted motion returned to the current screen.
+        commit({ logical: plan.state, leaving: [], moving: [] });
       } else {
         scrollToTop();
       }
@@ -164,32 +190,30 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     job.current = { plan, shared: intent?.shared ?? null };
     const before = viewRef.current;
     const toKey = plan.to.key;
-    const fresh = !stageMountedEntries(before.logical.entries, before.leaving).some((entry) => entry.key === toKey);
+    const fresh = !before.logical.entries.some((entry) => entry.key === toKey);
     const held = [topOf(before.logical).key, ...(fresh ? [toKey] : [])];
     commit({ logical: plan.state, leaving: plan.drop, moving: [plan.from.key, toKey], held });
   });
 
-  useEffect(() => {
-    const next = pending.current;
-    pending.current = null;
-    if (next !== null) sync(next);
-  }, [caughtUp]);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dest = destOf(location.pathname, location.searchStr);
     if (dest !== null) sync(dest);
   }, [location.pathname, location.searchStr]);
 
   // The frame around the stage follows the stack.
   const report = useEffectEvent(onStack);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const entries = view.logical.entries;
     report({ root: (entries[0] as StackEntry).id, top: topOf(view.logical).id, depth: entries.length });
   }, [view.logical]);
 
   useEffect(() => {
     window.addEventListener(SCROLL_TOP_EVENT, scrollToTop);
-    return () => window.removeEventListener(SCROLL_TOP_EVENT, scrollToTop);
+    return () => {
+      window.removeEventListener(SCROLL_TOP_EVENT, scrollToTop);
+      activeMotion.current?.abort();
+      activeMotion.current = null;
+    };
   }, []);
 
   // The routes ask what is on the stage before the next tap's loader runs, so this is current by then.
@@ -210,6 +234,7 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
   useEffect(() => {
     const v = viewRef.current;
     if (desktop && v.logical.entries.length > 1) {
+      if (busy.current) abortMotion();
       commit({ logical: { ...v.logical, entries: [topOf(v.logical)] }, leaving: [], moving: [] });
     }
   }, [desktop]);
@@ -280,27 +305,47 @@ export function Stage({ onStack }: { onStack: (info: StackInfo) => void }) {
     s.under.style.transform = "";
     shadeEl.style.opacity = "";
     busy.current = true;
+    const controller = new AbortController();
+    activeMotion.current = controller;
+    const { signal } = controller;
     const v = viewRef.current;
     if (swipeCommits(progress, velocity)) {
       const plan = planPop(v.logical);
       commit({ logical: plan.state, leaving: plan.drop, moving: v.moving, held: [topOf(v.logical).key] });
-      await slide(s.top, s.under, shadeEl, s.width, -1, progress);
+      await slide(s.top, s.under, shadeEl, s.width, -1, progress, signal);
+      if (signal.aborted) return;
+      if (activeMotion.current === controller) activeMotion.current = null;
       commit({ logical: plan.state, leaving: [], moving: [] });
-      release();
+      busy.current = false;
       // The address follows the stack; the change finds the stack already there and does nothing.
       router.history.back();
     } else {
       const frame = swipeFrame(progress, s.width);
-      await Promise.all([
-        animate(s.top, [{ transform: `translateX(${frame.top}px)` }, { transform: "none" }], { duration: 360 }).finished,
-        animate(s.under, [{ transform: `translateX(${frame.under}px)` }, { transform: `translateX(${-s.width * 0.28}px)` }], { duration: 360 }).finished,
-        animate(shadeEl, [{ opacity: frame.shade }, { opacity: 0.32 }], { duration: 360 }).finished,
+      const anims = [
+        animate(s.top, [{ transform: `translateX(${frame.top}px)` }, { transform: "none" }], { duration: SLIDE_MS }),
+        animate(s.under, [{ transform: `translateX(${frame.under}px)` }, { transform: `translateX(${-s.width * 0.28}px)` }], { duration: SLIDE_MS }),
+        animate(shadeEl, [{ opacity: frame.shade }, { opacity: 0.32 }], { duration: SLIDE_MS }),
+      ];
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<void>((resolve) => {
+        onAbort = () => {
+          for (const animation of anims) animation.cancel();
+          resolve();
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      await Promise.race([
+        Promise.all(anims.map((animation) => animation.finished)).then(() => undefined, () => undefined),
+        aborted,
       ]);
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+      if (signal.aborted) return;
+      if (activeMotion.current === controller) activeMotion.current = null;
       settle(s.top, s.under, shadeEl);
       for (const n of [s.top, s.under, shadeEl]) n.style.zIndex = "";
       s.top.style.boxShadow = "";
       commit({ ...viewRef.current, moving: [] });
-      release();
+      busy.current = false;
     }
   };
 

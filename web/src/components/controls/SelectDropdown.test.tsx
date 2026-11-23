@@ -169,4 +169,39 @@ describe("SelectDropdown", () => {
     expect(value()).toBe("name");
     expect(container.querySelector('[role="listbox"]')).toBeNull();
   });
+
+  it("flips upward and caps max-height when opened near the bottom bar on a phone", async () => {
+    const bnav = document.createElement("nav");
+    bnav.className = "bnav";
+    bnav.getBoundingClientRect = () => ({ top: 760, bottom: 820, left: 0, right: 390, width: 390, height: 60, x: 0, y: 760, toJSON: () => ({}) }) as DOMRect;
+    document.body.append(bnav);
+    const prevHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 820 });
+    try {
+      const trigger = await mount();
+      trigger.getBoundingClientRect = () => ({ top: 690, bottom: 734, left: 16, right: 220, width: 204, height: 44, x: 16, y: 690, toJSON: () => ({}) }) as DOMRect;
+      await click(trigger);
+      const menu = container?.querySelector<HTMLElement>('[role="listbox"]');
+      expect(menu?.classList.contains("select-dropdown-menu--up")).toBe(true);
+      expect(menu?.style.maxHeight).toBe("260px");
+    } finally {
+      bnav.remove();
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: prevHeight });
+    }
+  });
+
+  it("caps max-height to remaining viewport room when space is tight above and below", async () => {
+    const prevHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 300 });
+    try {
+      const trigger = await mount();
+      trigger.getBoundingClientRect = () => ({ top: 100, bottom: 140, left: 16, right: 220, width: 204, height: 40, x: 16, y: 100, toJSON: () => ({}) }) as DOMRect;
+      await click(trigger);
+      const menu = container?.querySelector<HTMLElement>('[role="listbox"]');
+      expect(menu?.classList.contains("select-dropdown-menu--up")).toBe(false);
+      expect(menu?.style.maxHeight).toBe("148px");
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: prevHeight });
+    }
+  });
 });

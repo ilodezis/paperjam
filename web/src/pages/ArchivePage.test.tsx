@@ -374,6 +374,36 @@ describe("ArchivePage toolbar", () => {
     });
     expect(document.querySelector("[role=dialog]")).toBeNull();
   });
+
+  it("hands focus to the search input after picking an example even while the sheet exit animation is still running", async () => {
+    const prevAnimate = Element.prototype.animate;
+    let calls = 0;
+    Element.prototype.animate = (() => {
+      calls += 1;
+      // Hold closing animations (after the first two opening animations) so the dialog stays mounted briefly.
+      return { finished: calls > 2 ? new Promise<void>(() => undefined) : Promise.resolve(), cancel: () => undefined };
+    }) as unknown as Element["animate"];
+    try {
+      await render("q=rent");
+      const filtersBtn = button("Filters");
+      filtersBtn.focus();
+      await click(filtersBtn);
+      const dialog = await vi.waitFor(() => {
+        const found = document.querySelector<HTMLElement>("[role=dialog]");
+        if (!found) throw new Error("no dialog");
+        return found;
+      });
+      const example = Array.from(dialog.querySelectorAll<HTMLButtonElement>(".syntax-example")).find((item) => item.textContent?.includes("has:attention"));
+      await click(example!);
+
+      const input = container?.querySelector<HTMLInputElement>(".search-form input");
+      expect(input?.value).toBe("rent has:attention");
+      expect(input?.closest("[inert]")).toBeNull();
+      expect(document.activeElement).toBe(input);
+    } finally {
+      Element.prototype.animate = prevAnimate;
+    }
+  });
 });
 
 describe("ArchivePage selection state", () => {
