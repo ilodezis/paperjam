@@ -19,8 +19,13 @@ to [Semantic Versioning](https://semver.org/).
 - Inline display-name and administrator role editing in **Settings → Users**.
 - Manual person relink action ("Match documents again") in **People & organizations**.
 - `has:expiring` and `due:<…` filter hints in the archive search syntax sheet.
+- MCP tools `list_shares` and `revoke_share`: an agent can see which share links of a document still work and stop one, the same as the web UI. Revoking a link that already stopped is fine.
+- MCP `get_page_image` takes `pages` (1 to 4 different page numbers) next to `page` and returns all the images in one call, in the order asked. Giving both, neither, a repeated or empty list, or more than four pages is refused with `invalid_arguments`, and a page without an image fails the whole call with `page_not_found`. `page` answers exactly as before.
+- MCP `update_document` takes `dismiss_attention`, the same key as `PATCH /api/v1/documents/{id}`, to clear attention flags the agent checked against the scan.
 
 ### Changed
+- MCP: deleting a tag and merging people or correspondents moved from `manage_taxonomy` into a new `remove_or_merge_taxonomy` tool marked `destructiveHint: true`. `manage_taxonomy` now only creates and edits and is marked non-destructive, so clients can run it without asking; it answers the three moved actions with an `invalid_arguments` error that names the new tool. `revoke_share` is marked destructive as well.
+- MCP `tools/list` is marked cacheable by any client (`cacheScope: public`): every caller gets the same contract.
 - **Settings** is reorganised by task: Account (appearance, language, password, passkeys), Processing (archive summary, LLM spend against the monthly budget, queue, LLM enrichment), Document intake (watched folder, email), Document types, Connections (connected apps, API tokens, calendar link) and Users. Sections are tabs in the same style as People & organizations (scrolling sideways on a phone); the last one opened is remembered for the browser session, and the handwriting model field shows only while handwriting re-reading is on.
 - Environment variables for LLM enrichment, inbound email intake, calendar lead days, and watched inbox polling (`PAPERJAM_INBOX_USER`, `PAPERJAM_INBOX_INTERVAL_SECS`) now serve as startup defaults and fallback values beneath SQLite overrides saved from **Settings** (`Web UI / SQLite override > environment variable > built-in default`).
 

@@ -32,6 +32,8 @@ pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 /// [`MAX_UPLOAD_BYTES`], so oversized input is refused before decoding.
 const MAX_ENCODED_BYTES: usize = MAX_UPLOAD_BYTES.div_ceil(3) * 4;
 const PAGE_IMAGE_MIME: &str = "image/webp";
+/// `get_page_image` returns at most this many pages per call.
+const MAX_PAGES_PER_CALL: usize = 4;
 
 /// The REST routes (relative to `/api/v1`) that offer the same capability as a
 /// tool. `tests/mcp_parity.rs` holds this table against the REST router: every
@@ -69,6 +71,14 @@ pub const REST_ROUTES: &[ToolRoutes] = &[
         rest: &[(Method::POST, "/documents/{id}/shares")],
     },
     ToolRoutes {
+        tool: "list_shares",
+        rest: &[(Method::GET, "/documents/{id}/shares")],
+    },
+    ToolRoutes {
+        tool: "revoke_share",
+        rest: &[(Method::DELETE, "/shares/{id}")],
+    },
+    ToolRoutes {
         tool: "list_taxonomy",
         rest: &[(Method::GET, "/taxonomy")],
     },
@@ -95,18 +105,24 @@ pub const REST_ROUTES: &[ToolRoutes] = &[
             (Method::PATCH, "/people/{id}"),
             (Method::POST, "/people/{id}/aliases"),
             (Method::DELETE, "/people/{id}/aliases"),
-            (Method::POST, "/people/{id}/merge"),
             (Method::POST, "/people/{id}/relink"),
             (Method::POST, "/correspondents"),
             (Method::PATCH, "/correspondents/{id}"),
             (Method::POST, "/correspondents/{id}/aliases"),
             (Method::DELETE, "/correspondents/{id}/aliases"),
-            (Method::POST, "/correspondents/{id}/merge"),
             (Method::POST, "/tags"),
             (Method::PATCH, "/tags/{id}"),
-            (Method::DELETE, "/tags/{id}"),
             (Method::POST, "/types"),
             (Method::PATCH, "/types/{id}"),
+        ],
+    },
+    // Deleting a tag and merging people or correspondents cannot be undone.
+    ToolRoutes {
+        tool: "remove_or_merge_taxonomy",
+        rest: &[
+            (Method::POST, "/people/{id}/merge"),
+            (Method::POST, "/correspondents/{id}/merge"),
+            (Method::DELETE, "/tags/{id}"),
         ],
     },
     ToolRoutes {
@@ -186,12 +202,15 @@ pub async fn call(caller: &Caller<'_>, name: &str, args: Args) -> Option<Result<
         "get_page_image" => get_page_image(caller, args).await,
         "get_download_link" => get_download_link(caller, args).await,
         "share_document" => share_document(caller, args).await,
+        "list_shares" => list_shares(caller, args).await,
+        "revoke_share" => revoke_share(caller, args).await,
         "list_taxonomy" => list_taxonomy(caller, args).await,
         "upload_document" => upload_document(caller, args).await,
         "create_upload_link" => create_upload_link(caller, args).await,
         "update_document" => update_document(caller, args).await,
         "reprocess_document" => reprocess_document(caller, args).await,
         "manage_taxonomy" => manage_taxonomy(caller, args).await,
+        "remove_or_merge_taxonomy" => remove_or_merge_taxonomy(caller, args).await,
         "trash_document" => set_trashed(caller, args, true).await,
         "restore_document" => set_trashed(caller, args, false).await,
         "get_stats" => get_stats(caller, args).await,
@@ -272,30 +291,77 @@ async fn get_document(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
 #[serde(deny_unknown_fields)]
 struct PageArgs {
     id: DocumentId,
-    page: u32,
+    page: Option<u32>,
+    pages: Option<Vec<u32>>,
+}
+
+/// The page numbers a `get_page_image` call asks for, and whether they came as
+/// the list form (which answers with a `pages` array).
+fn requested_pages(args: &PageArgs) -> Result<(Vec<u32>, bool)> {
+    let (pages, listed) = match (args.page, &args.pages) {
+        (Some(_), Some(_)) => {
+            return Err(invalid_arguments("give either page or pages, not both"));
+        }
+        (None, None) => return Err(invalid_arguments("give page or pages")),
+        (Some(page), None) => (vec![page], false),
+        (None, Some(pages)) => (pages.clone(), true),
+    };
+    if pages.is_empty() || pages.len() > MAX_PAGES_PER_CALL {
+        return Err(invalid_arguments(format!(
+            "pages takes 1 to {MAX_PAGES_PER_CALL} page numbers"
+        )));
+    }
+    if pages.contains(&0) {
+        return Err(invalid_arguments("page counts from 1"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(repeated) = pages.iter().find(|p| !seen.insert(**p)) {
+        return Err(invalid_arguments(format!(
+            "pages lists page {repeated} more than once"
+        )));
+    }
+    Ok((pages, listed))
 }
 
 async fn get_page_image(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
     let args: PageArgs = parse(args)?;
-    if args.page == 0 {
-        return Err(invalid_arguments("page counts from 1"));
-    }
+    let (pages, listed) = requested_pages(&args)?;
     // Confirms the document exists (and the caller may see it) first.
     documents::original_file(&caller.ctx(), args.id).await?;
-    let path = caller
-        .app
-        .files
-        .derived_path(args.id, &format!("page-{}.webp", args.page));
-    let bytes = tokio::fs::read(&path).await.map_err(|_| {
-        ServiceError::not_found(
-            "page_not_found",
-            "this page has no image: it does not exist or has not been rendered yet",
-        )
-    })?;
-    Ok(ToolOutput {
-        structured: json!({"id": args.id, "page": args.page, "mime_type": PAGE_IMAGE_MIME}),
-        extra: vec![ContentBlock::image(STANDARD.encode(bytes), PAGE_IMAGE_MIME)],
-    })
+    // Every page is read before anything is returned: one that cannot be
+    // shown fails the whole call instead of dropping out unnoticed.
+    let mut extra = Vec::with_capacity(pages.len());
+    for page in &pages {
+        let path = caller
+            .app
+            .files
+            .derived_path(args.id, &format!("page-{page}.webp"));
+        let bytes = tokio::fs::read(&path).await.map_err(|_| {
+            ServiceError::not_found(
+                "page_not_found",
+                if listed {
+                    format!(
+                        "page {page} has no image: it does not exist or has not been rendered yet"
+                    )
+                } else {
+                    "this page has no image: it does not exist or has not been rendered yet"
+                        .to_string()
+                },
+            )
+            .with_details(json!({"page": page}))
+        })?;
+        extra.push(ContentBlock::image(STANDARD.encode(bytes), PAGE_IMAGE_MIME));
+    }
+    let structured = if listed {
+        let entries: Vec<Value> = pages
+            .iter()
+            .map(|page| json!({"page": page, "mime_type": PAGE_IMAGE_MIME}))
+            .collect();
+        json!({"id": args.id, "pages": entries})
+    } else {
+        json!({"id": args.id, "page": pages[0], "mime_type": PAGE_IMAGE_MIME})
+    };
+    Ok(ToolOutput { structured, extra })
 }
 
 #[derive(Deserialize)]
@@ -337,6 +403,24 @@ async fn share_document(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
     )
     .await?;
     ToolOutput::json(to_value(&share)?)
+}
+
+async fn list_shares(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
+    let args: IdArgs = parse(args)?;
+    let live = shares::list_shares(&caller.ctx(), &caller.base_url, args.id).await?;
+    ToolOutput::json(json!({"id": args.id, "shares": to_value(&live)?}))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeArgs {
+    id: String,
+}
+
+async fn revoke_share(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
+    let args: RevokeArgs = parse(args)?;
+    shares::revoke_share(&caller.ctx(), &args.id).await?;
+    ToolOutput::json(json!({"id": args.id, "revoked": true}))
 }
 
 async fn list_taxonomy(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
@@ -426,6 +510,7 @@ const PATCH_KEYS: &[&str] = &[
     "fields",
     "summary",
     "local_only",
+    "dismiss_attention",
 ];
 
 async fn update_document(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
@@ -485,12 +570,18 @@ enum Action {
     UpdateCorrespondent,
     CreateTag,
     RenameTag,
-    DeleteTag,
     CreateType,
     UpdateType,
+    RelinkPerson,
+}
+
+/// What `remove_or_merge_taxonomy` does: the vocabulary changes that cannot be undone.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RemoveAction {
+    DeleteTag,
     MergePeople,
     MergeCorrespondents,
-    RelinkPerson,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -506,8 +597,6 @@ struct ManageArgs {
     action: Action,
     kind: Option<Kind>,
     id: Option<String>,
-    into_id: Option<String>,
-    from_id: Option<String>,
     name: Option<String>,
     alias: Option<String>,
     #[serde(default)]
@@ -517,6 +606,15 @@ struct ManageArgs {
     key: Option<String>,
     labels: Option<Labels>,
     fields: Option<Vec<FieldDef>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveArgs {
+    action: RemoveAction,
+    id: Option<String>,
+    into_id: Option<String>,
+    from_id: Option<String>,
 }
 
 fn need<'a, T>(value: &'a Option<T>, argument: &str, action: &str) -> Result<&'a T> {
@@ -539,6 +637,21 @@ fn item(kind: &str, view: &impl serde::Serialize, action: &str) -> Result<ToolOu
 }
 
 async fn manage_taxonomy(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
+    // The destructive actions moved to their own tool; say so instead of
+    // answering with an unknown-variant error.
+    if let Some(action) = args
+        .as_ref()
+        .and_then(|map| map.get("action"))
+        .and_then(Value::as_str)
+        && matches!(
+            action,
+            "delete_tag" | "merge_people" | "merge_correspondents"
+        )
+    {
+        return Err(invalid_arguments(format!(
+            "{action} moved to remove_or_merge_taxonomy"
+        )));
+    }
     let a: ManageArgs = parse(args)?;
     let ctx = caller.ctx();
     match a.action {
@@ -631,20 +744,6 @@ async fn manage_taxonomy(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> 
             let view = taxonomy::rename_tag(&ctx, id, need(&a.name, "name", "rename_tag")?).await?;
             item("tag", &view, "rename_tag")
         }
-        Action::DeleteTag => {
-            let id: TagId = need_id(&a.id, "id", "delete_tag")?;
-            let deleted = taxonomy::delete_tag(&ctx, id).await?;
-            ToolOutput::json(json!({
-                "action": "delete_tag",
-                "kind": "tag",
-                "item": {
-                    "deleted": true,
-                    "id": deleted.id,
-                    "name": deleted.name,
-                    "documents_detached": deleted.documents_detached,
-                },
-            }))
-        }
         Action::CreateType => {
             let view = taxonomy::create_type(
                 &ctx,
@@ -670,18 +769,39 @@ async fn manage_taxonomy(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> 
             .await?;
             item("type", &view, "update_type")
         }
-        Action::MergePeople => {
-            let into: PersonId = need_id(&a.into_id, "into_id", "merge_people")?;
-            let from: PersonId = need_id(&a.from_id, "from_id", "merge_people")?;
-            let view = taxonomy::merge_people(&ctx, into, from).await?;
-            item("person", &view, "merge_people")
-        }
         Action::RelinkPerson => {
             let id: PersonId = need_id(&a.id, "id", "relink_person")?;
             let view = taxonomy::relink_person(&ctx, id).await?;
             item("person", &view, "relink_person")
         }
-        Action::MergeCorrespondents => {
+    }
+}
+
+async fn remove_or_merge_taxonomy(caller: &Caller<'_>, args: Args) -> Result<ToolOutput> {
+    let a: RemoveArgs = parse(args)?;
+    let ctx = caller.ctx();
+    match a.action {
+        RemoveAction::DeleteTag => {
+            let id: TagId = need_id(&a.id, "id", "delete_tag")?;
+            let deleted = taxonomy::delete_tag(&ctx, id).await?;
+            ToolOutput::json(json!({
+                "action": "delete_tag",
+                "kind": "tag",
+                "item": {
+                    "deleted": true,
+                    "id": deleted.id,
+                    "name": deleted.name,
+                    "documents_detached": deleted.documents_detached,
+                },
+            }))
+        }
+        RemoveAction::MergePeople => {
+            let into: PersonId = need_id(&a.into_id, "into_id", "merge_people")?;
+            let from: PersonId = need_id(&a.from_id, "from_id", "merge_people")?;
+            let view = taxonomy::merge_people(&ctx, into, from).await?;
+            item("person", &view, "merge_people")
+        }
+        RemoveAction::MergeCorrespondents => {
             let into: CorrespondentId = need_id(&a.into_id, "into_id", "merge_correspondents")?;
             let from: CorrespondentId = need_id(&a.from_id, "from_id", "merge_correspondents")?;
             let view = taxonomy::merge_correspondents(&ctx, into, from).await?;

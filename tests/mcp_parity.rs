@@ -33,9 +33,6 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("POST", "/ingest/email"),
     ("GET", "/shared/{token}/pages/{file}"),
     ("GET", "/shared/{token}/download"),
-    // Live share links are reviewed and revoked by people in the web UI.
-    ("GET", "/documents/{id}/shares"),
-    ("DELETE", "/shares/{id}"),
     // Agents can never purge or empty the trash.
     ("DELETE", "/documents/{id}"),
     ("DELETE", "/trash"),

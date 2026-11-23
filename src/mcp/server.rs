@@ -7,8 +7,8 @@ use axum::http::{self, header};
 use rmcp::ErrorData as McpError;
 use rmcp::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListResourcesResult, ListToolsResult, MetaObject, PaginatedRequestParams,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListResourcesResult, ListToolsResult, MetaObject, PaginatedRequestParams,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
     ResourceContents, ServerCapabilities, ServerConfig, Tool,
 };
@@ -95,7 +95,9 @@ impl ServerHandler for PaperjamMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(contract().tools.clone()))
+        // The same contract for every caller, so any client or proxy may cache it.
+        Ok(ListToolsResult::with_all_items(contract().tools.clone())
+            .with_cache_scope(CacheScope::Public))
     }
 
     async fn list_resources(

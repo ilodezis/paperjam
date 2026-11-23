@@ -339,6 +339,62 @@ fn public_link_tools_ask_the_client_to_confirm() {
 
 // --- tests against the server -----------------------------------------------------
 
+/// Annotations say what a tool can undo, so a client can wave routine edits
+/// through and stop only for the calls that destroy something.
+#[test]
+fn destructive_hints_follow_what_a_tool_can_undo() {
+    let hint = |name: &str, key: &str| tool_named(name)["annotations"][key].clone();
+    // Creating and editing vocabulary asks nothing of the user ...
+    assert_eq!(hint("manage_taxonomy", "destructiveHint"), false);
+    // ... deleting a tag and merging cannot be taken back.
+    assert_eq!(hint("remove_or_merge_taxonomy", "destructiveHint"), true);
+    assert_eq!(hint("revoke_share", "destructiveHint"), true);
+    assert_eq!(hint("revoke_share", "idempotentHint"), true);
+    assert_eq!(hint("list_shares", "readOnlyHint"), true);
+    assert_eq!(hint("list_shares", "destructiveHint"), false);
+
+    let manage = tool_named("manage_taxonomy");
+    let offered: Vec<&str> = manage["inputSchema"]["properties"]["action"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    for moved in ["delete_tag", "merge_people", "merge_correspondents"] {
+        assert!(
+            !offered.contains(&moved),
+            "{moved} is still in manage_taxonomy"
+        );
+    }
+    let remove = tool_named("remove_or_merge_taxonomy");
+    assert_eq!(
+        remove["inputSchema"]["properties"]["action"]["enum"],
+        json!(["delete_tag", "merge_people", "merge_correspondents"])
+    );
+}
+
+/// `get_page_image` keeps `page` and takes `pages`; exactly one of them.
+#[test]
+fn get_page_image_takes_page_or_pages() {
+    let tool = tool_named("get_page_image");
+    let properties = &tool["inputSchema"]["properties"];
+    assert_eq!(properties["page"]["minimum"], 1);
+    assert_eq!(properties["pages"]["maxItems"], 4);
+    assert_eq!(properties["pages"]["uniqueItems"], true);
+    // Neither is required by the schema: the server asks for exactly one.
+    assert_eq!(tool["inputSchema"]["required"], json!(["id"]));
+}
+
+/// The patch carries `dismiss_attention`, the same key as the REST patch.
+#[test]
+fn update_document_can_dismiss_attention() {
+    let tool = tool_named("update_document");
+    assert_eq!(
+        tool["inputSchema"]["properties"]["dismiss_attention"]["type"],
+        "array"
+    );
+}
+
 #[tokio::test]
 async fn unauthenticated_request_gets_401_with_resource_metadata() {
     let (_env, server, _mcp) = start();
@@ -522,6 +578,8 @@ async fn every_tool_answers_within_output_schema() {
         ("get_page_image", json!({"id": UNKNOWN_ID, "page": 1})),
         ("get_download_link", json!({"id": UNKNOWN_ID})),
         ("share_document", json!({"id": UNKNOWN_ID})),
+        ("list_shares", json!({"id": UNKNOWN_ID})),
+        ("revoke_share", json!({"id": "no-such-share"})),
         ("list_taxonomy", json!({})),
         ("create_upload_link", json!({})),
         ("update_document", json!({"id": UNKNOWN_ID, "title": "x"})),
@@ -529,6 +587,10 @@ async fn every_tool_answers_within_output_schema() {
         (
             "manage_taxonomy",
             json!({"action": "create_tag", "name": "empty-db"}),
+        ),
+        (
+            "remove_or_merge_taxonomy",
+            json!({"action": "delete_tag", "id": UNKNOWN_ID}),
         ),
         ("trash_document", json!({"id": UNKNOWN_ID})),
         ("restore_document", json!({"id": UNKNOWN_ID})),
@@ -631,10 +693,34 @@ async fn every_tool_answers_within_output_schema() {
         .unwrap()
         .to_string();
     check(
-        "manage_taxonomy",
+        "remove_or_merge_taxonomy",
         mcp.call(
-            "manage_taxonomy",
+            "remove_or_merge_taxonomy",
             json!({"action": "merge_people", "into_id": person_id, "from_id": second_id}),
+        )
+        .await,
+        &mut succeeded,
+    )
+    .ok();
+    let second_correspondent = mcp
+        .call(
+            "manage_taxonomy",
+            json!({"action": "create_correspondent", "name": "Test Bank Duplicate"}),
+        )
+        .await;
+    let second_correspondent_id = second_correspondent.ok()["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    check(
+        "remove_or_merge_taxonomy",
+        mcp.call(
+            "remove_or_merge_taxonomy",
+            json!({
+                "action": "merge_correspondents",
+                "into_id": correspondent_id,
+                "from_id": second_correspondent_id,
+            }),
         )
         .await,
         &mut succeeded,
@@ -647,10 +733,24 @@ async fn every_tool_answers_within_output_schema() {
         )
         .await;
     let extra_tag_id = extra_tag.ok()["item"]["id"].as_str().unwrap().to_string();
-    check(
-        "manage_taxonomy",
-        mcp.call(
+    // The destructive actions are not offered by manage_taxonomy any more.
+    let moved = mcp
+        .call(
             "manage_taxonomy",
+            json!({"action": "delete_tag", "id": extra_tag_id}),
+        )
+        .await;
+    assert_eq!(moved.error_code(), "invalid_arguments");
+    assert!(
+        moved.text_json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("remove_or_merge_taxonomy")
+    );
+    check(
+        "remove_or_merge_taxonomy",
+        mcp.call(
+            "remove_or_merge_taxonomy",
             json!({"action": "delete_tag", "id": extra_tag_id}),
         )
         .await,
@@ -685,6 +785,24 @@ async fn every_tool_answers_within_output_schema() {
         &mut succeeded,
     );
     assert!(cleared.ok()["summary"].is_null());
+    // Dismissing attention flags is part of the patch: a flag the document
+    // does not carry is a no-op, an unknown one is refused.
+    check(
+        "update_document",
+        mcp.call(
+            "update_document",
+            json!({"id": ru, "dismiss_attention": ["illegible"]}),
+        )
+        .await,
+        &mut succeeded,
+    );
+    let bogus = mcp
+        .call(
+            "update_document",
+            json!({"id": ru, "dismiss_attention": ["bogus_flag"]}),
+        )
+        .await;
+    assert_eq!(bogus.error_code(), "invalid_attention_flag");
 
     let doc = check(
         "get_document",
@@ -729,7 +847,7 @@ async fn every_tool_answers_within_output_schema() {
         mcp.call("get_download_link", json!({"id": ru})).await,
         &mut succeeded,
     );
-    check(
+    let shared = check(
         "share_document",
         mcp.call(
             "share_document",
@@ -738,6 +856,25 @@ async fn every_tool_answers_within_output_schema() {
         .await,
         &mut succeeded,
     );
+    let share_id = shared.ok()["id"].as_str().unwrap().to_string();
+    let listed = check(
+        "list_shares",
+        mcp.call("list_shares", json!({"id": ru})).await,
+        &mut succeeded,
+    );
+    assert_eq!(listed.ok()["shares"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.ok()["shares"][0]["id"], share_id.as_str());
+    assert_eq!(listed.ok()["shares"][0]["url"], shared.ok()["url"]);
+    let revoked = check(
+        "revoke_share",
+        mcp.call("revoke_share", json!({"id": share_id})).await,
+        &mut succeeded,
+    );
+    assert_eq!(revoked.ok()["revoked"], true);
+    // Revoking again is fine, and the link is gone from the list.
+    mcp.call("revoke_share", json!({"id": share_id})).await.ok();
+    let after = mcp.call("list_shares", json!({"id": ru})).await;
+    assert!(after.ok()["shares"].as_array().unwrap().is_empty());
     check(
         "create_upload_link",
         mcp.call("create_upload_link", json!({})).await,
@@ -767,6 +904,55 @@ async fn every_tool_answers_within_output_schema() {
         "{:?}",
         image.content
     );
+    assert_eq!(image.ok()["page"], 1);
+
+    // Several pages in one call: one image per page, in the order asked.
+    let both = check(
+        "get_page_image",
+        mcp.call("get_page_image", json!({"id": ru, "pages": [2, 1]}))
+            .await,
+        &mut succeeded,
+    );
+    assert_eq!(
+        both.ok()["pages"],
+        json!([
+            {"page": 2, "mime_type": "image/webp"},
+            {"page": 1, "mime_type": "image/webp"},
+        ])
+    );
+    assert!(both.ok().get("page").is_none());
+    assert_eq!(
+        both.content.iter().filter(|c| c["type"] == "image").count(),
+        2
+    );
+
+    // A bad page request is a clear error, never a partial answer.
+    for (args, code) in [
+        (json!({"id": ru}), "invalid_arguments"),
+        (
+            json!({"id": ru, "page": 1, "pages": [1]}),
+            "invalid_arguments",
+        ),
+        (json!({"id": ru, "pages": []}), "invalid_arguments"),
+        (json!({"id": ru, "pages": [1, 1]}), "invalid_arguments"),
+        (json!({"id": ru, "pages": [0]}), "invalid_arguments"),
+        (
+            json!({"id": ru, "pages": [1, 2, 3, 4, 5]}),
+            "invalid_arguments",
+        ),
+        (json!({"id": ru, "pages": [1, 99]}), "page_not_found"),
+    ] {
+        let result = mcp.call("get_page_image", args.clone()).await;
+        assert_eq!(result.error_code(), code, "{args}");
+        assert!(
+            result.content.iter().all(|c| c["type"] == "text"),
+            "{args}: an error carries no images"
+        );
+    }
+    let missing = mcp
+        .call("get_page_image", json!({"id": ru, "pages": [1, 99]}))
+        .await;
+    assert_eq!(missing.text_json()["error"]["details"]["page"], 99);
 
     for name in ["trash_document", "restore_document"] {
         check(
