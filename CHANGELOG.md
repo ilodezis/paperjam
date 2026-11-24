@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
 ### Added
 - Database-backed runtime configuration (`app_settings` and `email_intake`) editable live from **Settings** in the web UI with environment-variable fallback and immediate reload (no restart required):
   - **Inbound email intake** (**Settings → Document intake → Email intake**): generate, rotate, and revoke a one-time `pje_…` webhook secret (stored as a SHA-256 hash with a visible prefix), enable or pause intake, edit the sender allowlist, target user, auto-tag, body fallback, and local-only mode, and view the webhook endpoint URL and receipt stats.

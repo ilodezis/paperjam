@@ -3,7 +3,7 @@
   "info": {
     "title": "paperjam",
     "description": "Self-hosted document archive with a first-class MCP server",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "paths": {
     "/auth/login": {

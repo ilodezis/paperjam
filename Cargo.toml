@@ -3,7 +3,7 @@ members = [".", "xtask"]
 
 [package]
 name = "paperjam"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Self-hosted document archive with a first-class MCP server"
 license = "AGPL-3.0-or-later"
