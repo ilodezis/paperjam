@@ -12,7 +12,7 @@
 #   COMPOSE_PROFILES=https  turns that proxy on.
 services:
   paperjam:
-    image: ghcr.io/ilodezis/paperjam:latest
+    image: ghcr.io/ilodezis/paperjam:latest@sha256:bfeb9cade7f062b55162e674edffeced1cd157e2b5c830388b7e4aeeb70369e2
     # To build from source instead, replace the line above with:
     # build: .
     # image: paperjam:local
@@ -48,7 +48,7 @@ services:
   # in .env. Skip it if you already run a reverse proxy.
   caddy:
     profiles: ["https"]
-    image: caddy:2
+    image: caddy:2@sha256:4851e54a46b206517c574821bb5cc67f170d2156041e9fbc4c9193b45e84a75b
     restart: unless-stopped
     command: caddy reverse-proxy --from ${PAPERJAM_DOMAIN:-localhost} --to paperjam:8140
     depends_on:
