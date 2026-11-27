@@ -6,6 +6,7 @@ MCP server built in so your AI agent can find, read and file them.**
 [![Release](https://img.shields.io/github/v/release/ilodezis/paperjam)](https://github.com/ilodezis/paperjam/releases)
 [![CI](https://github.com/ilodezis/paperjam/actions/workflows/ci.yml/badge.svg)](https://github.com/ilodezis/paperjam/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![ilodezis/paperjam MCP server](https://glama.ai/mcp/servers/ilodezis/paperjam/badges/score.svg)](https://glama.ai/mcp/servers/ilodezis/paperjam)
 
 **Website: [paperjam.ilodezis.com](https://paperjam.ilodezis.com)**
 
