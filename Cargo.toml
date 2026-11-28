@@ -61,7 +61,7 @@ rmcp = { version = "3.8.0", default-features = false, features = ["server", "tra
 base64 = "0.23.1"
 # Validates LLM answers against the request schema; no http/file reference
 # resolution (the client never fetches URLs).
-jsonschema = { version = "0.61.0", default-features = false }
+jsonschema = { version = "0.63.0", default-features = false }
 mimalloc = "0.1.52"
 # mimalloc's options (`mi_option_set`); the same library `mimalloc` links.
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
